@@ -1,6 +1,6 @@
 # Introduction
 
-This repo contains various files used in creating my Front Garden Railway on a postage stamp.  The priject is described here:
+This repo contains various files used in creating my Front Garden Railway on a postage stamp.  The project is described here:
 
 http://www.meades.org/railways/garden/garden.html
 
