@@ -8,8 +8,14 @@ Please refer to that page for more information.
 
 # 3D Printed Parts
 
-## `track_bender.blend`
-This Blender file contains one segment of the track blender jig; it should be exported scaled up by 1000.  The exported `.stl` file is also included.  I printed five of these in 0.2&nbsp;mm "fast" resolution on my Prusa MK3 3D printer with 20% in-fill.  See [here](http://www.meades.org/railways/garden/garden.html#rail_preparation) for further instructions on how I used this jig to bend track.
+## `plumbing.blend`
+A small plastic part to fit under a bowl, catching rain water from a down pipe and providing a 3/4&nbsp;inch spigot; exported `.stl` file also included.  See [here](http://www.meades.org/railways/garden/garden.html#plumbing) for how it was used.  It was printed in ASA for UV hardness, 15% in-fill, 0.2&nbsp;mm "speed" resolution on my Prusa MK3 3D printer.
+
+## `radius_1121.crv`
+[VCarve](https://www.vectric.com/products/vcarve/) file for cuttting the 1121&nbsp;mm, 45&nbsp;mm wide, radius curve on a CNC milling machine; see [here](https://www.meades.org/railways/garden/garden.html#curve) for how it was done.
+
+## `viaduct_experiment_*.blend`
+Blender files for the first experiment in 3D printing a viaduct for the railway.  See [here](https://www.meades.org/railways/garden/garden.html#viaduct_experiment) for how these files were printed.
 
 ## `conduit_connector.blend`
 A set of small plastic parts that can be placed inside these 60&nbsp;cm diameter M20-threaded metal conduit fittings available from RS:
