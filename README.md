@@ -37,7 +37,7 @@ The moulds are all printed in PVB with 10% in-fill: I used RepRapper PVB, which 
 
 The braces and joiners should all ideally be printed in ASA with 25% in-fill, the floors with 10% in-fill (to reduce the chance of warping), though in a pinch PLA would do for both as ASA in such large, high-density, prints can warp quite badly.
 
-The wall should be printed in ASA that, as near as possible, matches the colour of the grout being poured into the mould, or that painting it to do so is trivial.  The wall is in two parts so as to ease placement for printing; the outer part should be Araldited to the inner part once the inner part is in position, to lock any bend into place.
+The wall should be printed in ASA that, as near as possible, matches the colour of the grout being poured into the mould, or that painting it to do so is trivial.  The wall is in two parts so as to ease placement for printing; the outer part should be Araldited to the inner part once the inner part is in position, to lock any bend into place.  Use a 1.5&nbsp;mm drill in a small bit to clear out the 1.5&nbsp;mm alignment holes.
 
 A resoluton of 0.2&nbsp;mm "speed" is fine for all parts, though for the walls it is useful to apply variable print height and increase the resolution to max for the layers of the wall pattern.
 
