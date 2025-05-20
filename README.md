@@ -38,7 +38,7 @@ The contents of the [viaduct_final](/viaduct_final) directory are the final desi
 
 The moulds are all printed in PVB with 10% in-fill: I used RepRapper PVB, which is priced very nicely (when you need 10&nbsp;kg of filament that is important) but PVB is highly hygroscopy, definitely needs a dehumidifier (I contained the spool in an [eSun eBox Lite](https://www.esun3d.com/ebox_lite-product/)).  RepRapper PVB should be printed at a relatively low nozzle temperature (195&nbsp;C first layer, then 185&nbsp;C) to avoid stringing, 75&nbsp;C on the heat bed.  A brim is advisable, to make sure the part doesn't come away from the heat-bed, and supports should be included everywhere on the upper moulds as those are awkward shapes (supports are not required on the lower moulds).  On the upper moulds some manual tweaking may be required to the mating faces, using a craft knife, as they are quite a tight fit.
 
-The braces and joiners should all ideally be printed in ASA with 25% in-fill, the floors with 10% in-fill (to reduce the chance of warping), though in a pinch PLA would do for both as ASA in such large, high-density, prints can warp quite badly.
+I initially printed the joiners in ASA with 25% in-fill, intending to re-use them, but they proved quite difficult to extract from the set grout and so I reverted to printing them in PVB.  The braces and floors I did print in ASA though, the braces with 25% in-fill, the floors with just 10% in-fill (to reduce the chance of warping), though in a pinch PLA would do for both as ASA in such large, high-density, prints can warp quite badly.
 
 The wall should be printed in ASA that, as near as possible, matches the colour of the grout being poured into the mould, or that painting it to do so is trivial.  The wall is in two parts so as to ease placement for printing; the outer part should be Araldited to the inner part once the inner part is in position, to lock any bend into place.  Use a 1.5&nbsp;mm drill in a small bit to clear out the 1.5&nbsp;mm alignment holes.
 
@@ -47,7 +47,8 @@ A resoluton of 0.2&nbsp;mm "speed" is fine for all parts, though for the walls i
 Summarizing:
 
 - `viaduct_*_mould_lower.stl`, `viaduct_*_mould_upper_*.stl`: PVB, 10% in-fill, supports everywhere.
-- `viaduct_*_mould_joiner*.stl`, `viaduct_*_mould_brace.stl`: ASA or PLA, 25% in-fill.
+- `viaduct_*_mould_joiner*.stl`: PVB, 25% in-fill.
+- `viaduct_*_mould_brace.stl`: ASA, 25% in-fill.
 - `viaduct_*_mould_upper_floor.stl`: ASA, 10% in-fill.
 - `viaduct_wall_*.stl`: ASA of the right colour, 10% in-fill.
 
