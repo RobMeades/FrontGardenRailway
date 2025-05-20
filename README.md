@@ -11,6 +11,9 @@ Please refer to that page for more information.
 ## `plumbing.blend`
 A small plastic part to fit under a bowl, catching rain water from a down pipe and providing a 3/4&nbsp;inch spigot; exported `.stl` file also included.  See [here](http://www.meades.org/railways/garden/garden.html#plumbing) for how it was used.  It was printed in ASA for UV hardness, 15% in-fill, 0.2&nbsp;mm "speed" resolution on my Prusa MK3 3D printer.
 
+## `down_pipe_cap.blend`
+A plug that can be fitted into the end of a normal-sized (65 mm internal diameter) UK plastic rainwater down-pipe, as used with domestic guttering, to blank it off.  This was used with the lengths of drain-pipe that formed wiring channels through the concrete sections of the front garden railway, closing up the end of the channel for water-proofness (holes should be drilled in the cap as appropriate to let any wiring or conduit through).  It was printed in ASA for UV hardness, 15% in-fill, 0.2&nbsp;mm "speed" resolution on my Prusa MK3 3D printer.
+
 ## `radius_1121.crv`
 [VCarve](https://www.vectric.com/products/vcarve/) file for cuttting the 1121&nbsp;mm, 45&nbsp;mm wide, radius curve on a CNC milling machine; see [here](https://www.meades.org/railways/garden/garden.html#curve) for how it was done.
 
