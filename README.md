@@ -57,5 +57,5 @@ The `viaduct_*_lower.stl` files are included for reference but don't need to be 
 See [here](https://www.meades.org/railways/garden/garden.html#viaduct_manufacture_begins) for pictures of the moulds etc., in use.
 
 ## `supporting_wall.blend`
-Blender file for a supporting wall, including a mould version of the same, `.stl` exports for both at a Blender scale factor of 30.48 also provided. This provides a supporting wall along the back of the dock and should be printed/moulded in the same way as the viaduct, in multiples, cut to size buy slicing off the bottom edge with an angle-grinder.
+Blender file for a supporting wall, including a mould version of the same, `.stl` exports for both at a Blender scale factor of 30.48 also provided.  This provides a supporting wall along the back of the dock.  The mould parts should be printed in PLA, or any material with a little flex in it (10% in-fill and 0.2&nbsp;mm "speed" resolution on my Prusa MK3 3D printer), then strapped together, silicon release agent sprayed in, liquid grout poured in, left for a day to harden and then the mould unstrapped to allow the moulded wall to be removed.  The moulded wall may be cut to the correct height/width by slicing off the bottom/right edge with an angle-grinder.
 
