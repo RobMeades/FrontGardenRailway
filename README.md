@@ -67,3 +67,6 @@ A printable stone wall (plus `.stl` exports at 30.48 scale) that forms a filter 
 
 ## `sump_cap_side_wall.blend`
 This, with the four `.stl` exports at 30.48 scale, is a continuation of `viaduct_wall_*.stl` to be glued along the sides of the curved concrete board that carries the track across the sump cap.  `sump_cap_side_wall_end_?.stl` grade upwards, reducing in height, to match the height of `viaduct_wall_*.stl`.  Should be printed in ASA, 10% in-fill, no supports required brim is advisable to stop the ASA warping away from the build plate.
+
+## `paving.blend`
+What it says really: paving, 450 mm wide slabs, `.stl` export at 30.48 scale.  Should be printed in ASA, 10% in-fill, supports on the build plate, brim advisable to prevent warping.
