@@ -73,3 +73,31 @@ What it says really: paving, 450&nbsp;mm wide slabs, `.stl` export at 30.48 scal
 
 ## `dock_base.blend`
 Components that form the edge of the base of the dock (`.stl` exported at 30.48 scale), similar to `sump_cap_side_wall.blend` but intended to represent wood panels that can be clipped to the side of a 3&nbsp;mm thick dock base.  Should be printed in ASA, 5% in-fill (nice and flexible), no supports required, brim advisable to prevent warping, fastest speed since there is little detail.  For assembly instructions see (here)[https://www.meades.org/railways/garden/garden.html#Dock_Base_Improvements].
+
+## `track-side_path.blend`
+A track-side path that finishes off where the waterfall concrete joins the track-bed concrete and provides a path to access the viewing platform for Sue Falls (plus `.stl` exports at 30.48 scale).  The "Rock Wall" part of this is intended to print a mould for filling with something like [Ultracrete High Flow Precision Grout](https://www.instarmac.co.uk/products/ultracrete/construction-chemicals/hf-high-flow-precision-grout/), in the same way as the viaduct, while the "Track Wall" part is intended for printing directly in ASA (for UV-safety).
+
+The mould (which will initially be marked as not-visible in the Blender file) is a little different here: because the shape is complex the Boolean tools in Blender tend to misbehave so in this case the mould shape entirely encompasses the thing it is moulding, there is no hole.  Once the `rock_wall_mould.stl` file has been imported into your slicer program, cut off the bottom 2&nbsp;mm to make the hole, then of course cut the long mould N (probably six) times with a dovetailing tool in the slicer program to make it fit onto the print-plate.  Print the mould in the cheapest PLA you can find with supports everywhere (the dovetails will need them), no brim, 5% in-fill and the fastest possible printing time.  You will also find `rock_wall_mould_brace_*` objects and `rock_wall_mould_brace_*.stl` files: the dovetail joints in the mould may not be strong enough on their own, so these braces should printed, ideally with more like 15% in-fill, no need for supports this time, and pushed over the mould at the joints to prevent collapse/leakage during moulding.
+
+See [here](https://www.meades.org/railways/garden/garden.html#Track-side_Path) for the moulding process.
+
+The `track_wall.stl` can be printed directly in ASA, 15% in-fill, no supports required, brim advisable to stop the print leaving the print-bed, and go for relatively high detail since this wall will be visible.
+
+## `steps.blend`
+This Blender file is intended to create a flight of steps.  It is different to the other Blender files here in that the steps are created dynamically from a single step with three modifiers: array (to make 16 steps), solidify (to give the steps thickness) and then a curve modifier to make the steps run in any desired shape.  These modifiers are not "applied" in Blender, they remain dynamic, so the geometry of the steps can be changed at will.
+
+In the same file, initial marked as not visible, is a mould object, which is intended to cover the steps and has a Boolean difference modifier with the steps.  Since one end (as well as the top) of the mould will be open, there is also a separate "mould end" that should be held to the mould with an elastic band or some such during moulding.  The intention is that latex is applied thickly and in several layers to the inside of the mould to form a flight of steps, and this can be done multiple times and the steps joined together to achieve the desired length.  If you change the shape of the steps you may need to change the shape/position of the mould object to match.
+
+`.stl` exports of all components are provided but if you modify any of them you will need to re-export from Blender at a Blender scale factor of 30.48.  The mould should be printed with no supports, 5% in-fill and at maximum print speed in any filament you like (PLA will probably be cheapest).
+
+See [here](https://www.meades.org/railways/garden/garden.html#Woodland_Path) for the moulding process.
+
+## `road.blend`
+The road down to the dock, including a bridge over the railway line, in two parts:
+
+- an upper part (A) that has the bridge and rests on the track bed and the lower part,
+- a lower part (B) that rests on the dock base.
+
+The "Part A Bridge Spacer" is used during test fitting when only the bottom 2&nbsp;mm of Part A has been printed.
+
+From this model will be formed a mould into which fibreglass will be layered.
