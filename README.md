@@ -83,6 +83,9 @@ See [here](https://www.meades.org/railways/garden/garden.html#Track-side_Path) f
 
 The `track_wall.stl` can be printed directly in ASA, 15% in-fill, no supports required, brim advisable to stop the print leaving the print-bed, and go for relatively high detail since this wall will be visible.
 
+## `bench.blend'
+A long and relatively narrow wooden bench, with its own Curve modifier applied in Blender as the bench is intended to be placed against the rock-side wall of `track_side_path.blend` to hide the break that occurred when it was [moulded]((https://www.meades.org/railways/garden/garden.html#Track-side_Path)).  The `.stl` export should be printed in highest resolution in a brown ASA filament.  Since it is a rather detailed object with thin struts, the best way to print it is probably to split the model into two vertically in the printer's slicer program along the middle of the seat, place the two objects down on their cut faces, print them and then glue them together again afterwards; the prints will get a firmer base (less change of ASA warping) and there will be slightly less support material to remove that way.
+
 ## `steps.blend`
 This Blender file is intended to create a flight of steps.  It is different to the other Blender files here in that the steps are created dynamically from a single step with three modifiers: array (to make 16 steps), solidify (to give the steps thickness) and then a curve modifier to make the steps run in any desired shape.  These modifiers are not "applied" in Blender, they remain dynamic, so the geometry of the steps can be changed at will.
 
