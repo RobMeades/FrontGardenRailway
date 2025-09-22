@@ -99,7 +99,7 @@ The steps and connector should be printed in the same way but in black ASA.
 
 Everything else apart from `spiral_staircase_top_platform*.stl` should also be printed in black ASA but at higher resolution (e.g. 0.1&nbsp;mm layer height) to capture the detail, supports everywhere, no brim required.  The weather vane N/S/E/W indicators are best cut in your printer's slicer program vertically through the longest axis to give a good printing surface, the parts glued together afterwards with cyanoacrylate adhesive; see the pictures [here](https://www.meades.org/railways/garden/garden.html#Fixing_The_Monolith).
 
-Finally, `spiral_staircase_top_platform.stl`, `spiral_staircase_top_platform_side_wall_top.stl` and `spiral_staircase_top_platform_side_wall_shim.stl` should be printed in ASA of the same colour as `viaduct_wall_*.stl`, high resolution (e.g. 0.1&nbsp;mm layer height), 10% in-fill, no supports required, brim advisable; `spiral_staircase_top_platform_side_wall.stl` and `spiral_staircase_top_platform_side_wall_edging.stl` should be printed in the same way but with only 5% in-fill (for flexibility), in natural ASA and painted (like the components of `filter_wall.blend`).  It doesn't really matter how `spiral_staircase_top_platform_warning_sign.stl` is printed: for painting pick out the word "DANGER" in red, the rest of the lettering and the rim of the sign in black.
+Finally, `spiral_staircase_top_platform.stl`, `spiral_staircase_top_platform_side_wall_top.stl` and `spiral_staircase_top_platform_side_wall_shim.stl` should be printed in ASA of the same colour as `viaduct_wall_*.stl`, high resolution (e.g. 0.1&nbsp;mm layer height), 10% in-fill, no supports required, brim advisable; `spiral_staircase_top_platform_side_wall.stl` and `spiral_staircase_top_platform_side_wall_edging.stl` should be printed in the same way but with only 5% in-fill (for flexibility), in natural ASA and painted (like the components of `filter_wall.blend`).
 
 ## `steps.blend`
 This Blender file is intended to create a flight of steps.  It is different to the other Blender files here in that the steps are created dynamically from a single step with three modifiers: Array (to make 16 steps), Solidify (to give the steps thickness) and then a Curve modifier to make the steps run in any desired shape.  These modifiers are not "applied" in Blender, they remain dynamic, so the geometry of the steps can be changed at will.
@@ -109,6 +109,11 @@ In the same file, initial marked as not visible, is a mould object, which is int
 `.stl` exports of all components are provided but if you modify any of them you will need to re-export from Blender at a Blender scale factor of 30.48.  The mould should be printed with no supports, 5% in-fill and at maximum print speed in any filament you like (PLA will probably be cheapest).
 
 See [here](https://www.meades.org/railways/garden/garden.html#Woodland_Path) for the moulding process.
+
+## `signs.blend`
+The signs used around the railway (with `signs*.stl` exports at 30.48 scale), best printed on a resin printer (they really need the resolution), fast speed (since there is no particular vertical detail), no pads or supports required, in a white or creamy-coloured resin.  The raised portions should be picked out in black or red or whatever to form the text and any outlines.
+
+Note that resin will be affected by UV, becoming brittle, but that shouldn't be a huge problem for signage, since it bears no load, and clear UV blocking varnishes are available, e.g. [Polyvine Heavy Duty Extreme Varnish](https://www.amazon.co.uk/dp/B07RT1V6BG).
 
 ## `road.blend`
 The road down to the dock, including a bridge over the railway line, in two parts:
