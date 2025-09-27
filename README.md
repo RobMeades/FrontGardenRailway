@@ -81,7 +81,7 @@ The mould (which will initially be marked as not-visible in the Blender file) is
 
 See [here](https://www.meades.org/railways/garden/garden.html#Track-side_Path) for the moulding process.
 
-The `track_wall.stl` can be printed directly in ASA, 15% in-fill, no supports required, brim advisable to stop the print leaving the print-bed, and go for relatively high detail since this wall will be visible.  With such large, flat, ASA parts you will likely need glue-stick on the print bed to prevent the part warping away from it and you may need to consider printing the parts one at a time to avoid them applying enough force to pull the magnetic print plate away from its mount.
+The `track-side_path_track_wall.stl` can be printed directly in ASA, 15% in-fill, no supports required, brim advisable to stop the print leaving the print-bed, and go for relatively high detail since this wall will be visible.  With such large, flat, ASA parts you will likely need glue-stick on the print bed to prevent the part warping away from it and you may need to consider printing the parts one at a time to avoid them applying enough force to pull the magnetic print plate away from its mount.  `track-side_path_track_wall_wedge.stl` doesn't require the detail, 10% in-fill, no supports required, brim advisable.
 
 See [here](https://www.meades.org/railways/garden/garden.html#Track-side_wall_asa_bit) for the finished print.
 
