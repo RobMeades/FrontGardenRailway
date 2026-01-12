@@ -119,11 +119,19 @@ The signs used around the railway (with `signs*.stl` exports at 30.48 scale), be
 Note that resin will be affected by UV, becoming brittle, but that shouldn't be a huge problem for signage, since it bears no load, and clear UV blocking varnishes are available, e.g. [Polyvine Heavy Duty Extreme Varnish](https://www.amazon.co.uk/dp/B07RT1V6BG).
 
 ## `road.blend`
-The road down to the dock, including a bridge over the railway line, in two parts:
+The road down to the dock (plus `road*.stl` exports at 30.48 scale), including a bridge over the railway line, in two parts:
 
 - an upper part (A) that has the bridge and rests on the track bed and the lower part,
 - a lower part (B) that rests on the dock base.
 
 The "Part A Bridge Spacer" is used during test fitting when only the bottom 2&nbsp;mm of Part A has been printed.
 
-From this model will be formed a mould into which fibreglass will be layered.
+Part A is further split into three:
+
+- The bridge, which should be printed in natural ASA, fastest speed, 15% in-fill, either in a heated chamber or otherwise with the room that the printer is in heated up to 40&nbsp;C.  It may be beneficial to cut the object further in your printer's slicer program to print the upright portions separate from the arch portion (cyanoacrylatinbg them together again afterwards) in order to improve adhesion and reducing the chances of warping; see [here](https://www.meades.org/railways/garden/garden.html#Road_Construction_Begins) for further information.
+- Moulds for the remaining western and eastern halves, intended to take fibreglass, formed in Blender using the Solidify modifier.  Note that it was not possible to make the Solidify modifier behave well around the holes for the M6 hex bolts intended to join the moulded parts to the bridge, hence the Blender file contains copies of these parts in the "Tidied" objects, on which the Solidify modifier has been applied and then the relevant parts of the object tidied up manually to form a good and manifold shape (see the `road_*_tidied.stl` files).
+
+Similarly, Part B is split into moulds for the western and eastern halves.
+
+The moulds should be printed in the cheapest PLA you can find, at fastest speed, 5% in-fill, supports everywhere.  They moulds will need to be split in your printer's slicer program, preferably with dovetail joints, and glued together with cyanoacrylate adhesive after printing.  The print orientation of all of the split parts should be the same: with the stones in the structure being horizontal, the road surface on the bottom.  There is no need to remove support material from the outsides of the printed parts unless the material happens to get in the way of assembly, since it won't matter for moulding.
+
