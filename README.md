@@ -85,7 +85,7 @@ The `track-side_path_track_wall.stl`should be printed directly in ASA, 15% in-fi
 
 See [here](https://www.meades.org/railways/garden/garden.html#Track-side_wall_asa_bit) for the finished print.
 
-## `bench.blend'
+## `bench.blend`
 A long and relatively narrow wooden bench, with its own Curve modifier applied in Blender as the bench is intended to be placed against the rock-side wall of `track_side_path.blend` to hide the break that occurred when it was [moulded]((https://www.meades.org/railways/garden/garden.html#Track-side_Path)).  The `.stl` export should be printed in highest resolution, 25% in-fill, supports everywhere, in a brown ASA filament, no brim as it is too difficult to remove from these delicate parts.  Since this is a rather detailed object with thin struts, the best way to print it is probably to split the model into three pieces horizontally in the printer's slicer program, once along the middle of the seat, the other just below the cross-pieces of the legs, then place the objects down on their cut faces, print them and glue them together again afterwards; this will give the prints a firmer base (less change of ASA warping) and there will be a lot less support material to remove.
 
 See [here](https://www.meades.org/railways/garden/garden.html#curved_bench) for pictures of the finished article.
