@@ -15,7 +15,7 @@
 # limitations under the License.
 
 """
-Protocol Generator for ESP32 Control Interface
+Protocol Generator for FGR ESP32 Control Interface
 
 This script parses the C protocol header file and generates a Python module
 with all the protocol definitions, message classes, and helper functions.
@@ -23,7 +23,7 @@ with all the protocol definitions, message classes, and helper functions.
 All written by DeepSeek :-).
 
 Usage:
-    python3 generate_protocol.py <fgr_protocol.h> [output.py]
+    python3 generate_fgr_protocol.py <fgr_protocol.h> [output.py]
 """
 
 import re
@@ -38,14 +38,15 @@ from dataclasses import dataclass, field
 class ProtocolDef:
     """Container for parsed protocol definitions"""
     version: Optional[int] = None
-    magic: Dict[str, int] = field(default_factory=dict)
-    log_max_len: Optional[int] = None
-    states: Dict[str, int] = field(default_factory=dict)
-    commands: Dict[str, int] = field(default_factory=dict)
-    queries: Dict[str, int] = field(default_factory=dict)
-    indications: Dict[str, int] = field(default_factory=dict)
+    msg_max_len: Optional[int] = None
+    msg_contents_max_len: Optional[int] = None
+    log_string_max_len: Optional[int] = None
+    msg_types: Dict[str, int] = field(default_factory=dict)
+    req_cnf_types: Dict[str, int] = field(default_factory=dict)
+    ind_rsp_types: Dict[str, int] = field(default_factory=dict)
     log_levels: Dict[str, int] = field(default_factory=dict)
-    status_codes: Dict[str, int] = field(default_factory=dict)
+    error_codes: Dict[str, int] = field(default_factory=dict)
+    states: Dict[str, int] = field(default_factory=dict)
     structs: Dict[str, Dict[str, Tuple[str, int, str]]] = field(default_factory=dict)
 
 
@@ -56,7 +57,6 @@ class CHeaderParser:
         self.header_path = Path(header_path)
         self.content = self.header_path.read_text()
         self.protocol = ProtocolDef()
-        self.enum_references = {}  # Track enum references for resolution
         
     def parse(self) -> ProtocolDef:
         """Parse the C header and extract all protocol definitions"""
@@ -68,45 +68,39 @@ class CHeaderParser:
     def _parse_macros(self):
         """Extract #define macros"""
         # Protocol version
-        version_match = re.search(r'#define\s+PROTOCOL_VERSION\s+(0x[0-9A-Fa-f]+|\d+)', self.content)
+        version_match = re.search(r'#define\s+FGR_PROTOCOL_VERSION\s+(0x[0-9A-Fa-f]+|\d+)', self.content)
         if version_match:
             self.protocol.version = self._parse_int(version_match.group(1))
         
-        # Magic bytes
-        magic_pattern = r'#define\s+PROTOCOL_MAGIC_(\w+)\s+(0x[0-9A-Fa-f]+|\d+)'
-        for match in re.finditer(magic_pattern, self.content):
-            name = match.group(1)
-            value = self._parse_int(match.group(2))
-            self.protocol.magic[name] = value
+        # Message contents max length
+        msg_contents_len_match = re.search(r'#define\s+FGR_MSG_CONTENTS_MAX_LEN\s+(\d+)', self.content)
+        if msg_contents_len_match:
+            self.protocol.msg_contents_max_len = int(msg_contents_len_match.group(1))
         
-        # Log message max length
-        log_len_match = re.search(r'#define\s+LOG_MESSAGE_MAX_LEN\s+(\d+)', self.content)
-        if log_len_match:
-            self.protocol.log_max_len = int(log_len_match.group(1))
+        # Log string max length
+        log_string_len_match = re.search(r'#define\s+FGR_LOG_STRING_MAX_LEN\s+(\d+)', self.content)
+        if log_string_len_match:
+            self.protocol.log_string_max_len = int(log_string_len_match.group(1))
     
     def _parse_int(self, value_str: str) -> int:
         """Parse integer value that might be hex, decimal, or binary"""
         value_str = value_str.strip()
         
-        # Handle empty string
         if not value_str:
             return 0
         
-        # Handle hexadecimal
         if value_str.startswith('0x'):
             try:
                 return int(value_str, 16)
             except ValueError:
                 return 0
         
-        # Handle binary
         if value_str.startswith('0b'):
             try:
                 return int(value_str, 2)
             except ValueError:
                 return 0
         
-        # Handle decimal
         try:
             return int(value_str)
         except ValueError:
@@ -119,113 +113,92 @@ class CHeaderParser:
         # Remove comments
         body = re.sub(r'//.*$', '', body, flags=re.MULTILINE)
         
-        # First, collect all entries with their expressions
+        # Collect all entries
         entries = []
         for line in body.split('\n'):
             line = line.strip()
             if line:
-                # Split multiple entries on same line by comma
                 for entry in line.split(','):
                     entry = entry.strip()
                     if entry and not entry.startswith('//'):
                         entries.append(entry)
         
-        # First pass: collect all explicitly defined hex/decimal values
+        # Parse entries
+        last_value = None
         for entry in entries:
             if '=' in entry:
                 name, expr = entry.split('=', 1)
                 name = name.strip()
                 expr = expr.strip()
                 
-                # Handle direct hex/decimal assignments
+                # Handle expressions
                 if expr.startswith('0x') or expr.isdigit():
-                    values[name] = self._parse_int(expr)
-        
-        # Second pass: handle all reference-based assignments
-        # Keep processing until no more changes (to handle dependencies)
-        changed = True
-        while changed:
-            changed = False
-            for entry in entries:
-                if '=' in entry:
-                    name, expr = entry.split('=', 1)
-                    name = name.strip()
-                    expr = expr.strip()
-                    
-                    # Skip if already assigned
-                    if name in values:
-                        continue
-                    
-                    # Handle expressions like CMD_SYSTEM_BEGIN + 1
-                    if '+' in expr:
-                        parts = expr.split('+')
-                        base = parts[0].strip()
-                        offset = int(parts[1].strip())
-                        
-                        if base in values:
-                            values[name] = values[base] + offset
-                            changed = True
-                        elif base in [e.split('=')[0].strip() for e in entries if '=' in e]:
-                            # Base exists but not resolved yet, will try next pass
-                            pass
-                    
-                    # Handle simple references like CMD_STAND_INIT = CMD_STAND_BEGIN
-                    elif expr in values:
-                        values[name] = values[expr]
-                        changed = True
-                    elif expr in [e.split('=')[0].strip() for e in entries if '=' in e]:
-                        # Reference exists but not resolved yet
-                        pass
-        
-        # Third pass: handle implicitly valued entries (no '=')
-        # Process entries in order to get correct sequence
-        last_value = None
-        for entry in entries:
-            if '=' in entry:
-                # This is an explicit entry - update last_value
-                name = entry.split('=', 1)[0].strip()
-                if name in values:
-                    last_value = values[name]
+                    value = self._parse_int(expr)
+                elif '+' in expr:
+                    parts = expr.split('+')
+                    base_name = parts[0].strip()
+                    offset = self._parse_int(parts[1].strip())
+                    if base_name in values:
+                        value = values[base_name] + offset
+                    else:
+                        value = offset
+                else:
+                    # Reference to another enum value
+                    if expr in values:
+                        value = values[expr]
+                    else:
+                        value = last_value + 1 if last_value is not None else 0
+                
+                values[name] = value
+                last_value = value
             else:
-                # This is an implicit entry (no '=')
                 name = entry
                 if last_value is not None:
                     last_value += 1
-                    values[name] = last_value
                 else:
-                    # Start at 0 if no previous value
-                    values[name] = 0
                     last_value = 0
+                values[name] = last_value
         
-        return values    
+        return values
+    
     def _parse_enums(self):
         """Extract all enum definitions"""
-        # Find all enum blocks
-        enum_pattern = r'typedef\s+enum\s*{([^}]+)}\s*(\w+)_t;'
+        # Find all enum blocks - both typedef enum and regular enum
+        enum_patterns = [
+            r'typedef\s+enum\s*{([^}]+)}\s*(\w+)_t;',
+            r'enum\s+(\w+)\s*{([^}]+)};'
+        ]
         
-        for match in re.finditer(enum_pattern, self.content, re.DOTALL):
-            enum_name = match.group(2)
-            enum_body = match.group(1)
-            
-            values = self._parse_enum_body(enum_body, enum_name)
-            
-            # Route to appropriate container
-            if enum_name == 'state':
-                self.protocol.states = values
-            elif enum_name == 'cmd':
-                self.protocol.commands = values
-            elif enum_name == 'qry':
-                self.protocol.queries = values
-            elif enum_name == 'ind':
-                self.protocol.indications = values
-            elif enum_name == 'log_level':
-                self.protocol.log_levels = values
-            elif enum_name == 'status':
-                self.protocol.status_codes = values
+        for pattern in enum_patterns:
+            for match in re.finditer(pattern, self.content, re.DOTALL):
+                if len(match.groups()) == 2:
+                    if 'typedef' in pattern:
+                        enum_body = match.group(1)
+                        enum_name = match.group(2)
+                    else:
+                        enum_name = match.group(1)
+                        enum_body = match.group(2)
+                else:
+                    continue
+                
+                values = self._parse_enum_body(enum_body, enum_name)
+                
+                # Route to appropriate container
+                if enum_name == 'fgr_msg_type':
+                    self.protocol.msg_types = values
+                elif enum_name == 'fgr_req_cnf':
+                    self.protocol.req_cnf_types = values
+                elif enum_name == 'fgr_ind_rsp':
+                    self.protocol.ind_rsp_types = values
+                elif enum_name == 'fgr_log_level':
+                    self.protocol.log_levels = values
+                elif enum_name == 'fgr_error':
+                    self.protocol.error_codes = values
+                elif enum_name == 'fgr_state':
+                    self.protocol.states = values
     
     def _parse_structs(self):
         """Extract struct definitions"""
-        # More flexible pattern to handle different attribute syntaxes
         struct_pattern = r'typedef\s+struct\s*(?:__attribute__\(\(packed\)\))?\s*{([^}]+)}\s*(\w+)_t;'
         
         for match in re.finditer(struct_pattern, self.content, re.DOTALL):
@@ -243,7 +216,7 @@ class CHeaderParser:
         # Remove comments
         body = re.sub(r'//.*$', '', body, flags=re.MULTILINE)
         
-        # Type mapping for size calculation - include signed types
+        # Type mapping for size calculation
         type_sizes = {
             'uint8_t': 1,
             'uint16_t': 2,
@@ -253,6 +226,7 @@ class CHeaderParser:
             'int32_t': 4,
             'char': 1
         }
+        
         # Split into individual field declarations
         field_lines = []
         current_field = []
@@ -262,26 +236,21 @@ class CHeaderParser:
             if not line:
                 continue
                 
-            # Check if this line contains a complete field declaration
             if ';' in line:
-                # Split by semicolon, but keep the parts
                 parts = line.split(';')
-                for part in parts[:-1]:  # All but last part end with semicolon
+                for part in parts[:-1]:
                     if current_field:
                         current_field.append(part)
                         field_lines.append(' '.join(current_field))
                         current_field = []
                     else:
                         field_lines.append(part)
-                # Last part might not end with semicolon
                 last_part = parts[-1].strip()
                 if last_part:
                     current_field.append(last_part)
             else:
-                # Continuation of a field declaration
                 current_field.append(line)
         
-        # Handle any remaining field
         if current_field:
             field_lines.append(' '.join(current_field))
         
@@ -292,7 +261,6 @@ class CHeaderParser:
                 continue
                 
             # Parse field declaration
-            # Format: "type name;" or "type name[size];"
             parts = field_line.split()
             if len(parts) >= 2:
                 type_name = parts[0]
@@ -339,7 +307,7 @@ class PythonGenerator:
         self.output.extend([
             '#!/usr/bin/env python3',
             '"""',
-            'Auto-generated protocol definitions for ESP32 control interface.',
+            'Auto-generated protocol definitions for FGR ESP32 control interface.',
             '',
             'This module is generated from the C protocol header file.',
             'Do not edit this file directly - edit the .h file and regenerate.',
@@ -352,7 +320,7 @@ class PythonGenerator:
         self.output.extend([
             'import struct',
             'from enum import IntEnum',
-            'from typing import Optional, Union, Tuple, Any',
+            'from typing import Optional, Union, Tuple, Any, Dict',
             'import socket',
             ''
         ])
@@ -360,27 +328,25 @@ class PythonGenerator:
     def _add_constants(self):
         """Add protocol constants"""
         if self.p.version is not None:
-            self.output.append(f'PROTOCOL_VERSION = {self.p.version}')
+            self.output.append(f'FGR_PROTOCOL_VERSION = {self.p.version}')
         
-        if self.p.magic:
-            self.output.append('\n# Magic bytes')
-            for name, value in sorted(self.p.magic.items()):
-                self.output.append(f'PROTOCOL_MAGIC_{name} = {value}')
+        if self.p.msg_contents_max_len is not None:
+            self.output.append(f'FGR_MSG_CONTENTS_MAX_LEN = {self.p.msg_contents_max_len}')
         
-        if self.p.log_max_len is not None:
-            self.output.append(f'\nLOG_MESSAGE_MAX_LEN = {self.p.log_max_len}')
+        if self.p.log_string_max_len is not None:
+            self.output.append(f'FGR_LOG_STRING_MAX_LEN = {self.p.log_string_max_len}')
         
         self.output.append('')
     
     def _add_enums(self):
         """Add enum classes"""
         enum_configs = [
-            ('State', self.p.states, 'States'),
-            ('Cmd', self.p.commands, 'Command codes'),
-            ('Qry', self.p.queries, 'Query codes'),
-            ('Ind', self.p.indications, 'Indication/Event codes'),
-            ('LogLevel', self.p.log_levels, 'Log levels'),
-            ('Status', self.p.status_codes, 'Status codes')
+            ('FGRMsgType', self.p.msg_types, 'Message types'),
+            ('FGRReqCnf', self.p.req_cnf_types, 'Request/Confirmation message types'),
+            ('FGRIndRsp', self.p.ind_rsp_types, 'Indication/Response message types'),
+            ('FGRLogLevel', self.p.log_levels, 'Log levels'),
+            ('FGRError', self.p.error_codes, 'Error codes'),
+            ('FGRState', self.p.states, 'Device states')
         ]
         
         for enum_name, values, description in enum_configs:
@@ -390,204 +356,297 @@ class PythonGenerator:
                     f'    """{description}"""'
                 ])
                 
-                # Sort by value for consistent output
                 for name, value in sorted(values.items(), key=lambda x: x[1]):
                     self.output.append(f'    {name} = {value}')
                 
                 self.output.append('')
     
-    def _get_struct_format(self, struct_name: str) -> Tuple[str, int]:
-        """Get struct format string and size"""
-        if struct_name not in self.p.structs:
-            return None, 0
+    def _generate_header_union(self):
+        """Generate the header union class"""
+        self.output.extend([
+            'class FGRMsgHeader:',
+            '    """Message header union - represents all header types"""',
+            '',
+            '    def __init__(self):',
+            '        self._header = 0',
+            '',
+            '    @property',
+            '    def raw(self) -> int:',
+            '        """Get raw header value"""',
+            '        return self._header',
+            '',
+            '    @raw.setter',
+            '    def raw(self, value: int):',
+            '        """Set raw header value"""',
+            '        self._header = value',
+            '',
+            '    # Request header accessors',
+            '    @property',
+            '    def req_type(self) -> int:',
+            '        """Get request type (top 12 bits are type, top 4 bits are message type)"""',
+            '        return self._header & 0x0FFF',
+            '',
+            '    @req_type.setter',
+            '    def req_type(self, value: int):',
+            '        msg_type = (self._header >> 12) & 0x0F',
+            '        self._header = (msg_type << 12) | (value & 0x0FFF)',
+            '',
+            '    @property',
+            '    def req_reference(self) -> int:',
+            '        """Get request reference (bits 8-15 of the raw header)"""',
+            '        return (self._header >> 8) & 0xFF',
+            '',
+            '    @req_reference.setter',
+            '    def req_reference(self, value: int):',
+            '        self._header = (self._header & 0xFFFF00FF) | ((value & 0xFF) << 8)',
+            '',
+            '    # Confirmation header accessors',
+            '    @property',
+            '    def cnf_type(self) -> int:',
+            '        """Get confirmation type"""',
+            '        return self._header & 0x0FFF',
+            '',
+            '    @cnf_type.setter',
+            '    def cnf_type(self, value: int):',
+            '        msg_type = (self._header >> 12) & 0x0F',
+            '        self._header = (msg_type << 12) | (value & 0x0FFF)',
+            '',
+            '    @property',
+            '    def cnf_reference(self) -> int:',
+            '        """Get confirmation reference"""',
+            '        return (self._header >> 8) & 0xFF',
+            '',
+            '    @cnf_reference.setter',
+            '    def cnf_reference(self, value: int):',
+            '        self._header = (self._header & 0xFFFF00FF) | ((value & 0xFF) << 8)',
+            '',
+            '    @property',
+            '    def cnf_error(self) -> int:',
+            '        """Get confirmation error"""',
+            '        return (self._header >> 16) & 0xFF',
+            '',
+            '    @cnf_error.setter',
+            '    def cnf_error(self, value: int):',
+            '        self._header = (self._header & 0xFF00FFFF) | ((value & 0xFF) << 16)',
+            '',
+            '    # Indication header accessors',
+            '    @property',
+            '    def ind_type(self) -> int:',
+            '        """Get indication type"""',
+            '        return self._header & 0x0FFF',
+            '',
+            '    @ind_type.setter',
+            '    def ind_type(self, value: int):',
+            '        msg_type = (self._header >> 12) & 0x0F',
+            '        self._header = (msg_type << 12) | (value & 0x0FFF)',
+            '',
+            '    @property',
+            '    def ind_reference(self) -> int:',
+            '        """Get indication reference"""',
+            '        return (self._header >> 8) & 0xFF',
+            '',
+            '    @ind_reference.setter',
+            '    def ind_reference(self, value: int):',
+            '        self._header = (self._header & 0xFFFF00FF) | ((value & 0xFF) << 8)',
+            '',
+            '    @property',
+            '    def ind_state(self) -> int:',
+            '        """Get indication state"""',
+            '        return (self._header >> 16) & 0xFF',
+            '',
+            '    @ind_state.setter',
+            '    def ind_state(self, value: int):',
+            '        self._header = (self._header & 0xFF00FFFF) | ((value & 0xFF) << 16)',
+            '',
+            '    # Response header accessors',
+            '    @property',
+            '    def rsp_type(self) -> int:',
+            '        """Get response type"""',
+            '        return self._header & 0x0FFF',
+            '',
+            '    @rsp_type.setter',
+            '    def rsp_type(self, value: int):',
+            '        msg_type = (self._header >> 12) & 0x0F',
+            '        self._header = (msg_type << 12) | (value & 0x0FFF)',
+            '',
+            '    @property',
+            '    def rsp_reference(self) -> int:',
+            '        """Get response reference"""',
+            '        return (self._header >> 8) & 0xFF',
+            '',
+            '    @rsp_reference.setter',
+            '    def rsp_reference(self, value: int):',
+            '        self._header = (self._header & 0xFFFF00FF) | ((value & 0xFF) << 8)',
+            '',
+            '    # Log header accessors',
+            '    @property',
+            '    def log_level(self) -> int:',
+            '        """Get log level"""',
+            '        return (self._header >> 8) & 0xFF',
+            '',
+            '    @log_level.setter',
+            '    def log_level(self, value: int):',
+            '        self._header = (self._header & 0xFFFF00FF) | ((value & 0xFF) << 8)',
+            '',
+            '    def pack(self) -> bytes:',
+            '        """Pack header into bytes"""',
+            '        return struct.pack("<I", self._header)',
+            '',
+            '    @classmethod',
+            '    def unpack(cls, data: bytes) -> "FGRMsgHeader":',
+            '        """Unpack bytes into header"""',
+            '        header = cls()',
+            '        header.raw = struct.unpack("<I", data)[0]',
+            '        return header',
+            '',
+            '    def get_message_type(self) -> int:',
+            '        """Get the message type from the top 4 bits"""',
+            '        return (self._header >> 12) & 0x0F',
+            '',
+            '    def __repr__(self):',
+            '        return f"<FGRMsgHeader raw=0x{self._header:08X}>"',
+            ''
+        ])
+    
+    def _generate_message_class(self):
+        """Generate the main message class"""
+        contents_max_len = self.p.msg_contents_max_len or 256
         
-        struct_info = self.p.structs[struct_name]
-        format_chars = []
-        
-        # Type to struct format mapping - include signed types
-        type_format = {
-            'uint8_t': 'B',
-            'uint16_t': 'H',
-            'uint32_t': 'I',
-            'int8_t': 'b',
-            'int16_t': 'h',
-            'int32_t': 'i',
-            'char': 's'
-        }
-        
-        # Preserve original field order - don't sort
-        for field, (type_name, size, _) in struct_info.items():
-            if type_name.startswith('char['):
-                # Handle char array
-                array_size = int(type_name.split('[')[1].rstrip(']'))
-                format_chars.append(f'{array_size}s')
-            elif type_name == 'char':
-                format_chars.append('s')
-            else:
-                # Look up the format character, default to 'B' for unknown types
-                format_char = type_format.get(type_name, 'B')
-                format_chars.append(format_char)
-        
-        format_str = '<' + ''.join(format_chars)  # Little-endian
-        total_size = struct.calcsize(format_str)
-        
-        return format_str, total_size
+        self.output.extend([
+            'class FGRMsg:',
+            '    """Main FGR message class with variable-length body"""',
+            f'    CONTENTS_MAX_LEN = {contents_max_len}',
+            '',
+            '    def __init__(self, msg_type: int = 0, msg_subtype: int = 0,',
+            '                 reference: int = 0, error_or_state: int = 0,',
+            '                 contents: bytes = b""):',
+            '        """Create a new FGR message"""',
+            '        self.header = FGRMsgHeader()',
+            '        self.contents = contents',
+            '        self._set_header_fields(msg_type, msg_subtype, reference, error_or_state)',
+            '',
+            '    def _set_header_fields(self, msg_type: int, msg_subtype: int,',
+            '                           reference: int, error_or_state: int):',
+            '        """Set header fields based on message type"""',
+            '        raw_header = (msg_type << 12) | (msg_subtype & 0x0FFF)',
+            '        raw_header |= (reference & 0xFF) << 8',
+            '        if msg_type in [2, 3]:  # CNF or IND',
+            '            raw_header |= (error_or_state & 0xFF) << 16',
+            '        self.header.raw = raw_header',
+            '',
+            '    @classmethod',
+            '    def create_req(cls, req_type: int, reference: int = 0,',
+            '                   contents: bytes = b"") -> "FGRMsg":',
+            '        """Create a request message"""',
+            '        return cls(FGRMsgType.FGR_MSG_TYPE_REQ, req_type, reference, 0, contents)',
+            '',
+            '    @classmethod',
+            '    def create_cnf(cls, cnf_type: int, reference: int = 0,',
+            '                   error: int = 0, contents: bytes = b"") -> "FGRMsg":',
+            '        """Create a confirmation message"""',
+            '        return cls(FGRMsgType.FGR_MSG_TYPE_CNF, cnf_type, reference, error, contents)',
+            '',
+            '    @classmethod',
+            '    def create_ind(cls, ind_type: int, reference: int = 0,',
+            '                   state: int = 0, contents: bytes = b"") -> "FGRMsg":',
+            '        """Create an indication message"""',
+            '        return cls(FGRMsgType.FGR_MSG_TYPE_IND, ind_type, reference, state, contents)',
+            '',
+            '    @classmethod',
+            '    def create_rsp(cls, rsp_type: int, reference: int = 0,',
+            '                   contents: bytes = b"") -> "FGRMsg":',
+            '        """Create a response message"""',
+            '        return cls(FGRMsgType.FGR_MSG_TYPE_RSP, rsp_type, reference, 0, contents)',
+            '',
+            '    @classmethod',
+            '    def create_log(cls, level: int, message: str = "") -> "FGRMsg":',
+            '        """Create a log message"""',
+            '        msg = cls(FGRMsgType.FGR_MSG_TYPE_LOG, 0, 0, 0, b"")',
+            '        msg.header.log_level = level',
+            '        # Encode message without null terminator',
+            '        msg.contents = message.encode("utf-8")[:FGR_LOG_STRING_MAX_LEN]',
+            '        return msg',
+            '',
+            '    @property',
+            '    def message_type(self) -> int:',
+            '        """Get the message type"""',
+            '        return self.header.get_message_type()',
+            '',
+            '    @property',
+            '    def subtype(self) -> int:',
+            '        """Get the message subtype (request/indication type, etc.)"""',
+            '        return self.header.raw & 0x0FFF',
+            '',
+            '    @property',
+            '    def reference(self) -> int:',
+            '        """Get the reference field"""',
+            '        return (self.header.raw >> 8) & 0xFF',
+            '',
+            '    @property',
+            '    def error_or_state(self) -> int:',
+            '        """Get error (for CNF) or state (for IND) field"""',
+            '        return (self.header.raw >> 16) & 0xFF',
+            '',
+            '    def pack(self) -> bytes:',
+            '        """Pack message into bytes for transmission"""',
+            '        # Pack header',
+            '        header_bytes = self.header.pack()',
+            '        # Pack body (length + contents)',
+            '        content_length = len(self.contents)',
+            '        if content_length > self.CONTENTS_MAX_LEN:',
+            '            raise ValueError(f"Contents too long: {content_length} > {self.CONTENTS_MAX_LEN}")',
+            '        body_bytes = struct.pack("<I", content_length) + self.contents',
+            '        return header_bytes + body_bytes',
+            '',
+            '    @classmethod',
+            '    def unpack(cls, data: bytes) -> "FGRMsg":',
+            '        """Unpack bytes into a message instance"""',
+            '        if len(data) < 4:  # At least header',
+            '            raise ValueError(f"Message too short: {len(data)} bytes")',
+            '        ',
+            '        # Unpack header',
+            '        header = FGRMsgHeader.unpack(data[:4])',
+            '        ',
+            '        # Unpack body',
+            '        if len(data) < 8:',
+            '            raise ValueError(f"Message too short for body length: {len(data)} bytes")',
+            '        content_length = struct.unpack("<I", data[4:8])[0]',
+            '        ',
+            '        if content_length > 0:',
+            '            if len(data) < 8 + content_length:',
+            '                raise ValueError(f"Message truncated: expected {8 + content_length} bytes, got {len(data)}")',
+            '            contents = data[8:8 + content_length]',
+            '        else:',
+            '            contents = b""',
+            '        ',
+            '        msg = cls()',
+            '        msg.header = header',
+            '        msg.contents = contents',
+            '        return msg',
+            '',
+            '    def get_log_message(self) -> str:',
+            '        """Extract log message from contents (for LOG messages)"""',
+            '        if self.message_type != FGRMsgType.FGR_MSG_TYPE_LOG:',
+            '            return ""',
+            '        return self.contents.decode("utf-8", errors="replace")',
+            '',
+            '    def __repr__(self):',
+            '        msg_type_names = {v: k for k, v in FGRMsgType.__members__.items()}',
+            '        msg_type_name = msg_type_names.get(self.message_type, "UNKNOWN")',
+            '        return f"<FGRMsg type={msg_type_name} subtype=0x{self.subtype:03X} ref={self.reference} contents_len={len(self.contents)}>"',
+            ''
+        ])
     
     def _add_message_classes(self):
         """Add message class definitions"""
-        # Map struct names (without _t suffix) to message class names and magic constants
-        message_types = [
-            ('cmd_msg', 'CmdMsg', 'CMD', ['command', 'reference', 'param_1', 'param_2', 'param_3', 'param_4']),
-            ('qry_msg', 'QryMsg', 'QRY', ['query', 'reference',]),
-            ('rsp_msg', 'RspMsg', 'RSP', ['cmd_or_qry', 'reference', 'status', 'value']),
-            ('ind_msg', 'IndMsg', 'IND', ['ind', 'value']),
-            ('log_msg', 'LogMsg', 'LOG', ['level', 'message'])
-        ]
-        
-        for struct_name, class_name, magic_name, fields in message_types:
-            if struct_name in self.p.structs:
-                self._generate_message_class(struct_name, class_name, magic_name, fields)
+        self._generate_header_union()
+        self.output.append('')
+        self._generate_message_class()
     
-    def _generate_message_class(self, struct_name: str, class_name: str, 
-                               magic_name: str, fields: List[str]):
-        """Generate a specific message class"""
-        format_str, total_size = self._get_struct_format(struct_name)
-        if format_str is None:
-            return
-        
-        # Handle special case for log message which has a string
-        is_log_msg = (class_name == 'LogMsg')
-        
-        # Class definition
-        self.output.extend([
-            f'class {class_name}:',
-            f'    """{class_name} - packed binary message"""'
-        ])
-        
-        # FORMAT and SIZE
-        if is_log_msg:
-            self.output.extend([
-                f'    FORMAT = f"<BB {{LOG_MESSAGE_MAX_LEN}}s"',
-                f'    SIZE = 2 + LOG_MESSAGE_MAX_LEN',
-                f'    MAGIC = PROTOCOL_MAGIC_{magic_name}',
-                ''
-            ])
-        else:
-            self.output.extend([
-                f'    FORMAT = "{format_str}"',
-                f'    SIZE = {total_size}',
-                f'    MAGIC = PROTOCOL_MAGIC_{magic_name}',
-                ''
-            ])
-        
-        # __init__ method
-        if is_log_msg:
-            self.output.extend([
-                f'    def __init__(self, level, message=""):',
-                f'        self.magic = self.MAGIC',
-                f'        self.level = level',
-                f'        self.message = message',
-                ''
-            ])
-        else:
-            # For non-log messages, generate params with defaults
-            params = []
-            for i, field in enumerate(fields):
-                if i == 0:
-                    params.append(f"{field}")
-                else:
-                    params.append(f"{field}=0")
-            
-            self.output.extend([
-                f'    def __init__(self, {", ".join(params)}):',
-                f'        self.magic = self.MAGIC'
-            ])
-            
-            for field in fields:
-                self.output.append(f'        self.{field} = {field}')
-            
-            self.output.append('')
-        
-        # pack method
-        if is_log_msg:
-            self.output.extend([
-                '    def pack(self) -> bytes:',
-                '        """Pack message into bytes for transmission"""',
-                '        # Truncate message if too long',
-                '        msg_bytes = self.message.encode("utf-8")[:LOG_MESSAGE_MAX_LEN-1]',
-                '        # Pad with null bytes to reach full size',
-                '        padded = msg_bytes + b"\\0" * (LOG_MESSAGE_MAX_LEN - len(msg_bytes))',
-                '        return struct.pack(self.FORMAT,',
-                '                          self.magic,',
-                '                          self.level,',
-                '                          padded)',
-                ''
-            ])
-        else:
-            pack_args = ['self.magic'] + [f'self.{field}' for field in fields]
-            self.output.extend([
-                '    def pack(self) -> bytes:',
-                '        """Pack message into bytes for transmission"""',
-                f'        return struct.pack(self.FORMAT,',
-                f'                          {", ".join(pack_args)})',
-                ''
-            ])
-        
-        # unpack method
-        if is_log_msg:
-            self.output.extend([
-                '    @classmethod',
-                f'    def unpack(cls, data: bytes) -> "{class_name}":',
-                '        """Unpack bytes into a message instance"""',
-                '        if len(data) != cls.SIZE:',
-                '            raise ValueError(f"Invalid message size: got {len(data)}, expected {cls.SIZE}")',
-                '        magic, level, msg_bytes = struct.unpack(cls.FORMAT, data)',
-                '        if magic != cls.MAGIC:',
-                '            raise ValueError(f"Invalid magic byte: got {magic:#x}, expected {cls.MAGIC:#x}")',
-                '        # Decode null-terminated string',
-                '        message = msg_bytes.split(b"\\0", 1)[0].decode("utf-8")',
-                f'        return cls(level, message)',
-                ''
-            ])
-        else:
-            self.output.extend([
-                '    @classmethod',
-                f'    def unpack(cls, data: bytes) -> "{class_name}":',
-                '        """Unpack bytes into a message instance"""',
-                '        if len(data) != cls.SIZE:',
-                '            raise ValueError(f"Invalid message size: got {len(data)}, expected {cls.SIZE}")',
-                '        values = struct.unpack(cls.FORMAT, data)',
-                '        magic = values[0]',
-                '        if magic != cls.MAGIC:',
-                '            raise ValueError(f"Invalid magic byte: got {magic:#x}, expected {cls.MAGIC:#x}")',
-                f'        return cls(*values[1:])',
-                ''
-            ])
-        
-        # __repr__ method - FIXED with self. references and proper formatting
-        if is_log_msg:
-            self.output.extend([
-                '    def __repr__(self):',
-                f'        return f"<{class_name} level={{self.level}}, message=\\"{{self.message}}\\">"',
-                ''
-            ])
-        else:
-            # Build repr string with self. references
-            self.output.append('    def __repr__(self):')
-            repr_parts = [f"<{class_name}"]
-            for field in fields:
-                repr_parts.append(f" {field}={{{field}}}")
-            repr_parts.append(">")
-            repr_line = '        return f"' + ''.join(repr_parts) + '"'
-            # Replace {field} with {self.field}
-            repr_line = repr_line.replace('{', '{self.')
-            self.output.append(repr_line)
-            self.output.append('')
-
     def _add_helper_functions(self):
         """Add utility functions for working with the protocol"""
         self.output.extend([
-            'def send_message(sock: socket.socket, msg) -> bool:',
+            'def send_message(sock: socket.socket, msg: FGRMsg) -> bool:',
             '    """Send a protocol message over a socket"""',
             '    try:',
             '        data = msg.pack()',
@@ -597,16 +656,36 @@ class PythonGenerator:
             '        print(f"Error sending message: {e}")',
             '        return False',
             '',
-            'def receive_message(sock: socket.socket, msg_class, timeout: Optional[float] = None):',
-            '    """Receive and unpack a specific message type"""',
+            'def receive_message(sock: socket.socket, timeout: Optional[float] = None) -> Optional[FGRMsg]:',
+            '    """Receive and unpack a message (reads length from header)"""',
             '    original_timeout = sock.gettimeout()',
             '    try:',
             '        if timeout is not None:',
             '            sock.settimeout(timeout)',
-            '        data = sock.recv(msg_class.SIZE)',
-            '        if len(data) == 0:',
+            '        ',
+            '        # Read header (4 bytes)',
+            '        header_data = sock.recv(4)',
+            '        if len(header_data) == 0:',
             '            return None  # Connection closed',
-            '        return msg_class.unpack(data)',
+            '        if len(header_data) != 4:',
+            '            raise ValueError(f"Incomplete header: got {len(header_data)} bytes")',
+            '        ',
+            '        # Read body length (4 bytes)',
+            '        length_data = sock.recv(4)',
+            '        if len(length_data) != 4:',
+            '            raise ValueError(f"Incomplete length field: got {len(length_data)} bytes")',
+            '        content_length = struct.unpack("<I", length_data)[0]',
+            '        ',
+            '        # Read contents',
+            '        contents = b""',
+            '        if content_length > 0:',
+            '            contents = sock.recv(content_length)',
+            '            if len(contents) != content_length:',
+            '                raise ValueError(f"Incomplete contents: expected {content_length}, got {len(contents)}")',
+            '        ',
+            '        # Reconstruct full message',
+            '        full_data = header_data + length_data + contents',
+            '        return FGRMsg.unpack(full_data)',
             '    except socket.timeout:',
             '        return None',
             '    except Exception as e:',
@@ -614,147 +693,157 @@ class PythonGenerator:
             '        return None',
             '    finally:',
             '        sock.settimeout(original_timeout)',
+            '',
+            'def create_log_message(level: int, message: str) -> FGRMsg:',
+            '    """Convenience function to create a log message"""',
+            '    return FGRMsg.create_log(level, message)',
+            '',
+            'def create_config_message(device_type: int, config_data: bytes, reference: int = 0) -> FGRMsg:',
+            '    """Create a configuration request message"""',
+            '    return FGRMsg.create_req(FGRReqCnf.FGR_REQ_CNF_CFG, reference, config_data)',
             ''
         ])
     
     def print_usage_instructions(self):
         """Print usage instructions for the generated module"""
-        log_max_len = self.p.log_max_len or 256
-        instructions = f"""
-╔═════════════════════════════════════════════════════════�
-�══════════════════╗
-║                    Protocol Module Generated Successfully                   ║
-╚═════════════════════════════════════════════════════════════�
-�══════════════╝
+        contents_max_len = self.p.msg_contents_max_len or 256
+        instructions = """
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                    FGR Protocol Module Generated Successfully                ║
+╚══════════════════════════════════════════════════════════════════════════════╝
 
 The Python protocol module has been generated. Here's how to use it:
 
 📦 IMPORTING
-─────────────────────────────────────────────────────────────�
-��──────────────
-    from protocol import (
+──────────────────────────────────────────────────────────────────────────────
+    from fgr_protocol import (
         # Enums
-        Cmd, Qry, Ind, LogLevel, Status,
-        StateStand, StateLift, StatePlinkyPlonky, StateDoor,
-        # Message classes
-        CmdMsg, RspMsg, IndMsg, LogMsg,
+        FGRMsgType, FGRReqCnf, FGRIndRsp, FGRLogLevel, FGRError, FGRState,
+        # Message class
+        FGRMsg,
         # Helper functions
         send_message, receive_message,
-        # Constants
-        PROTOCOL_VERSION, LOG_MESSAGE_MAX_LEN
+        create_log_message, create_config_message
     )
 
-🎯 SENDING COMMANDS
-────────────────────────────────────────────────────────────────
-────────────
-    # Create a CMD_STEPPER_TARGET_START command with all 4 parameters
-    cmd = CmdMsg(
-        command=Cmd.CMD_STEPPER_TARGET_START,
-        reference=1,                           # reference to be returned in the response
-        param_1=State.STATE_LIFT_RISING,       # target state
-        param_2=100,                           # velocity in TSTEPs
-        param_3=500,                           # current in mA
-        param_4=5000                           # timeout in ms
+🎯 SENDING REQUESTS
+──────────────────────────────────────────────────────────────────────────────
+    # Create a configuration request
+    config_msg = FGRMsg.create_req(
+        req_type=FGRReqCnf.FGR_REQ_CNF_CFG,
+        reference=1,
+        contents=b"\\x01\\x02\\x03"  # Device-specific config data
+    )
+    
+    # Create a start request
+    start_msg = FGRMsg.create_req(
+        req_type=FGRReqCnf.FGR_REQ_CNF_START,
+        reference=2
     )
     
     # Send over socket
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.connect(('192.168.1.100', 5000))
-    send_message(sock, cmd)
+    send_message(sock, start_msg)
 
-📥 RECEIVING RESPONSES
-──────────────────────────────────────────────────────────────�
-�─────────────
-    # Wait for response (5 second timeout)
-    reference = 1
-    response = receive_message(sock, RspMsg, timeout=5.0)
-    if response:
-        if response.reference == reference
-            if response.status == Status.STATUS_OK:
-                print(f"Success! Value: {{response.value}}")
-            else:
-                print(f"Error: {{Status(response.status).name}}")
+📥 RECEIVING CONFIRMATIONS
+──────────────────────────────────────────────────────────────────────────────
+    # Wait for confirmation (5 second timeout)
+    response = receive_message(sock, timeout=5.0)
+    if response and response.message_type == FGRMsgType.FGR_MSG_TYPE_CNF:
+        if response.error_or_state == FGRError.FGR_ERROR_NONE:
+            print(f"Success! Reference: {response.reference}")
+        else:
+            print(f"Error: {FGRError(response.error_or_state).name}")
 
 🔔 HANDLING INDICATIONS
-─────────────────────────────────────────────────────────────────�
-��──────────
+──────────────────────────────────────────────────────────────────────────────
     # Receive an asynchronous indication
-    ind = receive_message(sock, IndMsg)
-    if ind:
-        print(f"Indication: {{Ind(ind.ind).name}}, value: {{ind.value}}")
+    ind = receive_message(sock)
+    if ind and ind.message_type == FGRMsgType.FGR_MSG_TYPE_IND:
+        print(f"Indication: {FGRIndRsp(ind.subtype).name}, State: {FGRState(ind.error_or_state).name}")
+        if ind.contents:
+            print(f"Data: {ind.contents.hex()}")
 
 📝 SENDING LOGS
-────────────────────────────────────────────────────────────�
-�───────────────
+──────────────────────────────────────────────────────────────────────────────
     # Send a log message
-    log = LogMsg(LogLevel.LOG_INFO, "System initialized")
-    send_message(log_sock, log)
+    log_msg = FGRMsg.create_log(FGRLogLevel.FGR_LOG_LEVEL_INFO, "System initialized")
+    send_message(sock, log_msg)
 
 🔄 COMPLETE EXAMPLE
-────────────────────────────────────────────────────────────�
-�───────────────
+──────────────────────────────────────────────────────────────────────────────
     import socket
-    from protocol import *
+    from fgr_protocol import *
     
     # Connect to ESP32
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.connect(('192.168.1.100', 5000))
     
-    # Send CMD_STEPPER_TARGET_START
-    reference = 1;
-    cmd = CmdMsg(Cmd.CMD_STEPPER_TARGET_START, reference, 
-                 State.STATE_LIFT_RISING, 100, 500, 5000)
+    # Create and send start request
+    start_msg = FGRMsg.create_req(FGRReqCnf.FGR_REQ_CNF_START, 1)
     
-    if send_message(sock, cmd):
-        response = receive_message(sock, RspMsg, timeout=5.0)
-        if response and response.reference == reference and response.status == Status.STATUS_OK:
-            print("Operation completed successfully")
+    if send_message(sock, start_msg):
+        response = receive_message(sock, timeout=5.0)
+        if response and response.message_type == FGRMsgType.FGR_MSG_TYPE_CNF:
+            if response.error_or_state == FGRError.FGR_ERROR_NONE:
+                print("Device started successfully")
     
     sock.close()
 
+📊 MESSAGE STRUCTURE
+──────────────────────────────────────────────────────────────────────────────
+    Header (4 bytes):
+      - Bits 0-11: Message subtype (request/indication type, etc.)
+      - Bits 12-15: Message type (REQ=1, CNF=2, IND=3, RSP=4, LOG=5)
+      - Bits 16-23: Reference (for REQ/CNF/IND/RSP)
+      - Bits 24-31: Error (for CNF) or State (for IND)
+    
+    Body:
+      - Length (4 bytes): Length of contents field
+      - Contents (variable): Message payload (max {contents_max_len} bytes)
+
 ⚠️ NOTES
-───────────────────────────────────────────────────────────────────────────�
-��
+──────────────────────────────────────────────────────────────────────────────
     • All multi-byte fields are little-endian (matches ESP32 and Raspberry Pi)
     • TCP provides reliable delivery - no checksums needed
-    • Message sizes are fixed - receive exactly SIZE bytes
-    • CmdMsg has 4 parameters for the CMD_STEPPER_TARGET_START command
-    • Other commands may use only the first parameter
-    • Log messages are automatically null-padded to LOG_MESSAGE_MAX_LEN
+    • Messages have variable length - use receive_message() which reads the length
+    • Log messages are null-terminated strings (without the null in length field)
+    • Device-specific messages can use the contents field for custom data
 
 For more details, see the protocol definition in the original C header file.
 """
+        # Replace the placeholder with the actual value
+        instructions = instructions.replace('{contents_max_len}', str(contents_max_len))
         print(instructions)
 
 
 def main():
     """Main entry point"""
     if len(sys.argv) < 2:
-        print("Usage: python3 generate_protocol.py <protocol.h> [output.py]")
+        print("Usage: python3 generate_fgr_protocol.py <fgr_protocol.h> [output.py]")
         sys.exit(1)
     
     header_path = sys.argv[1]
-    output_path = sys.argv[2] if len(sys.argv) > 2 else 'protocol.py'
+    output_path = sys.argv[2] if len(sys.argv) > 2 else 'fgr_protocol.py'
     
     print(f"Parsing {header_path}...")
     parser = CHeaderParser(header_path)
     protocol = parser.parse()
     
     print(f"\nFound:")
-    print(f"  - {len(protocol.magic)} magic bytes")
-    print(f"  - {len(protocol.states)} states")
-    print(f"  - {len(protocol.commands)} commands")
-    print(f"  - {len(protocol.queries)} queries")
-    print(f"  - {len(protocol.indications)} indications")
+    print(f"  - {len(protocol.msg_types)} message types")
+    print(f"  - {len(protocol.req_cnf_types)} request/confirmation types")
+    print(f"  - {len(protocol.ind_rsp_types)} indication/response types")
     print(f"  - {len(protocol.log_levels)} log levels")
-    print(f"  - {len(protocol.status_codes)} status codes")
+    print(f"  - {len(protocol.error_codes)} error codes")
+    print(f"  - {len(protocol.states)} states")
     print(f"  - {len(protocol.structs)} structs")
     
-    # List the structs found
-    if protocol.structs:
-        print(f"\nStructs found: {list(protocol.structs.keys())}")
-    else:
-        print("\n⚠️  WARNING: No structs found! Message classes will not be generated.")
+    if protocol.msg_contents_max_len:
+        print(f"  - Message contents max length: {protocol.msg_contents_max_len}")
+    if protocol.log_string_max_len:
+        print(f"  - Log string max length: {protocol.log_string_max_len}")
     
     print(f"\nGenerating {output_path}...")
     generator = PythonGenerator(protocol)
@@ -770,4 +859,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

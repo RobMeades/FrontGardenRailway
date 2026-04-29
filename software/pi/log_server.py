@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 # Copyright 2026 Rob Meades
 #
@@ -14,242 +14,299 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# All written by DeepSeek.
+# All written by DeepSeek :-).
 
-import socket
-import syslog
+"""
+Log Server for FGR ESP32 Devices
+
+This script listens for FGR protocol log messages from ESP32 devices
+and writes them to the Linux systemd journal.
+
+The script handles:
+- TCP socket connections from multiple devices
+- Automatic detection and parsing of FGR log messages
+- Writing logs to the system journal with appropriate priorities
+- Graceful shutdown on SIGTERM/SIGINT
+
+Usage:
+    python3 fgr_log_server.py [--port PORT] [--bind-address ADDR]
+
+Options:
+    --port PORT             Port to listen on (default: 5000)
+    --bind-address ADDR     Address to bind to (default: 0.0.0.0)
+"""
+
 import sys
-import os
-import logging
+import socket
+import argparse
+import signal
 import struct
-import threading
-import select
 import time
-from systemd import journal
-from pathlib import Path
+from typing import Optional, Dict, Set
+from datetime import datetime
 
-# Add the protocol directory to Python path
-# Get the directory where THIS script is located
-script_dir = Path(__file__).resolve().parent
+# Import the generated FGR protocol module
+try:
+    from fgr_protocol import (
+        FGRMsg, FGRMsgType, FGRLogLevel, receive_message, send_message
+    )
+except ImportError:
+    print("Error: Cannot import fgr_protocol module")
+    print("Please ensure fgr_protocol.py is in the Python path")
+    sys.exit(1)
 
-# Navigate up to the common directory where protocol.h and protocol.py live
-protocol_dir = script_dir.parent / 'protocol'
-sys.path.insert(0, str(protocol_dir))
+# Try to import systemd journal support
+try:
+    from systemd import journal
+    HAS_SYSTEMD = True
+except ImportError:
+    HAS_SYSTEMD = False
+    print("Warning: python-systemd not installed, falling back to console output")
 
-from protocol import LogMsg, LogLevel
+# Map FGR log levels to systemd priorities
+# See: https://www.freedesktop.org/software/systemd/man/latest/sd-daemon.html
+LOG_LEVEL_TO_PRIORITY = {
+    FGRLogLevel.FGR_LOG_LEVEL_DEBUG: journal.LOG_DEBUG if HAS_SYSTEMD else 7,
+    FGRLogLevel.FGR_LOG_LEVEL_INFO: journal.LOG_INFO if HAS_SYSTEMD else 6,
+    FGRLogLevel.FGR_LOG_LEVEL_WARN: journal.LOG_WARNING if HAS_SYSTEMD else 4,
+    FGRLogLevel.FGR_LOG_LEVEL_ERROR: journal.LOG_ERR if HAS_SYSTEMD else 3,
+}
 
-class ESP32LogServer:
-    def __init__(self, port=5001):
-        self.port = port
-        self.server = None
-        self.running = False
-        self.clients = []  # Track active clients
-        self.clients_lock = threading.Lock()
+# Default priorities for unknown log levels
+DEFAULT_PRIORITY = journal.LOG_INFO if HAS_SYSTEMD else 6
 
-        # Set up logging to journal
-        self.logger = logging.getLogger('esp32_logger')
-        self.logger.propagate = False
-        self.logger.addHandler(journal.JournalHandler(SYSLOG_IDENTIFIER='esp32-device'))
-        self.logger.setLevel(logging.DEBUG)
 
-    def start(self):
-        """Start the log server"""
-        self.server = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
-        self.server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.server.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
-        self.server.bind(('::', self.port))
-        self.server.listen(10)  # Increased backlog
-        
-        print(f"ESP32 log server listening on port {self.port}")
-        print("[view messages with \"journalctl -t esp32-device\"]")
-        self.running = True
-        
-        # Start a thread to clean up dead connections
-        cleanup_thread = threading.Thread(target=self.cleanup_dead_clients, daemon=True)
-        cleanup_thread.start()
-        
-        while self.running:
-            try:
-                client, addr = self.server.accept()
-                print(f"ESP32 connection from {addr[0]}:{addr[1]}")
-                
-                # Handle each client in a separate thread
-                client_thread = threading.Thread(
-                    target=self.handle_client,
-                    args=(client, addr),
-                    daemon=True  # Daemon threads exit when main thread exits
-                )
-                client_thread.start()
-                
-                # Track the client socket for cleanup
-                with self.clients_lock:
-                    self.clients.append({
-                        'socket': client,
-                        'thread': client_thread,
-                        'addr': addr
-                    })
-                    
-            except socket.timeout:
-                continue
-            except KeyboardInterrupt:
-                break
-            except Exception as e:
-                print(f"Error accepting connection: {e}")
-                time.sleep(1)  # Prevent tight loop on error
+class FGRLogServer:
+    """FGR Protocol Log Server"""
     
-    def handle_client(self, client, addr):
-        """Handle a connected ESP32 client in a separate thread"""
-        buffer = b''
-        expected_size = LogMsg.SIZE
-        client.settimeout(60.0)
-        # Enable TCP keepalive on the client socket
-        client.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)        
-
+    def __init__(self, bind_address: str = '0.0.0.0', port: int = 5000):
+        self.bind_address = bind_address
+        self.port = port
+        self.server_socket: Optional[socket.socket] = None
+        self.client_sockets: Set[socket.socket] = set()
+        self.running = True
+        self.stats = {
+            'connections': 0,
+            'log_messages': 0,
+            'bytes_received': 0,
+            'errors': 0
+        }
+        
+        # Set up signal handlers for graceful shutdown
+        signal.signal(signal.SIGINT, self._signal_handler)
+        signal.signal(signal.SIGTERM, self._signal_handler)
+    
+    def _signal_handler(self, signum: int, frame) -> None:
+        """Handle shutdown signals"""
+        print(f"\nReceived signal {signum}, shutting down...")
+        self.running = False
+    
+    def _get_priority_from_level(self, level: int) -> int:
+        """Convert FGR log level to systemd priority"""
+        return LOG_LEVEL_TO_PRIORITY.get(level, DEFAULT_PRIORITY)
+    
+    def _write_to_journal(self, message: str, level: int, 
+                          device_info: Dict[str, str]) -> None:
+        """Write a log message to the systemd journal"""
+        priority = self._get_priority_from_level(level)
+        
+        if HAS_SYSTEMD:
+            # Send to systemd journal with metadata
+            with journal.JournalHandler(
+                level=priority,
+                identifier='fgr-log-server'
+            ) as journal_handler:
+                # Add extra fields to the journal entry
+                extra_fields = {
+                    'FGR_DEVICE_ADDR': device_info.get('addr', 'unknown'),
+                    'FGR_DEVICE_PORT': device_info.get('port', 'unknown'),
+                    'FGR_LOG_LEVEL': str(level),
+                }
+                
+                # Create the log entry
+                journal.send(
+                    message,
+                    priority=priority,
+                    **extra_fields
+                )
+        else:
+            # Fallback to console output
+            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+            level_names = {
+                FGRLogLevel.FGR_LOG_LEVEL_DEBUG: 'DEBUG',
+                FGRLogLevel.FGR_LOG_LEVEL_INFO: 'INFO',
+                FGRLogLevel.FGR_LOG_LEVEL_WARN: 'WARN',
+                FGRLogLevel.FGR_LOG_LEVEL_ERROR: 'ERROR',
+            }
+            level_name = level_names.get(level, f'LEVEL_{level}')
+            
+            print(f"[{timestamp}] [{device_info['addr']}:{device_info['port']}] "
+                  f"[{level_name}] {message}")
+    
+    def _handle_client(self, client_socket: socket.socket, 
+                       client_address: tuple) -> None:
+        """Handle a connected client"""
+        device_info = {
+            'addr': client_address[0],
+            'port': client_address[1]
+        }
+        
+        print(f"New connection from {client_address[0]}:{client_address[1]}")
+        
         try:
             while self.running:
-                try:
-                    data = client.recv(1024)  # Read larger chunks
-                    if not data:
-                        print(f"Client {addr[0]} disconnected (normal)")
-                        break
-                    
-                    # Add to buffer
-                    buffer += data
-                    
-                    # Process complete messages
-                    while len(buffer) >= expected_size:
-                        msg_data = buffer[:expected_size]
-                        buffer = buffer[expected_size:]
-                        
-                        try:
-                            log_msg = LogMsg.unpack(msg_data)
-                            
-                            if log_msg.magic != LogMsg.MAGIC:
-                                print(f"WARNING: Invalid magic byte from {addr[0]}: {log_msg.magic:#x}")
-                                continue
-                            
-                            self.forward_to_journal(log_msg, addr)
-                            
-                        except struct.error as e:
-                            print(f"Struct unpacking error from {addr[0]}: {e}")
-                        except Exception as e:
-                            print(f"Error parsing log message from {addr[0]}: {e}")
-                            
-                except socket.timeout:
-                    continue
-                except ConnectionResetError:
-                    print(f"Client {addr[0]} reset connection (ESP32 rebooted)")
-                    break
-                except Exception as e:
-                    print(f"Error receiving data from {addr[0]}: {e}")
-                    break
-        finally:
-            # Clean up this client
-            client.close()
-            with self.clients_lock:
-                self.clients = [c for c in self.clients if c['socket'] != client]
-            print(f"ESP32 disconnected from {addr[0]}")
-    
-    def cleanup_dead_clients(self):
-        """Background thread to clean up dead connections"""
-        while self.running:
-            time.sleep(5)
-            with self.clients_lock:
-                dead_clients = []
-                for client_info in self.clients:
-                    client = client_info['socket']
-                    try:
-                        # Check if socket is still alive
-                        client.settimeout(0.1)
-                        data = client.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT)
-                        if data == b'':  # Connection closed
-                            dead_clients.append(client_info)
-                    except (socket.error, BlockingIOError) as e:
-                        # Connection probably alive (would block) or dead
-                        if hasattr(e, 'errno') and e.errno not in [11, 35, 10035]:  # Would block
-                            dead_clients.append(client_info)
-                    except:
-                        dead_clients.append(client_info)
+                # Receive and parse FGR message
+                msg = receive_message(client_socket, timeout=1.0)
                 
-                # Remove dead clients
-                for dead in dead_clients:
-                    try:
-                        dead['socket'].close()
-                    except:
-                        pass
-                    self.clients.remove(dead)
-                    print(f"Cleaned up dead client {dead['addr'][0]}")
+                if msg is None:
+                    # Timeout or connection issue, continue loop
+                    continue
+                
+                self.stats['bytes_received'] += len(msg.pack())
+                
+                # Check if this is a log message
+                if msg.message_type == FGRMsgType.FGR_MSG_TYPE_LOG:
+                    self.stats['log_messages'] += 1
+                    
+                    # Extract log message and level
+                    log_text = msg.get_log_message()
+                    log_level = msg.header.log_level
+                    
+                    # Write to journal
+                    self._write_to_journal(log_text, log_level, device_info)
+                    
+                    # Optional: Send acknowledgment back to device
+                    # (Not required by protocol, but could be implemented)
+                    # ack = FGRMsg.create_rsp(0, msg.reference)
+                    # send_message(client_socket, ack)
+                    
+                else:
+                    # Non-log message received
+                    print(f"Received non-log message type {msg.message_type} "
+                          f"from {client_address[0]}:{client_address[1]}")
+                    
+        except ConnectionResetError:
+            print(f"Connection reset by {client_address[0]}:{client_address[1]}")
+        except BrokenPipeError:
+            print(f"Broken pipe from {client_address[0]}:{client_address[1]}")
+        except Exception as e:
+            self.stats['errors'] += 1
+            print(f"Error handling client {client_address[0]}:{client_address[1]}: {e}")
+        finally:
+            client_socket.close()
+            self.client_sockets.discard(client_socket)
+            print(f"Connection closed from {client_address[0]}:{client_address[1]}")
     
-    def stop(self):
-        """Stop the server and all clients"""
-        self.running = False
+    def start(self) -> None:
+        """Start the log server"""
+        # Create server socket
+        self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        
+        try:
+            self.server_socket.bind((self.bind_address, self.port))
+            self.server_socket.listen(5)
+            self.server_socket.settimeout(1.0)  # Allow checking running flag
+            
+            print(f"FGR Log Server listening on {self.bind_address}:{self.port}")
+            print(f"Systemd journal support: {'Enabled' if HAS_SYSTEMD else 'Disabled'}")
+            print("Press Ctrl+C to stop")
+            print()
+            
+            # Main accept loop
+            while self.running:
+                try:
+                    client_socket, client_address = self.server_socket.accept()
+                    self.stats['connections'] += 1
+                    self.client_sockets.add(client_socket)
+                    
+                    # Handle client in the main thread (simplified)
+                    # For production, you might want to use threading
+                    self._handle_client(client_socket, client_address)
+                    
+                except socket.timeout:
+                    # Timeout occurred, just loop again to check running flag
+                    continue
+                except OSError as e:
+                    if self.running:
+                        print(f"Socket error: {e}")
+                    break
+                    
+        except Exception as e:
+            print(f"Failed to start server: {e}")
+            sys.exit(1)
+        finally:
+            self.stop()
+    
+    def stop(self) -> None:
+        """Stop the log server and clean up"""
+        print("\nShutting down...")
         
         # Close all client connections
-        with self.clients_lock:
-            for client_info in self.clients:
-                try:
-                    client_info['socket'].close()
-                except:
-                    pass
-            self.clients.clear()
+        for client_socket in self.client_sockets:
+            try:
+                client_socket.close()
+            except:
+                pass
+        self.client_sockets.clear()
         
         # Close server socket
-        if self.server:
-            self.server.close()
-        print("Server stopped")
-    def forward_to_journal(self, log_msg, addr):
-        """Forward ESP32 log message to systemd journal with IP prepended"""
-
-        # Ensure log_msg is a LogMsg object
-        if not hasattr(log_msg, 'level') or not hasattr(log_msg, 'message'):
-            print(f"ERROR: Invalid log message object: {type(log_msg)}")
-            return
-
-        # Map your protocol log levels to logging levels
-        priority_map = {
-            LogLevel.LOG_DEBUG: logging.DEBUG,
-            LogLevel.LOG_INFO: logging.INFO,
-            LogLevel.LOG_WARN: logging.WARNING,
-            LogLevel.LOG_ERROR: logging.ERROR,
-        }
-
-        # Get Python logging level
-        level = priority_map.get(log_msg.level, logging.INFO)
-
-        # Clean the message (remove null bytes and strip whitespace)
-        clean_message = log_msg.message.rstrip('\x00').strip()
-
-        # Skip empty messages
-        if not clean_message:
-            return
-
-        # Prepend the IP address to the message
-        ip_address = addr[0]
-        enhanced_message = f"[{ip_address}] {clean_message}"
-
-        # Add structured fields for better journalctl querying
-        extra = {
-            'ESP32_LEVEL': log_msg.level,
-            'ESP32_ADDR': ip_address,
-            'ESP32_PORT': addr[1],
-            'ESP32_LEVEL_NAME': LogLevel(log_msg.level).name if log_msg.level in LogLevel._value2member_map_ else 'UNKNOWN',
-            'CODE_MODULE': 'esp32_log_handler',
-        }
-
-        # Log to journal with IP in message and structured fields
-        self.logger.log(level, enhanced_message, extra=extra)
-
-        # Also print to console for debugging
-        print(f"LOG: {enhanced_message}")
+        if self.server_socket:
+            try:
+                self.server_socket.close()
+            except:
+                pass
         
-if __name__ == "__main__":
-    # Configure logging to also show debug info
-    logging.basicConfig(level=logging.DEBUG)
+        # Print statistics
+        print("\n=== Server Statistics ===")
+        print(f"Total connections: {self.stats['connections']}")
+        print(f"Log messages received: {self.stats['log_messages']}")
+        print(f"Total bytes received: {self.stats['bytes_received']}")
+        print(f"Errors: {self.stats['errors']}")
+        print("=========================")
+        print("Server stopped")
 
-    server = ESP32LogServer(port=5001)
+
+def main():
+    """Main entry point"""
+    parser = argparse.ArgumentParser(
+        description='FGR Protocol Log Server for ESP32 devices'
+    )
+    parser.add_argument(
+        '--port', '-p',
+        type=int,
+        default=5000,
+        help='Port to listen on (default: 5000)'
+    )
+    parser.add_argument(
+        '--bind-address', '-b',
+        type=str,
+        default='0.0.0.0',
+        help='Address to bind to (default: 0.0.0.0)'
+    )
+    
+    args = parser.parse_args()
+    
+    # Validate port range
+    if args.port < 1 or args.port > 65535:
+        print(f"Error: Invalid port number {args.port}")
+        sys.exit(1)
+    
+    # Create and start server
+    server = FGRLogServer(
+        bind_address=args.bind_address,
+        port=args.port
+    )
+    
     try:
-        print("Starting ESP32 log server. Press Ctrl+C to stop.")
         server.start()
     except KeyboardInterrupt:
-        print("\nShutting down...")
+        print("\nInterrupted by user")
         server.stop()
+    except Exception as e:
+        print(f"Fatal error: {e}")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
