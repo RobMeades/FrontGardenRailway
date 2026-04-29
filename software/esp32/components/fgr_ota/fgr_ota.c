@@ -278,10 +278,6 @@ int32_t fgr_ota_update(const char *update_file_url,
         .buffer_size = 2048
     };
 
-#ifdef CONFIG_STEPPER_SKIP_COMMON_NAME_CHECK
-    config.skip_cert_common_name_check = true;
-#endif
-
     // Begin the HTTP download
     esp_http_client_handle_t client = esp_http_client_init(&config);
     if (client != NULL) {

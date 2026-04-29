@@ -156,12 +156,13 @@ int32_t fgr_rcwl9610a_read()
             if (err == sizeof(buffer)) {
                err = ((((int32_t) buffer[0]) << 16) + (((int32_t) buffer[1]) << 8) + buffer[2]) / 1000;
             } else {
-                ESP_LOGE(TAG, "Expected to read %d byte(s) but"
-                         " uart_read_bytes() returned %d!", sizeof(buffer), err);
+                ESP_LOGE(TAG, "Expected to read %d byte(s) from UART %d but"
+                         " uart_read_bytes() returned %d!", sizeof(buffer),
+                         g_uart, err);
                 err = -ESP_FAIL;
             }
         } else {
-            ESP_LOGE(TAG, "Tried to write 1 byte (0x%02x) from UART %d"
+            ESP_LOGE(TAG, "Tried to write 1 byte (0x%02x) to UART %d"
                      " but uart_write_bytes() returned %d!",
                      RCWL9610A_COMMAND_READ_DISTANCE, g_uart, err);
             err = -ESP_FAIL;

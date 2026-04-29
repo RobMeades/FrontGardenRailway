@@ -2,7 +2,7 @@ menu "FGR Network Configuration"
 
     config FGR_NETWORK_WIFI_SSID
         string "WiFi SSID"
-        default "fgr"
+        default "FGR"
         help
             SSID (network name) to connect to.
 
@@ -15,7 +15,7 @@ menu "FGR Network Configuration"
 
     config FGR_NETWORK_CONTROLLER_HOSTNAME_IP_ADDRESS
         string "Hostname/IP of the controller"
-        default "10.10.2.20"
+        default "10.10.3.1"
         help
             IP address or host name of the controller
 

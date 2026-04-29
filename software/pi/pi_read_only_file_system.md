@@ -118,7 +118,7 @@ All credit goes to Chris Dzombak and those who helped him compile the guide.  Th
 
   Those will be the only lines in that file.
 
-- In the next step we will move `resolv.conf` to `/var/run`, which will allow NetworkManager update it when needed, but means it will be deleted every time the system shuts down. By default, though, NetworkManager won’t touch `/etc/resolv.conf` if it is a symlink.  To allow NetworkManager to recreate `resolv.conf` when the system restarts, `sudo nano /etc/NetworkManager/NetworkManager.conf` and add `rc-manager=file` under the [main] section, e.g.:
+- In the next step we will move `resolv.conf` to `/var/run`, which will allow NetworkManager to update it when needed, but means it will be deleted every time the system shuts down. By default, though, NetworkManager won’t touch `/etc/resolv.conf` if it is a symlink.  To allow NetworkManager to recreate `resolv.conf` when the system restarts, `sudo nano /etc/NetworkManager/NetworkManager.conf` and add `rc-manager=file` under the [main] section, e.g.:
 
   ```
   [main]
@@ -245,7 +245,6 @@ All credit goes to Chris Dzombak and those who helped him compile the guide.  Th
   ...then verify that the SD card partitions (e.g. `/dev/mmc*`) are mounted `ro`, and:
 
   `sudo journalctl -b 0`
-
 
  ...then scroll through and look for any issues.  When looking for issues, you will undoubtedly see some errors from various processes.  You will want to investigate those.  Start by checking "is this actually broken?".  Often there will be messages from e.g. `avahi-daemon` or `snapd` that are unhappy they cannot go about their business normally on a read-only filesystem.  But as long as that software is still working for your purposes, you can safely ignore their complaints.
 

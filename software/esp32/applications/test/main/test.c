@@ -15,8 +15,7 @@
  */
 
 /** @file
- * @brief Implementation of an OTA-updated level gauge node for the
- * front garden railway.
+ * @brief A test node for the front garden railway.
  */
 
 #include <string.h>
@@ -36,14 +35,13 @@
 #include "fgr_debug.h"
 #include "fgr_log.h"
 #include "fgr_ping.h"
-#include "fgr_rcwl9610a.h"
 
 /* ----------------------------------------------------------------
  * COMPILE-TIME MACROS
  * -------------------------------------------------------------- */
 
  // Logging prefix
- #define TAG "level_gauge"
+ #define TAG "test"
 
 /* ----------------------------------------------------------------
  * TYPES
@@ -104,13 +102,6 @@ esp_err_t init(void)
     ESP_LOGW(TAG, "CONFIG_FGR_APP_NO_WIFI is defined, not connecting to WiFi.");
 #endif
 
-    // Configure the RCWL-9610A driver
-    if (err == ESP_OK) {
-        err = fgr_rcwl9610a_init(CONFIG_FGR_RCWL9610A_UART_NUM,
-                                 CONFIG_FGR_RCWL9610A_UART_TXD_PIN,
-                                 CONFIG_FGR_RCWL9610A_UART_RXD_PIN);
-    }
-
     return err;
 }
 
@@ -130,10 +121,6 @@ void app_main(void)
         // Allow us to feed the watchdog
         esp_task_wdt_add(NULL);
         while(1) {
-            err = fgr_rcwl9610a_read();
-            if (err >= 0) {
-                ESP_LOGI(TAG, "Distance %d mm.", err);
-            }
             vTaskDelay(pdMS_TO_TICKS(1000));
             esp_task_wdt_reset();
         }
@@ -144,7 +131,6 @@ void app_main(void)
         vTaskDelay(pdMS_TO_TICKS(5000));
     }
 
-    fgr_rcwl9610a_deinit();
     fgr_log_deinit();
     fgr_network_deinit();
     esp_restart();

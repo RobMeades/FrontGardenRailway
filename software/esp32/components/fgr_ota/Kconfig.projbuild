@@ -2,7 +2,7 @@ menu "FGR OTA Configuration"
 
     config FGR_OTA_FIRMWARE_UPGRADE_URL
         string "Firmware Upgrade URL"
-        default "https://10.10.2.20:8070/default.bin"
+        default "https://10.10.3.1:8070/default.bin"
         help
             URL of the firmware image.
 

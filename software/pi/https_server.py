@@ -44,16 +44,8 @@ CERTIFICATE_KEY_FILE = "ca_key.pem"
 # Format: {requested_filename: {ip_address: actual_filename}}
 # This allows different IPs to get different files for the same request
 IP_TO_FILE_MAP = {
-    'stepper.bin': {
-        "10.10.3.10": "stand.bin",
-        "10.10.3.20": "lift.bin",
-        "10.10.3.30": "plinky_plonky.bin",
-        "10.10.3.40": "door.bin",
-        "10.10.3.41": "door.bin",
-        "10.10.3.42": "door.bin",
-        "10.10.3.43": "door.bin",
-        "10.10.3.44": "door.bin",
-        "10.10.3.45": "door.bin"
+    'default.bin': {
+        "10.10.3.10": "level_gauge.bin"
     },
     # Add more mappings as needed
     # 'motor.bin': {
@@ -313,7 +305,7 @@ def run(base_dir, port, differentiated_mode):
         logger.error(f"Fatal error: {e}", exc_info=True)
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description=("A script to serve files over HTTPS, part of the musical box project."),
+    parser = argparse.ArgumentParser(description=("A script to serve files over HTTPS, part of the front garden railway."),
                                      formatter_class=argparse.RawTextHelpFormatter)
     parser.add_argument('base_dir', nargs='?', default=BASE_DIR_DEFAULT, help=("directory to serve files from, default "
                                                                               f"'{BASE_DIR_DEFAULT}'."))
