@@ -15,7 +15,7 @@
  */
 
 /** @file
- * @brief Sockets helper functions for the front garden railway.
+ * @brief Sockets helper functions for a node of the front garden railway.
  */
 
 #include <string.h>

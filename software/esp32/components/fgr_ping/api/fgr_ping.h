@@ -16,11 +16,11 @@
 
 #ifndef _FGR_PING_H_
 #define _FGR_PING_H_
- 
+
  /** @file
-  * @brief The ping API for the front garden railway.
+  * @brief The ping API for a node of the front garden railway.
   */
- 
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -42,7 +42,7 @@ typedef void (*fgr_ping_loss_cb_t)(void *param);
 /* ----------------------------------------------------------------
  * FUNCTIONS
  * -------------------------------------------------------------- */
- 
+
 /** Start a ping session, of default type, to the given host name.
  * Networking must have been started.  Pinging will continue in the
  * background and diagnostic prints will be emitted.
@@ -77,9 +77,9 @@ int32_t fgr_ping_start(const char *hostname, int32_t count,
 #ifdef __cplusplus
 }
 #endif
- 
+
 /** @}*/
- 
+
 #endif // _FGR_PING_H_
- 
+
 // End of file

@@ -16,7 +16,7 @@
 
 /** @file
  * @brief Implementation of logging that includes forwarding
- * to a remote client.
+ * to the controller for a node of the front garden railway.
  */
 
 #include <string.h>

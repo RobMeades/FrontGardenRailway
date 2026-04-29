@@ -16,31 +16,31 @@
 
 #ifndef _FGR_OTA_H_
 #define _FGR_OTA_H_
- 
+
 /** @file
- * @brief The OTA API for the front garden railway: makes an
- * HTTP connection to a server and gets a file which is then
+ * @brief The OTA API for a node of the front garden railway: makes
+ * an HTTP connection to a server and gets a file which is then
  * written to non-volatile storage and the system restarted.
  * Versions are checked and if all is good the download is
  * not performed, everything is left alone.
  */
- 
+
 #ifdef __cplusplus
 extern "C" {
 #endif
- 
+
  /* ----------------------------------------------------------------
   * COMPILE-TIME MACROS
   * -------------------------------------------------------------- */
- 
+
  /* ----------------------------------------------------------------
   * TYPES
   * -------------------------------------------------------------- */
-  
+
  /* ----------------------------------------------------------------
   * FUNCTIONS
   * -------------------------------------------------------------- */
- 
+
 /** Initialise OTA, which basically involves setting up non-volatile
  * storage.
  *
@@ -72,9 +72,9 @@ int32_t fgr_ota_update(const char *update_file_url,
 #ifdef __cplusplus
 }
 #endif
- 
+
 /** @}*/
- 
+
 #endif // _FGR_OTA_H_
- 
+
  // End of file

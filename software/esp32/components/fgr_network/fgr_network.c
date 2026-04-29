@@ -15,8 +15,8 @@
  */
 
 /** @file
- * @brief Implementation of the networking part of the ESP32-based stepper
- * motor driver.
+ * @brief Implementation of the networking API for a node of the front
+ * garden railway.
  */
 
 #include <string.h>
@@ -67,7 +67,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
         wifi_event_sta_disconnected_t *event = (wifi_event_sta_disconnected_t*) event_data;
         ESP_LOGI(TAG, "WiFi disconnected, reason: %d.", event->reason);
-        
+
         // Print the AP info that failed
         ESP_LOGI(TAG, "AP SSID: %.32s.", event->ssid);
         ESP_LOGI(TAG, "AP BSSID: %02x:%02x:%02x:%02x:%02x:%02x.",
@@ -79,7 +79,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
         esp_wifi_connect();
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_AUTHMODE_CHANGE) {
         wifi_event_sta_authmode_change_t *event = (wifi_event_sta_authmode_change_t*) event_data;
-        ESP_LOGI(TAG, "Authmode changed from %d to %d.", 
+        ESP_LOGI(TAG, "Authmode changed from %d to %d.",
                  event->old_mode, event->new_mode);
     }
 }
@@ -90,7 +90,7 @@ static void ip_event_handler(void *arg, esp_event_base_t event_base,
     if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *event = (ip_event_got_ip_t *) event_data;
         ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&event->ip_info.ip), ".");
-        
+
         SemaphoreHandle_t semaphore = (SemaphoreHandle_t) arg;
         if (semaphore != NULL) {
             xSemaphoreGive(semaphore);
@@ -111,7 +111,7 @@ int32_t fgr_network_init(const char *ssid, const char *password,
 
     // Continue if there is no password or, if there is a
     // password, the authentication mode is not "open",
-    // also if ssid and password are within length  
+    // also if ssid and password are within length
     if ((((password == NULL) || (strlen(password) == 0)) ||
          (auth_mode != WIFI_AUTH_OPEN)) &&
          ((ssid != NULL) && (strlen(ssid) < sizeof(wifi_config.sta.ssid))) &&
@@ -152,14 +152,14 @@ int32_t fgr_network_init(const char *ssid, const char *password,
 
         // Register event handlers for WiFi and IP
         if (err == ESP_OK) {
-            err = esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, 
+            err = esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
                                              &wifi_event_handler, NULL);
             if (err != ESP_OK) {
                 ESP_LOGE(TAG, "Failed to register WiFi event handler: %s.", esp_err_to_name(err));
             }
         }
         if (err == ESP_OK) {
-            err = esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, 
+            err = esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
                                             &ip_event_handler, g_wifi_semaphore);
             if (err != ESP_OK) {
                 ESP_LOGE(TAG, "Failed to register IP event handler: %s.", esp_err_to_name(err));

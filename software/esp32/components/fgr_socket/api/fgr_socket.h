@@ -16,11 +16,11 @@
 
 #ifndef _FGR_SOCKET_H_
 #define _FGR_SOCKET_H_
- 
+
 /** @file
- * @brief Sockets helper functions for the front garden railway.
+ * @brief Sockets helper functions for a node of the front garden railway.
  */
- 
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -31,7 +31,7 @@ extern "C" {
 /* ----------------------------------------------------------------
  * COMPILE-TIME MACROS
  * -------------------------------------------------------------- */
- 
+
 #ifndef FGR_SOCKET_TCP_KEEP_ALIVE_IDLE_TIME_SECONDS
 // Idle time before TCP keep-alive kicks in, in seconds.
 #  define FGR_SOCKET_TCP_KEEP_ALIVE_IDLE_TIME_SECONDS   20
@@ -72,7 +72,7 @@ typedef void (*fgr_socket_rx_cb_t)(fgr_msg_t *msg, void *param);
 /* ----------------------------------------------------------------
  * FUNCTIONS
  * -------------------------------------------------------------- */
- 
+
 /** Set a socket to non-blocking mode.
  *
  * @param sock            the socket.
@@ -161,7 +161,7 @@ int32_t fgr_socket_send(int sock, uint8_t *buffer, size_t length,
  *                      is up: this may be checked by the receive task
  *                      and will be set to false by the receive task
  *                      if it detects that the connection has dropped.
- *                      This pointer must remain valid until 
+ *                      This pointer must remain valid until
  *                      fgr_socket_receive_stop() is called.
  * @param rx_cb         callback to be called when a whole message
  *                      is received.
@@ -182,9 +182,9 @@ void fgr_socket_receive_stop(void);
 #ifdef __cplusplus
 }
 #endif
- 
+
 /** @}*/
- 
+
 #endif // _FGR_SOCKET_H_
- 
+
 // End of file

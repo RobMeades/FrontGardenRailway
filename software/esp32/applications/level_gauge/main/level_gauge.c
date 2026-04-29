@@ -15,7 +15,8 @@
  */
 
 /** @file
- * @brief Implementation of an OTA-updated ESP32-based stepper motor driver.
+ * @brief Implementation of an OTA-updated level gauge node for the
+ * front garden railway.
  */
 
 #include <string.h>
@@ -51,7 +52,7 @@
  * VARIABLES
  * -------------------------------------------------------------- */
 
-// The CA certificate for the server.
+// The CA certificate for the OTA update server.
 extern const char *g_server_cert_pem_start asm("_binary_ca_cert_pem_start");
 
 /* ----------------------------------------------------------------

@@ -16,11 +16,11 @@
 
 #ifndef _FGR_NETWORK_H_
 #define _FGR_NETWORK_H_
- 
+
 /** @file
- * @brief The networking API for the front garden railway.
+ * @brief The networking API for a node of the front garden railway.
  */
- 
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -35,11 +35,11 @@ extern "C" {
 /* ----------------------------------------------------------------
  * TYPES
  * -------------------------------------------------------------- */
-  
+
 /* ----------------------------------------------------------------
  * FUNCTIONS
  * -------------------------------------------------------------- */
- 
+
 /** Initialise networking; requires the default event loop to
  * have been created.  Note that this function will create a semaphore
  * that is never destroyed.
@@ -83,9 +83,9 @@ size_t fgr_network_hostname_from_url(const char *url, char *buffer, size_t lengt
 #ifdef __cplusplus
 }
 #endif
- 
+
 /** @}*/
- 
+
 #endif // _NETWORK_H_
- 
+
 // End of file

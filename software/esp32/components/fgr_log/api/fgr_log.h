@@ -16,11 +16,12 @@
 
 #ifndef _FGR_LOG_H_
 #define _FGR_LOG_H_
- 
+
 /** @file
- * @brief API to handle forwarding of logs to a remote server.
+ * @brief API for a node of the front garden railway to handle forwarding
+ * of logs to the controller.
  */
- 
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -31,15 +32,15 @@ extern "C" {
  /* ----------------------------------------------------------------
   * COMPILE-TIME MACROS
   * -------------------------------------------------------------- */
- 
+
  /* ----------------------------------------------------------------
   * TYPES
   * -------------------------------------------------------------- */
-  
+
  /* ----------------------------------------------------------------
   * FUNCTIONS
   * -------------------------------------------------------------- */
- 
+
 /** Initialise logging to a remote server; requires networking to
  * be up first.  May be safely called at any time: will return
  * success if fgr_log_init() has already been called.
@@ -70,9 +71,9 @@ int32_t fgr_log_set_min_level(fgr_log_level_t level);
 #ifdef __cplusplus
 }
 #endif
- 
+
 /** @}*/
- 
+
 #endif // _FGR_LOG_H_
- 
+
 // End of file

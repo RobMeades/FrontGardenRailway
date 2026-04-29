@@ -16,11 +16,11 @@
 
 #ifndef _FGR_UTIL_H_
 #define _FGR_UTIL_H_
- 
+
  /** @file
-  * @brief Utilites API for the front garden railway.
+  * @brief Utilites API for a node of the front garden railway.
   */
- 
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -44,13 +44,13 @@ extern "C" {
 /* ----------------------------------------------------------------
  * FUNCTIONS
  * -------------------------------------------------------------- */
- 
+
 #ifdef __cplusplus
 }
 #endif
- 
+
 /** @}*/
- 
+
 #endif // _FGR_UTIL_H_
- 
+
 // End of file

@@ -15,7 +15,7 @@
  */
 
 /** @file
- * @brief Utility functions for the front garden railway.
+ * @brief Utility functions for a node of the front garden railway.
  */
 
 #include "fgr_util.h"

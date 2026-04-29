@@ -15,7 +15,7 @@
  */
 
 /** @file
- * @brief Implementation of the ping API for the front garden railway.
+ * @brief Implementation of the ping API for a node of the front garden railway.
  */
 
 #include <string.h>
@@ -127,7 +127,7 @@ int32_t fgr_ping_start(const char *hostname, int32_t count,
     struct addrinfo hint;
     struct addrinfo *res = NULL;
     memset(&hint, 0, sizeof(hint));
- 
+
     /* convert ip4 string or hostname to ip4 address */
     ip_addr_t target_addr;
     memset(&target_addr, 0, sizeof(target_addr));

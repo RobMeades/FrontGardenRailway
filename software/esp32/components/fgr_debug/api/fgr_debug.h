@@ -16,11 +16,11 @@
 
 #ifndef _FGR_DEBUG_H_
 #define _FGR_DEBUG_H_
- 
+
  /** @file
-  * @brief The ping API for the front garden railway.
+  * @brief The debug utilities API for a node of the front garden railway.
   */
- 
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -46,7 +46,7 @@ extern "C" {
 /* ----------------------------------------------------------------
  * FUNCTIONS
  * -------------------------------------------------------------- */
- 
+
 /** Initialise debug.
  *
  * @return ESP_OK on success, else a negative value from esp_err_t.
@@ -81,7 +81,7 @@ int32_t fgr_debug_hex_dump_to_buffer(const void *data, size_t data_size,
 }
 #endif
 /** @}*/
- 
+
 #endif // _FGR_DEBUG_H_
- 
+
 // End of file

@@ -15,7 +15,7 @@
  */
 
 /** @file
- * @brief Debug utilities for the front garden railway.
+ * @brief Debug utilities for a node of the front garden railway.
  */
 
 #include <string.h>

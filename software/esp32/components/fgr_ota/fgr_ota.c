@@ -15,7 +15,7 @@
  */
 
 /** @file
- * @brief OTA functions for the stepper motor driver.
+ * @brief Implementation of the OTA API for a node of the front garden railway.
  */
 
 #include <string.h>
@@ -49,7 +49,7 @@
 #define OTA_FILE_HEADER_BUFFER_SIZE 8192
 
 // SHA-256 digest length
-#define HASH_LEN 32 
+#define HASH_LEN 32
 
 // OTA URL buffer
 #define OTA_URL_SIZE 256
@@ -93,26 +93,26 @@ static void http_cleanup(esp_http_client_handle_t client)
 //
 // The ESP32 firmware header consists of:
 //   - esp_image_header_t (8 bytes)
-//   - esp_image_segment_header_t (8 bytes) 
+//   - esp_image_segment_header_t (8 bytes)
 //   - esp_app_desc_t (256 bytes)
 //
 // Total: 272 bytes minimum
 static bool has_complete_header(size_t accumulated_size)
 {
     // We need at least the image header + first segment header + app descriptor
-    size_t header_min_size = sizeof(esp_image_header_t) + 
-                             sizeof(esp_image_segment_header_t) + 
-                             sizeof(esp_app_desc_t);    
+    size_t header_min_size = sizeof(esp_image_header_t) +
+                             sizeof(esp_image_segment_header_t) +
+                             sizeof(esp_app_desc_t);
     size_t header_safe_size = header_min_size + 1024; // Safety margin
-    
+
     return accumulated_size >= header_safe_size;
 }
 
 // Helper function to get minimum header size
 static size_t has_complete_header_min_size(void)
 {
-    return sizeof(esp_image_header_t) + 
-           sizeof(esp_image_segment_header_t) + 
+    return sizeof(esp_image_header_t) +
+           sizeof(esp_image_segment_header_t) +
            sizeof(esp_app_desc_t) + 1024;  // + safety margin
 }
 
@@ -124,10 +124,10 @@ static int32_t parse_firmware_header(const char *buffer, size_t buffer_len,
                                      const esp_partition_t *update_partition)
 {
     esp_app_desc_t new_app_info;
-    
+
     // Extract app description from the accumulated data
-    memcpy(&new_app_info, 
-           &buffer[sizeof(esp_image_header_t) + sizeof(esp_image_segment_header_t)], 
+    memcpy(&new_app_info,
+           &buffer[sizeof(esp_image_header_t) + sizeof(esp_image_segment_header_t)],
            sizeof(esp_app_desc_t));
 
 
@@ -142,7 +142,7 @@ static int32_t parse_firmware_header(const char *buffer, size_t buffer_len,
 
     const esp_partition_t* last_invalid_app = esp_ota_get_last_invalid_partition();
     esp_app_desc_t invalid_app_info;
-    if (last_invalid_app != NULL && 
+    if (last_invalid_app != NULL &&
         esp_ota_get_partition_description(last_invalid_app, &invalid_app_info) == ESP_OK) {
         ESP_LOGI(TAG, "Last invalid firmware version: %s.", invalid_app_info.version);
     }
@@ -171,7 +171,7 @@ static int32_t parse_firmware_header(const char *buffer, size_t buffer_len,
         return -1;
     }
     ESP_LOGI(TAG, "esp_ota_begin succeeded.");
-    
+
     // Write any accumulated data that hasn't been written yet
     if (buffer_len > 0) {
         err = esp_ota_write(*update_handle, (const void *)buffer, buffer_len);
@@ -182,7 +182,7 @@ static int32_t parse_firmware_header(const char *buffer, size_t buffer_len,
         }
         ESP_LOGI(TAG, "Wrote accumulated %d bytes to flash.", buffer_len);
     }
-    
+
     return 1;  // Update in progress
 }
 
@@ -309,11 +309,11 @@ int32_t fgr_ota_update(const char *update_file_url,
         size_t header_accumulated = 0;
         int32_t zero_read_count = 0;
         int32_t max_zero_reads = 10;  // Maximum consecutive zero reads before considering connection dead
-        
+
         // State variables to control the loop
         bool transfer_complete = false;
         bool same_version_detected = false;
-        
+
         // Deal with all receive packets
         while (err == ESP_OK && !transfer_complete && !same_version_detected) {
             int32_t data_read = esp_http_client_read(client, g_ota_write_data, OTA_BUFFER_SIZE);
@@ -336,7 +336,7 @@ int32_t fgr_ota_update(const char *update_file_url,
                     /* Check if we have accumulated enough data to parse the header */
                     if (has_complete_header(header_accumulated)) {
                         ESP_LOGI(TAG, "Complete header accumulated (%d byte(s)).", header_accumulated);
-                        int32_t parse_result = parse_firmware_header(g_header_buffer, header_accumulated, 
+                        int32_t parse_result = parse_firmware_header(g_header_buffer, header_accumulated,
                                                                      running, &update_handle, update_partition);
                         if (parse_result == 1) {
                             // Update in progress
@@ -355,7 +355,7 @@ int32_t fgr_ota_update(const char *update_file_url,
                             err = ESP_ERR_INVALID_RESPONSE;
                         }
                     } else {
-                        ESP_LOGI(TAG, "Still accumulating header data (need more than %zu byte(s), currently at %zu).", 
+                        ESP_LOGI(TAG, "Still accumulating header data (need more than %zu byte(s), currently at %zu).",
                                  has_complete_header_min_size(), header_accumulated);
                         // Need to keep accumulating - will continue naturally
                     }
@@ -370,7 +370,7 @@ int32_t fgr_ota_update(const char *update_file_url,
             } else if (data_read == 0) {
                 // Handle zero read - this could be temporary or permanent
                 zero_read_count++;
-                ESP_LOGI(TAG, "Zero read #%d, header_accumulated=%d, header_checked=%d.", 
+                ESP_LOGI(TAG, "Zero read #%d, header_accumulated=%d, header_checked=%d.",
                          zero_read_count, header_accumulated, image_header_was_checked);
                 // If we haven't checked the header yet, we need to be careful
                 if (!image_header_was_checked) {
@@ -378,7 +378,7 @@ int32_t fgr_ota_update(const char *update_file_url,
                     if (esp_http_client_is_complete_data_received(client) == true) {
                         // Server says transfer is complete, but we don't have enough header data
                         ESP_LOGE(TAG, "Connection closed before accumulating enough header data!");
-                        ESP_LOGE(TAG, "Accumulated only %zu bytes, need at least %zu.", 
+                        ESP_LOGE(TAG, "Accumulated only %zu bytes, need at least %zu.",
                                  header_accumulated, has_complete_header_min_size());
                         err = ESP_ERR_NOT_FINISHED;
                     } else if (zero_read_count >= max_zero_reads) {
