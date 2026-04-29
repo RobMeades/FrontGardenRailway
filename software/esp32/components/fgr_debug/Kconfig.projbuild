@@ -1,0 +1,9 @@
+menu "FGR Debug Configuration"
+
+    config FGR_DEBUG_LED_PIN
+        int "Debug LED pin"
+        default 8
+        help
+            The pin where a debug LED is connected
+
+endmenu

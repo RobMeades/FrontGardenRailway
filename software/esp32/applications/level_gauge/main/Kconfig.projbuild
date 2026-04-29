@@ -1,0 +1,9 @@
+menu "FGR Application Configuration"
+
+    config FGR_APP_NO_WIFI
+        bool "Omit connecting to Wi-Fi (and therefore omit doing an OTA update)"
+        default n
+        help
+            Set to omit making a WiFi connection
+
+endmenu

@@ -1,0 +1,27 @@
+menu "FGR Network Configuration"
+
+    config FGR_NETWORK_WIFI_SSID
+        string "WiFi SSID"
+        default "fgr"
+        help
+            SSID (network name) to connect to.
+
+    config FGR_NETWORK_WIFI_PASSWORD
+        string "Wi-Fi Password"
+        default ""
+        help
+            WiFi password (WPA or WPA2) to use.
+            Can be left blank if the network has no security set.
+
+    config FGR_NETWORK_CONTROLLER_HOSTNAME_IP_ADDRESS
+        string "Hostname/IP of the controller"
+        default "10.10.2.20"
+        help
+            IP address or host name of the controller
+
+    config FGR_NETWORK_CONTROLLER_PORT
+        int "The port number of the controller"
+        default 5000
+        range 1024 65535
+
+endmenu

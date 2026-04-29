@@ -1,0 +1,15 @@
+menu "FGR OTA Configuration"
+
+    config FGR_OTA_FIRMWARE_UPGRADE_URL
+        string "Firmware Upgrade URL"
+        default "https://10.10.2.20:8070/default.bin"
+        help
+            URL of the firmware image.
+
+    config FGR_OTA_RECEIVE_TIMEOUT_MS
+        int "OTA Receive Timeout in milliseconds"
+        default 5000
+        help
+            Maximum time for reception
+
+endmenu

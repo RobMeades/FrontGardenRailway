@@ -1,0 +1,8 @@
+menu "FGR Log Configuration"
+
+    config FGR_LOG_PORT
+        int "The port number of the logging collector on the controller"
+        default 5001
+        range 1024 65535
+
+endmenu
