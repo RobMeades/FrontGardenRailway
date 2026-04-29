@@ -125,31 +125,42 @@ class FGRLogServer:
         
         if HAS_SYSTEMD:
             # Send to systemd journal with metadata
-            # Note: In systemd-python, we use journal.send() directly
-            # Create the log entry with extra fields
+            # Custom fields (uppercase with underscore) can be used for filtering
             extra_fields = {
-                'FGR_DEVICE_ADDR': device_info.get('addr', 'unknown'),
-                'FGR_DEVICE_PORT': device_info.get('port', 'unknown'),
-                'FGR_LOG_LEVEL': str(level),
+                # Standard syslog fields
                 'SYSLOG_IDENTIFIER': 'fgr-log-server',
+                'PRIORITY': str(priority),
+                
+                # Custom FGR fields (these can be used with journalctl --grep or -F)
+                'FGR_DEVICE_ADDR': device_info.get('addr', 'unknown'),
+                'FGR_DEVICE_PORT': str(device_info.get('port', 'unknown')),
+                'FGR_LOG_LEVEL': str(level),
+                'FGR_LOG_LEVEL_NAME': self._get_level_name(level),
+                
+                # Also add IP as separate field for easy filtering
+                'SOURCE_IP': device_info.get('addr', 'unknown'),
             }
             
-            # Send to journal
+            # Add message to journal
             journal.send(message, priority=priority, **extra_fields)
         else:
             # Fallback to console output
             timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
-            level_names = {
-                FGRLogLevel.FGR_LOG_LEVEL_DEBUG: 'DEBUG',
-                FGRLogLevel.FGR_LOG_LEVEL_INFO: 'INFO',
-                FGRLogLevel.FGR_LOG_LEVEL_WARN: 'WARN',
-                FGRLogLevel.FGR_LOG_LEVEL_ERROR: 'ERROR',
-            }
-            level_name = level_names.get(level, f'LEVEL_{level}')
+            level_name = self._get_level_name(level)
             
             print(f"[{timestamp}] [{device_info['addr']}:{device_info['port']}] "
                   f"[{level_name}] {message}")
-    
+
+    def _get_level_name(self, level: int) -> str:
+        """Get human-readable log level name"""
+        level_names = {
+            FGRLogLevel.FGR_LOG_LEVEL_DEBUG: 'DEBUG',
+            FGRLogLevel.FGR_LOG_LEVEL_INFO: 'INFO',
+            FGRLogLevel.FGR_LOG_LEVEL_WARN: 'WARN',
+            FGRLogLevel.FGR_LOG_LEVEL_ERROR: 'ERROR',
+        }
+        return level_names.get(level, f'LEVEL_{level}')    
+
     def _handle_client(self, client_socket: socket.socket, 
                        client_address: tuple) -> None:
         """Handle a connected client"""

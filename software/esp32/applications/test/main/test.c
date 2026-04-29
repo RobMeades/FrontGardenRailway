@@ -121,7 +121,8 @@ void app_main(void)
         // Allow us to feed the watchdog
         esp_task_wdt_add(NULL);
         while(1) {
-            vTaskDelay(pdMS_TO_TICKS(1000));
+            ESP_LOGI(TAG, "Test node idle.");
+            vTaskDelay(pdMS_TO_TICKS(4000));
             esp_task_wdt_reset();
         }
         esp_task_wdt_delete(NULL);

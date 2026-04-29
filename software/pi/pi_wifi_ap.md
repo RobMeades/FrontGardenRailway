@@ -2,7 +2,7 @@
 These instructions describe how to set up a Wi-Fi access point on a headless Pi Zero W.  Note that, on the version of Raspbian I was using (Trixie), any attempt to set an access point with security failed, so these instructions set up an open Wi-Fi access point (security is provided later through [MAC address filtering](pi_wifi_dhcp_mac.md)).
 
 # Preparation
-Since the Pi will lose connectivity to your Wi-Fi network (you do _not_ want an open access point on your Wi-Fi network) you must have a serial connection to the headless Pi.
+Since the Pi will lose connectivity to your Wi-Fi network (you do _not_ want an open access point on your Wi-Fi network) you must have a serial connection to the headless Pi (e.g. using a 3V3 FTDI cable, black to GND, orange (RX) to GPIO14 (TX), yellow (TX) to GPIO15 (RX)).
 
 - If you have hardened the Pi, enter `rw` to make the Pi writeable.
 
@@ -61,7 +61,7 @@ Connect to the Pi using a serial terminal and set the AP up as follows:
 - If you want to bring the AP down, `sudo nmcli connection down FGR` and the Pi will return to having a connection to your Wi-Fi network.
 
 # HTTPS Server Setup
-All of the ESP32 boards will want to make an HTTPS connection to the access point to download updates to their programs; this is what the Python script `https_server.py` does.  To get it running with the ESP32s, connect a serial terminal to the Pi and do the following:
+All of the ESP32 nodes will want to make an HTTPS connection to the access point to download updates to their programs; this is what the Python script `https_server.py` does.  To get it running with the ESP32s, connect a serial terminal to the Pi and do the following:
 
 - Create a directory off your home directory named `fw`.
 
@@ -75,7 +75,7 @@ All of the ESP32 boards will want to make an HTTPS connection to the access poin
 
   ...leaving all entries blank by entering `.` _except_ the Common Name entry, which *must* be set `10.10.3.1` (the IP address of the Pi as an access point).
 
-- On a PC which has the ESP32 software environment installed on it, and has a clone of this repository, replace the file `FrontGardenRailway/software/server_certs/ca_cert.pem` with the `ca_cert.pem` you just generated.
+- On a PC which has the ESP-IDF software environment installed on it, and has a clone of this repository, replace the file `FrontGardenRailway/software/server_certs/ca_cert.pem` with the `ca_cert.pem` you just generated.
 
 - Build the ESP-IDF `test` application, e.g. by opening the workspace file `FrontGardenRailway/software/esp32/applications/test/test.code-workspace` in Visual Studio Code and pressing `CTRL-e` then `b`.
 
@@ -109,26 +109,18 @@ All of the ESP32 boards will want to make an HTTPS connection to the access poin
 
   `sudo systemctl start https_server`
 
-  ... and:
-
-  `sudo systemctl status https_server`
-
-  ...should show nice green things.  Maybe reboot the ESP32 and watch its output again as it connects to the Wi-Fi AP and the HTTPS server to ensure all is good.  You might also run:
-
-  `journalctl -u https_server.service -f`
-
-  ...on the Pi to live-monitor the output of the `https_server` service as the ESP32 is connecting.
+  ...and make sure the ESP32 connects to the Wi-Fi AP and the HTTPS server to ensure all is good.
 
 - To make the service run at boot:
 
   `sudo systemctl enable https_server`
 
-  ...then take the power down and up again; the motor attached to the ESP32 should rotate once everything has come up.
+  ...then take the power down and up again and repeat the check.
 
 - If you had hardened the Pi, put it back into read-only mode with the command `ro`.
 
 # Log Server Setup
-If your \[ESP32\] connected devices are able to send their log messages to this server over TCP, `log_server.py` can be run to listen for them and stuff the messages into the journal.  To get this script to run at boot, making sure port 5001 (the default port it will listen on) and then:
+The `log_server.py` script can be run on the Raspberry Pi to listen for log messages from all nodes and stuff the messages into the journal.  To get this script to run at boot, make sure port 5001 (the default port it will listen on) is open, then:
 
 - `sudo nano /lib/systemd/system/log_server.service` with the following contents:
 
@@ -152,13 +144,11 @@ If your \[ESP32\] connected devices are able to send their log messages to this 
 
   `sudo systemctl start log_server`
 
-  ... and:
+  ...and make sure the ESP32 connects to the Wi-Fi AP, the HTTPS server and then the log server.
 
-  `sudo systemctl status log_server`
-
-  ...should show nice green things.  To view the log messages:
+- To view the log messages:
   
-  `journalctl -t esp32-device`
+  `journalctl -t fgr-log-server`
   
 - To make the service run at boot:
 
