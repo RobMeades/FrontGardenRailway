@@ -92,7 +92,7 @@ DEFAULT_PRIORITY = journal.LOG_INFO if HAS_SYSTEMD else 6
 class FGRLogServer:
     """FGR Protocol Log Server"""
     
-    def __init__(self, bind_address: str = '0.0.0.0', port: int = 5000):
+    def __init__(self, bind_address: str = '0.0.0.0', port: int = 5001):
         self.bind_address = bind_address
         self.port = port
         self.server_socket: Optional[socket.socket] = None
@@ -283,8 +283,8 @@ def main():
     parser.add_argument(
         '--port', '-p',
         type=int,
-        default=5000,
-        help='Port to listen on (default: 5000)'
+        default=5001,
+        help='Port to listen on (default: 5001)'
     )
     parser.add_argument(
         '--bind-address', '-b',
