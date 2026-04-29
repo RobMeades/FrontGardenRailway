@@ -48,7 +48,7 @@ Connect to the Pi using a serial terminal and set the AP up as follows:
 
 - Now you can create the access point with:
 
-  `sudo nmcli connection add type wifi ifname wlan0 con-name FGR autoconnect yes ssid FGR`
+  `sudo nmcli connection add type wifi ifname wlan0 con-name FGR autoconnect yes connection.autoconnect-priority 1 ssid FGR`
 
 - Set some properties for the access point with:
 
