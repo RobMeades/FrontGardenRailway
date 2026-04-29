@@ -149,6 +149,10 @@ The `log_server.py` script can be run on the Raspberry Pi to listen for log mess
 - To view the log messages:
   
   `journalctl -t fgr-log-server`
+
+  ...or to view the log messages from a particular IP address, updated in real time:
+
+  `journalctl -f -t fgr-log-server SOURCE_IP=10.10.3.24`
   
 - To make the service run at boot:
 
