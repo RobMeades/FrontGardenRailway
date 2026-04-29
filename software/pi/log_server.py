@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# All written by DeepSeek :-).
+# All written by DeepSeek :-)
 
 """
 Log Server for FGR ESP32 Devices
@@ -42,17 +42,30 @@ import argparse
 import signal
 import struct
 import time
+from pathlib import Path
 from typing import Optional, Dict, Set
 from datetime import datetime
+
+# Add the protocol directory to Python path
+# Get the directory where THIS script is located
+script_dir = Path(__file__).resolve().parent
+
+# Navigate up to the common directory where fgr_protocol.py lives
+# Adjust this path based on your actual directory structure
+protocol_dir = script_dir.parent / 'protocol'
+sys.path.insert(0, str(protocol_dir))
 
 # Import the generated FGR protocol module
 try:
     from fgr_protocol import (
         FGRMsg, FGRMsgType, FGRLogLevel, receive_message, send_message
     )
-except ImportError:
-    print("Error: Cannot import fgr_protocol module")
-    print("Please ensure fgr_protocol.py is in the Python path")
+except ImportError as e:
+    print(f"Error: Cannot import fgr_protocol module: {e}")
+    print(f"Looking in: {protocol_dir}")
+    print("Please ensure fgr_protocol.py is in the protocol directory")
+    print("and that you've run the generator script first:")
+    print("  python3 generate_fgr_protocol.py fgr_protocol.h protocol/fgr_protocol.py")
     sys.exit(1)
 
 # Try to import systemd journal support
@@ -112,23 +125,17 @@ class FGRLogServer:
         
         if HAS_SYSTEMD:
             # Send to systemd journal with metadata
-            with journal.JournalHandler(
-                level=priority,
-                identifier='fgr-log-server'
-            ) as journal_handler:
-                # Add extra fields to the journal entry
-                extra_fields = {
-                    'FGR_DEVICE_ADDR': device_info.get('addr', 'unknown'),
-                    'FGR_DEVICE_PORT': device_info.get('port', 'unknown'),
-                    'FGR_LOG_LEVEL': str(level),
-                }
-                
-                # Create the log entry
-                journal.send(
-                    message,
-                    priority=priority,
-                    **extra_fields
-                )
+            # Note: In systemd-python, we use journal.send() directly
+            # Create the log entry with extra fields
+            extra_fields = {
+                'FGR_DEVICE_ADDR': device_info.get('addr', 'unknown'),
+                'FGR_DEVICE_PORT': device_info.get('port', 'unknown'),
+                'FGR_LOG_LEVEL': str(level),
+                'SYSLOG_IDENTIFIER': 'fgr-log-server',
+            }
+            
+            # Send to journal
+            journal.send(message, priority=priority, **extra_fields)
         else:
             # Fallback to console output
             timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
@@ -210,6 +217,7 @@ class FGRLogServer:
             
             print(f"FGR Log Server listening on {self.bind_address}:{self.port}")
             print(f"Systemd journal support: {'Enabled' if HAS_SYSTEMD else 'Disabled'}")
+            print(f"Protocol module loaded from: {protocol_dir}")
             print("Press Ctrl+C to stop")
             print()
             
