@@ -36,6 +36,7 @@
 #include "fgr_debug.h"
 #include "fgr_log.h"
 #include "fgr_ping.h"
+#include "fgr_rcwl9610a.h"
 
 /* ----------------------------------------------------------------
  * COMPILE-TIME MACROS
@@ -63,7 +64,7 @@ extern const char *g_server_cert_pem_start asm("_binary_ca_cert_pem_start");
 esp_err_t init(void)
 {
     // Print out our Wi-Fi MAC address
-    fgr_debug_print_max_address();
+    fgr_debug_print_mac_address();
 
     // Create the default event loop, for everyone's use
     esp_err_t err = esp_event_loop_create_default();
@@ -103,6 +104,13 @@ esp_err_t init(void)
     ESP_LOGW(TAG, "CONFIG_FGR_APP_NO_WIFI is defined, not connecting to WiFi.");
 #endif
 
+    // Configure the RCWL-9610A driver
+    if (err == ESP_OK) {
+        err = fgr_rcwl9610a_init(CONFIG_FGR_RCWL9610A_UART_NUM,
+                                 CONFIG_FGR_RCWL9610A_UART_TXD_PIN,
+                                 CONFIG_FGR_RCWL9610A_UART_RXD_PIN);
+    }
+
     return err;
 }
 
@@ -113,18 +121,19 @@ esp_err_t init(void)
 // Entry point.
 void app_main(void)
 {
-    ESP_LOGI(TAG, "level gauge app_main start");
+    ESP_LOGI(TAG, "app_main start.");
 
-    esp_err_t err = init();
+    int32_t err = init();
     if (err == ESP_OK) {
         ESP_LOGI(TAG, "Initialization complete.");
 
         // Allow us to feed the watchdog
         esp_task_wdt_add(NULL);
-
-        ESP_LOGI(TAG, "DONE");
-        fgr_log_deinit();
         while(1) {
+            err = fgr_rcwl9610a_read();
+            if (err >= 0) {
+                ESP_LOGI(TAG, "Distance %d mm.", err);
+            }
             vTaskDelay(pdMS_TO_TICKS(1000));
             esp_task_wdt_reset();
         }
@@ -132,8 +141,10 @@ void app_main(void)
 
     } else {
         ESP_LOGE(TAG, "Initialization failed, system cannot continue, will restart soonish.");
+        vTaskDelay(pdMS_TO_TICKS(5000));
     }
 
+    fgr_rcwl9610a_deinit();
     fgr_log_deinit();
     fgr_network_deinit();
     esp_restart();

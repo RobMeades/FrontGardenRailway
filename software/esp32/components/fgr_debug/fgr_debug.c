@@ -77,7 +77,7 @@ void fgr_debug_flash_led(int32_t duration_ms)
 }
 
 // Print out our MAC address.
-void fgr_debug_print_max_address()
+void fgr_debug_print_mac_address()
 {
     uint8_t mac[6] = {0};
     if (esp_read_mac(mac, ESP_MAC_WIFI_STA) == ESP_OK) {

@@ -62,7 +62,7 @@ void fgr_debug_flash_led(int32_t duration_ms);
 
 /** Print out our MAC address if possible.
  */
-void fgr_debug_print_max_address();
+void fgr_debug_print_mac_address();
 
 /** Create a hex dump of data in a provided buffer.
  *

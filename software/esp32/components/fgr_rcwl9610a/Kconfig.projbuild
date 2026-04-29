@@ -1,0 +1,21 @@
+menu "FGR RCWL-9610A Configuration"
+
+    config FGR_RCWL9610A_UART_NUM
+        int "UART_NUM"
+        default 1
+        help
+            UART number to use for the RCWL-9610A
+
+    config FGR_RCWL9610A_UART_TXD_PIN
+        int "TXD pin"
+        default 7
+        help
+            UART TX pin wired to the RCWL-9610A
+
+    config FGR_RCWL9610A_UART_RXD_PIN
+        int "RXD pin"
+        default 6
+        help
+            UART RX pin wired to the RCWL-9610A
+
+endmenu

@@ -160,6 +160,31 @@ static void task_rx(void *param)
  * PUBLIC FUNCTIONS
  * -------------------------------------------------------------- */
 
+// Create a socket.
+int32_t fgr_socket_create(int *sock)
+{
+    esp_err_t err = ESP_ERR_INVALID_ARG;
+
+    if (sock) {
+        err = ESP_FAIL;
+        *sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (*sock >= 0) {
+            err = ESP_OK;
+        } else {
+            ESP_LOGE(TAG, "Unable to create socket %d (%s)!", errno, strerror(errno));
+        }
+    }
+
+    // Returns ESP_OK or negative error code from esp_err_t
+    return (int32_t) -err;
+}
+
+// Destroy a socket.
+void fgr_socket_destroy(int sock)
+{
+    close(sock);
+}
+
 // Set a socket to non-blocking mode.
 int32_t fgr_socket_set_non_blocking(int sock, int32_t timeout_seconds)
 {
@@ -274,33 +299,6 @@ int32_t fgr_socket_enable_tcp_keep_alive(int sock,
 
     // Returns ESP_OK or negative error code from esp_err_t
     return (int32_t) -err;
-}
-
-// Create a socket.
-int32_t fgr_socket_create(int *sock)
-{
-    esp_err_t err = ESP_ERR_INVALID_ARG;
-
-    if (sock) {
-        err = ESP_FAIL;
-        *sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-        if (*sock >= 0) {
-            err = ESP_OK;
-        } else {
-            ESP_LOGE(TAG, "Unable to create socket %d (%s)!", errno, strerror(errno));
-        }
-    }
-
-    // Returns ESP_OK or negative error code from esp_err_t
-    return (int32_t) -err;
-}
-
-// Destroy a socket.
-void fgr_socket_destroy(int sock)
-{
-    if (sock) {
-        close(sock);
-    }
 }
 
 // Connect a socket.

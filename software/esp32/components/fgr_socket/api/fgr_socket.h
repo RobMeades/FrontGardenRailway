@@ -73,6 +73,19 @@ typedef void (*fgr_socket_rx_cb_t)(fgr_msg_t *msg, void *param);
  * FUNCTIONS
  * -------------------------------------------------------------- */
 
+/** Create a socket.
+ *
+ * @param sock   a pointer to a place to put the socket.
+ * @return       ESP_OK on success, else a negative value from esp_err_t.
+ */
+int32_t fgr_socket_create(int *sock);
+
+/** Destroy a socket.
+ *
+ * @param sock   the socket.
+ */
+void fgr_socket_destroy(int sock);
+
 /** Set a socket to non-blocking mode.
  *
  * @param sock            the socket.
@@ -103,19 +116,6 @@ int32_t fgr_socket_enable_tcp_keep_alive(int sock,
                                          int32_t tcp_keep_alive_idle_time_seconds,
                                          int32_t tcp_keep_alive_probe_interval_seconds,
                                          size_t tcp_keep_alive_count);
-
-/** Create a socket.
- *
- * @param sock   a pointer to a place to put the socket.
- * @return       ESP_OK on success, else a negative value from esp_err_t.
- */
-int32_t fgr_socket_create(int *sock);
-
-/** Destroy a socket.
- *
- * @param sock   the socket.
- */
-void fgr_socket_destroy(int sock);
 
 /** Connect a socket.
  *
