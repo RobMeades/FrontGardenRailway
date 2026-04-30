@@ -132,7 +132,7 @@ typedef enum {
 // Request message header.
 typedef struct __attribute__((packed)) {
     uint16_t type;      // fgr_req_cnf_t, top four bits ORed with FGR_MSG_TYPE_REQ
-    uint8_t reference;  // Reference that may to copied into any confirmation
+    uint8_t reference;  // Reference that may be copied into any confirmation
 } fgr_msg_header_req_t;
 
 // Confirmation message header.

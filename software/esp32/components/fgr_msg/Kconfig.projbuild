@@ -1,0 +1,8 @@
+menu "FGR Message Configuration"
+
+    config FGR_MSG_PORT
+        int "The messaging port number of the controller"
+        default 5000
+        range 1024 65535
+
+endmenu

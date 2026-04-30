@@ -33,9 +33,10 @@
 #include "fgr_ota.h"
 #include "fgr_network.h"
 #include "fgr_socket.h"
+#include "fgr_msg.h"
 #include "fgr_debug.h"
 #include "fgr_log.h"
-#include "fgr_ping.h"
+
 #include "fgr_rcwl9610a.h"
 
 /* ----------------------------------------------------------------
@@ -97,7 +98,7 @@ esp_err_t init(void)
 
     // Forward logging to the server
     if (err == ESP_OK) {
-        err = fgr_log_init(CONFIG_FGR_NETWORK_CONTROLLER_HOSTNAME_IP_ADDRESS, CONFIG_FGR_LOG_PORT, FGR_LOG_LEVEL_INFO);
+        err = fgr_log_init(CONFIG_FGR_NETWORK_CONTROLLER_IP_ADDRESS, CONFIG_FGR_LOG_PORT, FGR_LOG_LEVEL_INFO);
     }
 
 #else

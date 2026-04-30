@@ -67,7 +67,7 @@ static int32_t g_uart = -1;
  * -------------------------------------------------------------- */
 
 // Clean-up on error or completion.
-static void cleanup()
+static void clean_up()
 {
     if (g_uart >= 0) {
         uart_driver_delete((uart_port_t) g_uart);
@@ -112,7 +112,7 @@ int32_t fgr_rcwl9610a_init(int32_t uart, int32_t pin_txd, int32_t pin_rxd)
                 ESP_LOGE(TAG, "uart_param_config() failed (%s)!", esp_err_to_name(err));
             }
             if (err != ESP_OK) {
-                cleanup();
+                clean_up();
             }
         } else {
             ESP_LOGE(TAG, "uart_driver_install() failed (%s)!", esp_err_to_name(err));
@@ -128,7 +128,7 @@ int32_t fgr_rcwl9610a_init(int32_t uart, int32_t pin_txd, int32_t pin_rxd)
 // Deinitialise the interface to the RCWL-9610A.
 void fgr_rcwl9610a_deinit()
 {
-    cleanup();
+    clean_up();
 }
 
 // Make a distance reading.

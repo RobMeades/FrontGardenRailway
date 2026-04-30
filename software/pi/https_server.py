@@ -45,7 +45,7 @@ CERTIFICATE_KEY_FILE = "ca_key.pem"
 # This allows different IPs to get different files for the same request
 IP_TO_FILE_MAP = {
     'default.bin': {
-        "10.10.3.10": "level_gauge.bin"
+        "10.10.3.2": "test.bin"
     },
     # Add more mappings as needed
     # 'motor.bin': {

@@ -14,20 +14,17 @@
  * limitations under the License.
  */
 
-#ifndef _FGR_LOG_H_
-#define _FGR_LOG_H_
+#ifndef _FGR_MSG_H_
+#define _FGR_MSG_H_
 
 /** @file
- * @brief API for a node of the front garden railway to handle forwarding
- * of logs to the controller.
+ * @brief API to exchange messages with the controller for a node of
+ * the front garden railway.
  */
 
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-// Required for fgr_log_level_t.
-#include "../../../../../protocol/fgr_protocol.h"
 
 /* ----------------------------------------------------------------
  * COMPILE-TIME MACROS
@@ -41,34 +38,23 @@ extern "C" {
  * FUNCTIONS
  * -------------------------------------------------------------- */
 
-/** Initialise logging to a remote server; requires networking to
- * be up first.  May be safely called at any time: will return
- * success if fgr_log_init() has already been called.
+/** Initialise the messaging interface.
  *
  * Note: this will create a mutex that is never destroyed.
  *
- * @param server_ip IP address of the server, e.g. 10.10.3.1;
- *                  note that this is NOT copied, it must remain
- *                  static until fgr_log_deinit() is called.
+ * @param server_ip IP address of the server, e.g. 10.10.3.1.
+ *                  IMPORTANT: this is NOT copied, it must remain
+ *                  static until fgr_msg_deinit() is called.
  * @param port      the port on the server that is listening for
- *                  log messages.
- * @param min_level the minimum level to log (default LOG_INFO).
+ *                  FGR protocol messages.
  * @return          ESP_OK on success, else a negative value from
  *                  esp_err_t.
  */
-int32_t fgr_log_init(const char *server_ip, uint16_t port, fgr_log_level_t min_level);
+int32_t fgr_msg_init(const char *server_ip, uint16_t port);
 
-/** Return back to the normal ESP32 logging.
+/** Deinitialise the messaging interface.
  */
-void fgr_log_deinit();
-
-/** Change the minimum log level.
- *
- * @param level the new minimum level to log.
- * @return      ESP_OK on success, else a negative value from
- *              esp_err_t.
- */
-int32_t fgr_log_set_min_level(fgr_log_level_t level);
+void fgr_msg_deinit();
 
 #ifdef __cplusplus
 }
@@ -76,6 +62,6 @@ int32_t fgr_log_set_min_level(fgr_log_level_t level);
 
 /** @}*/
 
-#endif // _FGR_LOG_H_
+#endif // _FGR_MSG_H_
 
 // End of file

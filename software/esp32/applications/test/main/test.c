@@ -32,6 +32,7 @@
 #include "fgr_ota.h"
 #include "fgr_network.h"
 #include "fgr_socket.h"
+#include "fgr_msg.h"
 #include "fgr_debug.h"
 #include "fgr_log.h"
 #include "fgr_ping.h"
@@ -95,8 +96,13 @@ esp_err_t init(void)
 
     // Forward logging to the server
     if (err == ESP_OK) {
-        err = fgr_log_init(CONFIG_FGR_NETWORK_CONTROLLER_HOSTNAME_IP_ADDRESS, CONFIG_FGR_LOG_PORT, FGR_LOG_LEVEL_INFO);
+        err = fgr_log_init(CONFIG_FGR_NETWORK_CONTROLLER_IP_ADDRESS, CONFIG_FGR_LOG_PORT, FGR_LOG_LEVEL_INFO);
     }
+
+    // Initialise messaging
+    //if (err == ESP_OK) {
+    //    err = fgr_msg_init(CONFIG_FGR_NETWORK_CONTROLLER_IP_ADDRESS, CONFIG_FGR_MSG_PORT);
+    //}
 
 #else
     ESP_LOGW(TAG, "CONFIG_FGR_APP_NO_WIFI is defined, not connecting to WiFi.");

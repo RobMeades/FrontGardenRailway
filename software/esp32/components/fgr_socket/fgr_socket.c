@@ -22,6 +22,7 @@
 #include <inttypes.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/queue.h"
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_task_wdt.h"
@@ -39,51 +40,181 @@
  // Logging prefix
  #define TAG "socket"
 
+#ifndef FGR_SOCKET_RX_BUFFER_LENGTH
+// Receive buffer length: just
+#  define FGR_SOCKET_RX_BUFFER_LENGTH 512
+#endif
+
+#ifndef FGR_SOCKET_RECONNECT_TIMEOUT_MS
+// Reconnection timeout in milliseconds
+#  define FGR_SOCKET_RECONNECT_TIMEOUT_MS  5000
+#endif
+
+#ifndef FGR_SOCKET_RECONNECT_WAIT_MS
+// Reconnection wait time in milliseconds
+#  define FGR_SOCKET_RECONNECT_WAIT_MS  1000
+#endif
+
+#ifndef FGR_SOCKET_RX_TASK_STACK_SIZE
+#  define FGR_SOCKET_RX_TASK_STACK_SIZE (1024 * 4)
+#endif
+
+#ifndef FGR_SOCKET_RECONNECT_TASK_STACK_SIZE
+#  define FGR_SOCKET_RECONNECT_TASK_STACK_SIZE (1024 * 4)
+#endif
 /* ----------------------------------------------------------------
  * TYPES
  * -------------------------------------------------------------- */
 
-// Context for receive task.
+// Context for a non-blocking connect.
 typedef struct {
-    int32_t sock;
-    fgr_socket_rx_cb_t cb;
+    int sock;
+    struct sockaddr_in server;
+    bool connected;
+} context_connect_t;
+
+// Context for a channel (a connection that may be maintained).
+typedef struct {
+    int sock;
+    const char *server_ip;
+    uint16_t port;
+    bool connected;
+    SemaphoreHandle_t lock;
+    fgr_socket_cfg_cb_t cb;
     void *cb_param;
     TaskHandle_t task_handle;
     bool running;
-    volatile atomic_bool *connected;
+} context_channel_t;
+
+// Context for receive task.
+typedef struct {
+    int sock;
+    fgr_socket_rx_cb_t rx_cb;
+    void *rx_cb_param;
+    fgr_socket_reconnect_cb_t reconnect_cb;
+    void **reconnect_cb_param;
+    TaskHandle_t task_handle;
+    bool running;
 } context_rx_t;
 
 /* ----------------------------------------------------------------
  * VARIABLES
  * -------------------------------------------------------------- */
 
-// Receive context.
-static context_rx_t g_context_rx = {0};
-
-// Server structure for socket.
-static struct sockaddr_in g_server = {0};
-
 /* ----------------------------------------------------------------
  * STATIC FUNCTIONS
  * -------------------------------------------------------------- */
 
-// Stop any existing rx operation.
-static void stop_rx(context_rx_t *context)
+// Task to reconnect a socket on failure.
+// This is _extremely_ complex because the socket is non-blocking
+// and because the reconnect process can take a while, causing the
+// task watchdog to go off.
+static void task_reconnect(void *arg)
 {
-    if (context && context->running) {
-        context->running = false;
-        // Wait for existing rx task to exit
-        vTaskDelay(pdMS_TO_TICKS(100));
-        memset(context, 0, sizeof(*context));
+    context_channel_t *context_channel = (context_channel_t *) arg;
+    void *context_connect = NULL;
+
+    esp_task_wdt_add(NULL);
+
+    while (context_channel->running) {
+        if (!context_channel->connected) {
+            ESP_LOGW(TAG, "Reconnecting...");
+
+            // Try to take lock with timeout
+            if (xSemaphoreTake(context_channel->lock, pdMS_TO_TICKS(1000)) == pdTRUE) {
+
+                // Close old socket if it exists
+                fgr_socket_destroy(&context_channel->sock);
+
+                // Create new socket
+                int32_t err = fgr_socket_create(&context_channel->sock);
+                if (err == ESP_OK) {
+                    // Make socket non-blocking
+                    err = fgr_socket_set_non_blocking(context_channel->sock, 0);
+                    if (err == ESP_OK) {
+                        // Initiate non-blocking connect
+                        err = fgr_socket_connect_start(context_channel->sock,
+                                                       context_channel->server_ip,
+                                                       context_channel->port,
+                                                       &context_connect);
+
+                        xSemaphoreGive(context_channel->lock);
+
+                        if (err == ESP_OK) {
+                            // Connected immediately
+
+                            CONTEXT_LOCK(context_channel->lock, "task_reconnect() 1");
+                            context_channel->connected = true;
+                            CONTEXT_UNLOCK(context_channel->lock, "task_reconnect() 1");
+
+                            ESP_LOGI(TAG, "Reconnected immediately.");
+                        } else if (err == -ESP_ERR_NOT_FINISHED) {
+                            // Connection in progress
+                            int32_t elapsed_ms = 0;
+                            while ((err == -ESP_ERR_NOT_FINISHED) && (elapsed_ms < FGR_SOCKET_RECONNECT_TIMEOUT_MS) && context_channel->running) {
+                                int32_t timeout_ms = 100;
+                                err = fgr_socket_connect_is_complete(&context_connect, timeout_ms);
+                                elapsed_ms += timeout_ms;
+                            }
+
+                            CONTEXT_LOCK(context_channel->lock, "task_reconnect() 2");
+                            if (err == ESP_OK) {
+                                context_channel->connected = true;
+                                ESP_LOGI(TAG, "Reconnected after %" PRId32 " ms.", elapsed_ms);
+                            } else {
+                                if (err == -ESP_ERR_NOT_FINISHED) {
+                                    ESP_LOGE(TAG, "Connect timeout after %" PRId32 " ms", elapsed_ms);
+                                } else {
+                                    ESP_LOGE(TAG, "Unexpected failure: %d (%s)", errno, strerror(errno));
+                                }
+                                fgr_socket_connect_stop(&context_connect);
+                                fgr_socket_destroy(&context_channel->sock);
+                            }
+                            CONTEXT_UNLOCK(context_channel->lock, "task_reconnect() 2");
+
+                        } else {
+                            // Connect failed immediately
+
+                            ESP_LOGE(TAG, "Connect failed immediately: %d (%s)", errno, strerror(errno));
+
+                            CONTEXT_LOCK(context_channel->lock, "task_reconnect() 3");
+                            fgr_socket_destroy(&context_channel->sock);
+                            CONTEXT_UNLOCK(context_channel->lock, "task_reconnect() 3");
+                        }
+                    } else {
+                        xSemaphoreGive(context_channel->lock);
+                    }
+                } else {
+                    xSemaphoreGive(context_channel->lock);
+                }
+            } else {
+                ESP_LOGE(TAG, "Could not take lock, skipping reconnect attempt");
+            }
+
+            if (context_channel->connected && context_channel->cb) {
+                // If we have reconnected and there is a user configuration
+                // callback, call it
+                context_channel->cb(context_channel->sock, context_channel->cb_param);
+            }
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(FGR_SOCKET_RECONNECT_WAIT_MS));
+        esp_task_wdt_reset();
     }
+
+    ESP_LOGI(TAG, "Reconnect task exiting.");
+    esp_task_wdt_delete(NULL);
+    vTaskDelete(NULL);
 }
 
-// Task to receive FGR protocol messages from a server.
+// Task to receive data from a server.
 static void task_rx(void *param)
 {
     context_rx_t *context = (context_rx_t *) param;
-    fgr_msg_t msg = {0};
+    uint8_t buffer[FGR_SOCKET_RX_BUFFER_LENGTH];
     size_t nothing_received_count = 0;
+    bool connected;
+    bool awaiting_reconnect = false;
 
     // Allow us to feed the watchdog
     esp_task_wdt_add(NULL);
@@ -98,6 +229,7 @@ static void task_rx(void *param)
         FD_ZERO(&readfds);
         FD_SET(context->sock, &readfds);
 
+        connected = true;
         struct timeval tv;
         tv.tv_sec = 0;
         tv.tv_usec = 100000; // 100 ms select timeout
@@ -105,23 +237,25 @@ static void task_rx(void *param)
         if (select_ret < 0) {
             // select error - connection likely dead
             ESP_LOGE(TAG, "select() failed: %d (%s)!", errno, strerror(errno));
-            context->connected = false;
+            connected = false;
         } else if (select_ret == 0) {
             // No data available, still connected
         } else {
             // Non-blocking receive
-            int32_t err = recv(context->sock, &msg, sizeof(msg), 0);
+            int32_t err = recv(context->sock, buffer, sizeof(buffer), 0);
             if (err > 0) {
                 // Process received data
                 ESP_LOGD(TAG, "Received %d byte(s) from server:", err);
                 char debug_buffer[128];
-                fgr_debug_hex_dump_to_buffer((const void *) &msg, err, debug_buffer, sizeof(debug_buffer));
+                fgr_debug_hex_dump_to_buffer((const void *) buffer, err, debug_buffer, sizeof(debug_buffer));
                 ESP_LOGD(TAG, "%s", debug_buffer);
-                // TODO: decode and call callback when a message is received
+                if (context->rx_cb) {
+                    context->rx_cb(buffer, err, context->rx_cb_param);
+                }
             } else if (err == 0) {
                 // Connection closed by peer
-                ESP_LOGI(TAG, "Connection closed by peer!");
-                context->connected = false;
+                ESP_LOGE(TAG, "Connection closed by peer!");
+                connected = false;
             } else {
                 // Error or would block
                 if (errno == EAGAIN || errno == EWOULDBLOCK) {
@@ -132,14 +266,22 @@ static void task_rx(void *param)
                 } else {
                     // Real error occurred
                     ESP_LOGE(TAG, "recv() failed %d (%s)!", errno, strerror(errno));
-                    context->connected = false;
+                    connected = false;
                 }
             }
         }
 
         esp_task_wdt_reset();
 
-        if (!context->connected) {
+        if (connected) {
+            awaiting_reconnect = false;
+        } else if (context->reconnect_cb && !awaiting_reconnect) {
+            // Trigger a reconnection
+            context->reconnect_cb(context->reconnect_cb_param);
+            awaiting_reconnect = true;
+        }
+
+        if (!connected) {
             // Wait for a reconnection
             vTaskDelay(pdMS_TO_TICKS(2000));
         } else {
@@ -157,7 +299,7 @@ static void task_rx(void *param)
 }
 
 /* ----------------------------------------------------------------
- * PUBLIC FUNCTIONS
+ * PUBLIC FUNCTIONS: SIMPLE OPERATIONS
  * -------------------------------------------------------------- */
 
 // Create a socket.
@@ -180,9 +322,12 @@ int32_t fgr_socket_create(int *sock)
 }
 
 // Destroy a socket.
-void fgr_socket_destroy(int sock)
+void fgr_socket_destroy(int *sock)
 {
-    close(sock);
+    if (sock && (*sock >= 0)) {
+        close(*sock);
+        *sock = -1;
+    }
 }
 
 // Set a socket to non-blocking mode.
@@ -301,63 +446,257 @@ int32_t fgr_socket_enable_tcp_keep_alive(int sock,
     return (int32_t) -err;
 }
 
-// Connect a socket.
-int32_t fgr_socket_connect(int sock, const char *server_ip,
-                           uint16_t port)
+// Connect a socket, blocking version
+int32_t fgr_socket_connect(int sock, const char *server_ip, uint16_t port)
 {
-      // Configure server address
-      g_server.sin_family = AF_INET;
-      g_server.sin_port = htons(port);
-      inet_pton(AF_INET, server_ip, &g_server.sin_addr);
+    struct sockaddr_in server = {0};
+    // Configure server address
+    server.sin_family = AF_INET;
+    server.sin_port = htons(port);
+    inet_pton(AF_INET, server_ip, &server.sin_addr);
 
-      ESP_LOGI(TAG, "Connecting to %s:%d...",  server_ip, port);
+    ESP_LOGI(TAG, "Connecting to %s:%d...",  server_ip, port);
 
-      // Connect to the server
-      esp_err_t err = connect(sock, (struct sockaddr *) &g_server, sizeof(g_server));
-      if (err != 0) {
-          err = ESP_FAIL;
-          ESP_LOGE(TAG, "Failed to connect to server %d (%s)!", errno, strerror(errno));
-      }
+    // Connect to the server
+    esp_err_t err = connect(sock, (struct sockaddr *) &server, sizeof(server));
+    if (err != 0) {
+        err = ESP_FAIL;
+        ESP_LOGE(TAG, "Failed to connect to server %d (%s)!", errno, strerror(errno));
+    }
 
     // Returns ESP_OK or negative error code from esp_err_t
     return (int32_t) -err;
 }
 
-// Create, connect and configure a socket using the default configuration values.
-int32_t fgr_socket_create_connect_configure(const char *server_ip, uint16_t port,
-                                            int *sock)
+/* ----------------------------------------------------------------
+ * PUBLIC FUNCTIONS: NON-BLOCKING CONNECT
+ * -------------------------------------------------------------- */
+
+// Start to connect a socket (i.e. non-blocking).
+int32_t fgr_socket_connect_start(int sock, const char *server_ip,
+                                 uint16_t port, void **context)
 {
-    int32_t err = fgr_socket_create(sock);
+    int32_t err = -ESP_ERR_INVALID_ARG;
 
-    if (err == ESP_OK) {
-        err = fgr_socket_connect(*sock, server_ip, port);
-    }
+    if (server_ip && context) {
+        err = -ESP_ERR_NO_MEM;
+        *context = malloc(sizeof(context_connect_t));
+        context_connect_t *context_connect = (context_connect_t *) *context;
+        if (context_connect) {
+            memset(context_connect, 0, sizeof(*context_connect));
+            context_connect->sock = sock;
+            // Configure server address
+            context_connect->server.sin_family = AF_INET;
+            context_connect->server.sin_port = htons(port);
+            inet_pton(AF_INET, server_ip, &context_connect->server.sin_addr);
 
-    if (err == ESP_OK) {
-        // Put socket into non-blocking mode as we don't want to
-        // get stuck in a recv()
-        err = fgr_socket_set_non_blocking(*sock, FGR_SOCKET_TIMEOUT_SECONDS);
-    }
+            ESP_LOGI(TAG, "Starting connecting to %s:%d...",  server_ip, port);
 
-    if (err == ESP_OK) {
-        // Set a keep-alive so that we realise when the
-        // connection has dropped relatively quickly
-        err = fgr_socket_enable_tcp_keep_alive(*sock,
-                                               FGR_SOCKET_TCP_KEEP_ALIVE_IDLE_TIME_SECONDS,
-                                               FGR_SOCKET_TCP_KEEP_ALIVE_PROBE_INTERVAL_SECONDS,
-                                               FGR_SOCKET_TCP_KEEP_ALIVE_COUNT);
-    }
+            // Start connecting to the server
+            err = -ESP_FAIL;
+            if (connect(sock, (struct sockaddr *) &context_connect->server,
+                        sizeof(context_connect->server)) == 0) {
+                // Connected immediately
+                err = ESP_OK;
+            } else if (errno == EINPROGRESS) {
+                // Need to wait for connection
+                err = -ESP_ERR_NOT_FINISHED;
+            } else {
+                ESP_LOGE(TAG, "Connect failed immediately: %d (%s)", errno, strerror(errno));
+            }
 
-    if ((err != ESP_OK) && sock && (*sock >= 0)) {
-        // Tidy up on error
-        fgr_socket_destroy(*sock);
+            if (err != -ESP_ERR_NOT_FINISHED) {
+                // Don't need the context if we're connected or failed immediately
+                free(*context);
+                *context = NULL;
+            }
+        }
     }
 
     return err;
 }
 
+// Check the progress of a non-blocking connection
+int32_t fgr_socket_connect_is_complete(void **context, int32_t timeout_ms)
+{
+    int32_t err = -ESP_ERR_INVALID_ARG;
+
+    if (context && *context) {
+        err = -ESP_ERR_NOT_FINISHED;
+        context_connect_t *context_connect = (context_connect_t *) *context;
+        fd_set fdset;
+        struct timeval tv;
+
+        FD_ZERO(&fdset);
+        FD_SET(context_connect->sock, &fdset);
+        tv.tv_sec = 0;
+        tv.tv_usec = timeout_ms * 1000;
+
+        int32_t sel_rc = select(context_connect->sock + 1, NULL, &fdset, NULL, &tv);
+        if (sel_rc > 0) {
+            int32_t so_error;
+            socklen_t len = sizeof(so_error);
+            getsockopt(context_connect->sock, SOL_SOCKET, SO_ERROR, &so_error, &len);
+            if (so_error == 0) {
+                // Connected
+                err = ESP_OK;
+            } else {
+                err = -ESP_FAIL;
+                ESP_LOGE(TAG, "Connect failed: %" PRId32 " (%s)", so_error, strerror(so_error));
+            }
+        } else if (sel_rc < 0) {
+            err = -ESP_FAIL;
+            ESP_LOGE(TAG, "Select error: %d (%s)", errno, strerror(errno));
+        }
+
+        if (err != -ESP_ERR_NOT_FINISHED) {
+            // Don't need the context if we're connected or failed
+            free(*context);
+            *context = NULL;
+        }
+    }
+
+    return err;
+}
+
+// Stop connecting a non-blocking socket.
+void fgr_socket_connect_stop(void **context)
+{
+    if (context) {
+        free(*context);
+        *context = NULL;
+    }
+}
+
+/* ----------------------------------------------------------------
+ * FUNCTIONS: COMPOUND OPERATIONS
+ * -------------------------------------------------------------- */
+
+// Create and connect a [non-blocking] socket.
+int32_t fgr_socket_channel_start(const char *server_ip, uint16_t port,
+                                 int *sock, void **context)
+{
+    int32_t err = -ESP_ERR_INVALID_ARG;
+
+    if (server_ip && sock && context) {
+        *context = NULL;
+        *sock = -1;
+        err = fgr_socket_create(sock);
+        if (err == ESP_OK) {
+            err = fgr_socket_connect(*sock, server_ip, port);
+        }
+        if (err == ESP_OK) {
+            // Put socket into non-blocking mode as we don't want to
+            // get stuck in a recv()
+            err = fgr_socket_set_non_blocking(*sock, FGR_SOCKET_TIMEOUT_SECONDS);
+        }
+        if (err == ESP_OK) {
+            err = -ESP_ERR_NO_MEM;
+            *context = malloc(sizeof(context_channel_t));
+            context_channel_t *context_channel = (context_channel_t *) *context;
+            if (context_channel) {
+                memset(context_channel, 0, sizeof(*context_channel));
+                // Create mutex
+                context_channel->lock = xSemaphoreCreateMutex();
+                if (context_channel->lock) {
+                    err = ESP_OK;
+                    CONTEXT_LOCK(context_channel->lock, "fgr_socket_channel_start()");
+                    context_channel->sock = *sock;
+                    context_channel->server_ip = server_ip;
+                    context_channel->port = port;
+                    context_channel->connected = true;
+                    CONTEXT_UNLOCK(context_channel->lock, "fgr_socket_channel_start()");
+                }
+            }
+        }
+        if (err != ESP_OK) {
+            // Tidy up on error
+            free(*context);
+            *context = NULL;
+            if (*sock >= 0) {
+                fgr_socket_destroy(sock);
+            }
+        }
+    }
+
+    return err;
+}
+
+// Maintain a socket connection.
+int32_t fgr_socket_channel_maintain(void **context, fgr_socket_cfg_cb_t cfg_cb,
+                                    void *cfg_cb_param)
+{
+    int32_t err = -ESP_ERR_INVALID_ARG;
+
+    if (context && *context) {
+        context_channel_t *context_channel = (context_channel_t *) *context;
+        // Start a task to reconnect in the background on failure
+        err = -ESP_ERR_NO_MEM;
+
+        CONTEXT_LOCK(context_channel->lock, "fgr_socket_maintain()");
+        context_channel->running = true;
+        context_channel->cb = cfg_cb;
+        context_channel->cb_param = cfg_cb_param;
+        if (xTaskCreate(&task_reconnect, "socket_reconnect", FGR_SOCKET_RECONNECT_TASK_STACK_SIZE, context_channel,
+                        5, &context_channel->task_handle) == pdPASS) {
+            err = ESP_OK;
+        } else {
+            context_channel->running = false;
+            context_channel->cb = NULL;
+            context_channel->cb_param = NULL;
+            ESP_LOGE(TAG, "Failed to create reconnect task %d (%s)!", errno, strerror(errno));
+        }
+        CONTEXT_UNLOCK(context_channel->lock, "fgr_socket_maintain()");
+    }
+
+    return err;
+}
+
+// Trigger a reconnection attempt
+void fgr_socket_channel_failed(void **context)
+{
+    if (context && *context) {
+        context_channel_t *context_channel = (context_channel_t *) *context;
+        if (context_channel->lock) {
+
+            CONTEXT_LOCK(context_channel->lock, "fgr_socket_channel_failed()");
+            context_channel->connected = false;
+            CONTEXT_UNLOCK(context_channel->lock, "fgr_socket_channel_failed()");
+        }
+    }
+}
+
+// Stop a socket connection that was started by fgr_socket_start().
+void fgr_socket_channel_stop(void **context)
+{
+    if (context && *context) {
+        context_channel_t *context_channel = (context_channel_t *) *context;
+
+        if (context_channel->lock) {
+            CONTEXT_LOCK(context_channel->lock, "fgr_socket_stop()");
+
+            // Let the reconnect task exit
+            context_channel->running = false;
+            vTaskDelay(1000);
+
+            // Lose the socket
+            fgr_socket_destroy(&context_channel->sock);
+
+            CONTEXT_UNLOCK(context_channel->lock, "fgr_socket_stop()");
+        }
+
+        vSemaphoreDelete(context_channel->lock);
+        free(*context);
+        *context = NULL;
+    }
+}
+
+/* ----------------------------------------------------------------
+ * FUNCTIONS: SEND AND RECEIVE
+ * -------------------------------------------------------------- */
+
 // Send data on a socket.
-int32_t fgr_socket_send(int sock, uint8_t *buffer, size_t length,
+int32_t fgr_socket_send(int sock, const uint8_t *buffer, size_t length,
                         size_t retry_count)
 {
     esp_err_t err = ESP_OK;
@@ -365,8 +704,8 @@ int32_t fgr_socket_send(int sock, uint8_t *buffer, size_t length,
     size_t retries = 0;
 
     if (buffer) {
-      while ((total_written < length) && (err == ESP_OK) && (retries < retry_count)) {
-          int32_t len_written = send(sock, buffer + total_written, length - total_written, 0);
+      while ((total_written < length) && (err == ESP_OK) && (retries <= retry_count)) {
+          int32_t len_written = send(sock, buffer + total_written, length - total_written, MSG_DONTWAIT);
           if (len_written >= 0) {
               total_written += len_written;
               retries = 0;  // Reset on success
@@ -382,7 +721,7 @@ int32_t fgr_socket_send(int sock, uint8_t *buffer, size_t length,
       }
     }
 
-    if (retries >= retry_count) {
+    if (retries > retry_count) {
         ESP_LOGE(TAG, "Send timeout after %d retries.", retries);
         err = ESP_ERR_TIMEOUT;
     }
@@ -391,37 +730,54 @@ int32_t fgr_socket_send(int sock, uint8_t *buffer, size_t length,
     return (int32_t) -err;
 }
 
-// Start receiving protocol messages on a socket.
-int32_t fgr_socket_receive_start(int sock, volatile atomic_bool *connected,
+// Start receiving data on a socket.
+int32_t fgr_socket_receive_start(int sock,
+                                 fgr_socket_reconnect_cb_t reconnect_cb,
+                                 void **reconnect_cb_param,
                                  fgr_socket_rx_cb_t rx_cb,
-                                 void *rx_cb_param)
+                                 void *rx_cb_param, void **context)
 {
-    esp_err_t err = ESP_ERR_NO_MEM;
-    context_rx_t *context = &g_context_rx;
+    int32_t err = -ESP_ERR_INVALID_ARG;
 
-    // Stop any existing rx operation
-    stop_rx(context);
-
-    // Start an rx operation
-    context->sock = sock;
-    context->connected = connected;
-    context->cb = rx_cb;
-    context->cb_param = rx_cb_param;
-    context->running = true;
-    if (xTaskCreate(&task_rx, "socket_rx", 1024 * 4, context, 5, &context->task_handle) == pdPASS) {
-        err = ESP_OK;
-    } else {
-        memset(context, 0, sizeof(*context));
+    if (context) {
+        err = -ESP_ERR_NO_MEM;
+        *context = malloc(sizeof(context_rx_t));
+        context_rx_t *context_rx = (context_rx_t *) *context;
+        if (context_rx) {
+            memset(context_rx, 0, sizeof(*context_rx));
+            // Start an rx operation
+            context_rx->sock = sock;
+            context_rx->reconnect_cb = reconnect_cb;
+            context_rx->reconnect_cb_param = reconnect_cb_param;
+            context_rx->rx_cb = rx_cb;
+            context_rx->rx_cb_param = rx_cb_param;
+            context_rx->running = true;
+            if (xTaskCreate(&task_rx, "socket_rx", FGR_SOCKET_RX_TASK_STACK_SIZE, context_rx,
+                            5, &context_rx->task_handle) == pdPASS) {
+                err = ESP_OK;
+            }
+        }
+        if ((err != ESP_OK) && context) {
+            free(*context);
+            *context = NULL;
+        }
     }
 
-    // Returns ESP_OK or negative error code from esp_err_t
-    return (int32_t) -err;
+    return err;
 }
 
-// Stop receiving FGR protocol messages on a socket.
-void fgr_socket_receive_stop()
+// Stop receiving data on a socket.
+void fgr_socket_receive_stop(void **context)
 {
-    stop_rx(&g_context_rx);
+    if (context) {
+        context_rx_t *context_rx = (context_rx_t *) *context;
+        if (context_rx && context_rx->running) {
+            // Wait for existing rx task to exit
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            free(*context);
+            *context = NULL;
+        }
+    }
 }
 
 // End of file

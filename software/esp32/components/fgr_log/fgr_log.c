@@ -27,28 +27,27 @@
 #include "esp_task_wdt.h"
 #include "esp_log.h"
 #include "errno.h"
-#include "lwip/sockets.h"
-#include "lwip/netdb.h"
 
+#include "fgr_util.h"
+#include "fgr_socket.h"
 #include "fgr_log.h"
 
 /* ----------------------------------------------------------------
  * COMPILE-TIME MACROS
  * -------------------------------------------------------------- */
 
- // Logging prefix
- #define TAG "log"
+// Logging prefix
+#define TAG "log"
 
 /* ----------------------------------------------------------------
  * TYPES
  * -------------------------------------------------------------- */
 
+// Context.
 typedef struct {
-    int socket;
+    int sock;
+    void *context_sock;
     bool connected;
-    bool running;
-    TaskHandle_t task_handle;
-    struct sockaddr_in log_server;
     SemaphoreHandle_t lock;
     fgr_log_level_t min_level;  // Minimum level to forward
 } log_cfg_t;
@@ -57,140 +56,15 @@ typedef struct {
  * VARIABLES
  * -------------------------------------------------------------- */
 
+// Context.
 static log_cfg_t g_log_cfg = {
-    .socket = -1,
-    .connected = false,
-    .min_level = FGR_LOG_LEVEL_INFO,  // Default: forward INFO and above
-    .lock = NULL
+    .sock = -1,
+    .min_level = FGR_LOG_LEVEL_INFO  // Default: forward INFO and above
 };
 
 /* ----------------------------------------------------------------
  * STATIC FUNCTIONS
  * -------------------------------------------------------------- */
-
-// Task to reconnect to the log server on failure.
-// This is _extremely_ complex because the socket is non-blocking
-// and because the reconnect process can take a while, causing the
-// task watchdog to go off.
-static void log_reconnect_task(void *arg)
-{
-    (void) arg;
-
-    esp_task_wdt_add(NULL);
-
-    const int32_t connect_timeout_ms = 5000;
-    const int32_t wdt_feed_interval_ms = 100;
-
-    while (g_log_cfg.running) {
-        if (!g_log_cfg.connected) {
-            ESP_LOGE(TAG, "Reconnecting to log server...");
-
-            // Try to take lock with timeout
-            if (xSemaphoreTake(g_log_cfg.lock, pdMS_TO_TICKS(1000)) == pdTRUE) {
-
-                // Close old socket if it exists
-                if (g_log_cfg.socket >= 0) {
-                    close(g_log_cfg.socket);
-                    g_log_cfg.socket = -1;
-                }
-
-                // Create new socket
-                g_log_cfg.socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-                if (g_log_cfg.socket >= 0) {
-                    // Make socket non-blocking
-                    int32_t flags = fcntl(g_log_cfg.socket, F_GETFL, 0);
-                    fcntl(g_log_cfg.socket, F_SETFL, flags | O_NONBLOCK);
-
-                    // Initiate non-blocking connect
-                    int32_t rc = connect(g_log_cfg.socket,
-                                         (struct sockaddr *) &g_log_cfg.log_server,
-                                         sizeof(g_log_cfg.log_server));
-
-                    xSemaphoreGive(g_log_cfg.lock);
-
-                    if (rc == 0) {
-                        // Connected immediately
-                        xSemaphoreTake(g_log_cfg.lock, portMAX_DELAY);
-                        g_log_cfg.connected = true;
-                        xSemaphoreGive(g_log_cfg.lock);
-                        ESP_LOGI(TAG, "Reconnected immediately.");
-                    } else if (rc < 0 && errno == EINPROGRESS) {
-                        // Connection in progress - poll for completion
-                        int32_t elapsed = 0;
-                        bool connected = false;
-
-                        while (elapsed < connect_timeout_ms && !connected && g_log_cfg.running) {
-                            fd_set fdset;
-                            struct timeval tv;
-
-                            FD_ZERO(&fdset);
-                            FD_SET(g_log_cfg.socket, &fdset);
-                            tv.tv_sec = 0;
-                            tv.tv_usec = wdt_feed_interval_ms * 1000;
-
-                            int32_t sel_rc = select(g_log_cfg.socket + 1, NULL, &fdset, NULL, &tv);
-
-                            // Feed watchdog
-                            esp_task_wdt_reset();
-
-                            if (sel_rc > 0) {
-                                int32_t so_error;
-                                socklen_t len = sizeof(so_error);
-                                getsockopt(g_log_cfg.socket, SOL_SOCKET, SO_ERROR, &so_error, &len);
-
-                                if (so_error == 0) {
-                                    connected = true;
-                                    break;
-                                } else {
-                                    ESP_LOGE(TAG, "Connect failed: %" PRId32 " (%s)", so_error, strerror(so_error));
-                                    break;
-                                }
-                            } else if (sel_rc < 0) {
-                                ESP_LOGE(TAG, "Select error: %d (%s)", errno, strerror(errno));
-                                break;
-                            }
-
-                            elapsed += wdt_feed_interval_ms;
-                        }
-
-                        xSemaphoreTake(g_log_cfg.lock, portMAX_DELAY);
-
-                        if (connected) {
-                            g_log_cfg.connected = true;
-                            ESP_LOGI(TAG, "Reconnected after %" PRId32 " ms.", elapsed);
-                        } else {
-                            ESP_LOGE(TAG, "Connect timeout after %" PRId32 " ms", connect_timeout_ms);
-                            close(g_log_cfg.socket);
-                            g_log_cfg.socket = -1;
-                        }
-
-                        xSemaphoreGive(g_log_cfg.lock);
-                    } else {
-                        // Connect failed immediately
-                        xSemaphoreTake(g_log_cfg.lock, portMAX_DELAY);
-                        ESP_LOGE(TAG, "Connect failed immediately: %d (%s)", errno, strerror(errno));
-                        close(g_log_cfg.socket);
-                        g_log_cfg.socket = -1;
-                        xSemaphoreGive(g_log_cfg.lock);
-                    }
-                } else {
-                    xSemaphoreTake(g_log_cfg.lock, portMAX_DELAY);
-                    ESP_LOGE(TAG, "Unable to create new socket %d (%s)!", errno, strerror(errno));
-                    xSemaphoreGive(g_log_cfg.lock);
-                }
-            } else {
-                ESP_LOGE(TAG, "Could not take lock, skipping reconnect attempt");
-            }
-        }
-
-        vTaskDelay(pdMS_TO_TICKS(wdt_feed_interval_ms));
-        esp_task_wdt_reset();
-    }
-
-    ESP_LOGI(TAG, "Log reconnect task exiting.");
-    esp_task_wdt_delete(NULL);
-    vTaskDelete(NULL);
-}
 
 // Custom vprintf handler with level filtering
 static int tcp_log_vprintf(const char *fmt, va_list args)
@@ -243,7 +117,7 @@ static int tcp_log_vprintf(const char *fmt, va_list args)
         length = FGR_LOG_STRING_MAX_LEN;
     }
 
-    // Forward if level meets minimum and socket connected
+    // Forward if level meets minimum and we're connected
     if ((length > 0) && g_log_cfg.connected && (fgr_log_level >= g_log_cfg.min_level)) {
 
         if (xSemaphoreTake(g_log_cfg.lock, pdMS_TO_TICKS(100)) == pdTRUE) {
@@ -253,14 +127,9 @@ static int tcp_log_vprintf(const char *fmt, va_list args)
             body->length = (uint32_t) length;
             body->contents[length] = 0; // Ensure terminator
 
-            if (send(g_log_cfg.socket, &log_msg, sizeof(log_msg), MSG_DONTWAIT) < 0) {
-                if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                    // Buffer full, try again later? Or just drop
-                    ESP_LOGD(TAG, "Log send would block, dropping message");
-                } else {
-                    ESP_LOGI(TAG, "send() failed %d (%s)!", errno, strerror(errno));
-                    g_log_cfg.connected = false;
-                }
+            if (fgr_socket_send(g_log_cfg.sock, (const uint8_t *) &log_msg, sizeof(log_msg), 0) != ESP_OK) {
+                fgr_socket_channel_failed(&g_log_cfg.context_sock);
+                g_log_cfg.connected = false;
             }
 
             xSemaphoreGive(g_log_cfg.lock);
@@ -269,6 +138,22 @@ static int tcp_log_vprintf(const char *fmt, va_list args)
 
     // Always output to UART for local debugging
     return vprintf(fmt, args);
+}
+
+// Callback called by fgr_socket_channel_maintain().
+static void socket_reconnect_cb(int sock, void *param)
+{
+    log_cfg_t *log_cfg = (log_cfg_t *) param;
+
+    if (log_cfg->lock) {
+        // Nothing to do other than update the socket
+        // since the previous has probably been closed
+        // and set the connected flag back to true
+        CONTEXT_LOCK(log_cfg->lock, "socket_reconnect_cb() 1");
+        log_cfg->sock = sock;
+        log_cfg->connected = true;
+        CONTEXT_UNLOCK(log_cfg->lock, "socket_reconnect_cb() 1");
+    }
 }
 
 // Wot it says.
@@ -281,19 +166,13 @@ static void clean_up()
 
         ESP_LOGI(TAG, "Stopping log forwarding.");
 
-        xSemaphoreTake(g_log_cfg.lock, portMAX_DELAY);
+        CONTEXT_LOCK(g_log_cfg.lock, "clean_up() 1");
 
-        // Let the reconnect task exit
-        g_log_cfg.running = false;
-        vTaskDelay(1000);
+        // Lose the socket
+        fgr_socket_channel_stop(&g_log_cfg.context_sock);
+        g_log_cfg.sock = -1;
 
-        // Close the socket
-        if (g_log_cfg.socket >= 0) {
-            close(g_log_cfg.socket);
-            g_log_cfg.socket = -1;
-        }
-
-        xSemaphoreGive(g_log_cfg.lock);
+        CONTEXT_UNLOCK(g_log_cfg.lock, "clean_up() 1");
         // Don't delete the semaphore, someone might have it still
     }
 }
@@ -308,7 +187,7 @@ int32_t fgr_log_init(const char *server_ip, uint16_t port,
 {
     int32_t err = ESP_OK;
 
-    if (!g_log_cfg.running) {
+    if (g_log_cfg.sock < 0) {
         if (!g_log_cfg.lock) {
             // Create mutex
             err = -ESP_ERR_NO_MEM;
@@ -317,50 +196,29 @@ int32_t fgr_log_init(const char *server_ip, uint16_t port,
 
         if (g_log_cfg.lock) {
 
-            xSemaphoreTake(g_log_cfg.lock, portMAX_DELAY);
+            CONTEXT_LOCK(g_log_cfg.lock, "fgr_log_init()");
 
             g_log_cfg.min_level = min_level;
-            // Create socket if not already created
-            err = ESP_OK;
-            if (g_log_cfg.socket < 0) {
-                err = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-                if (err >= 0) {
-                    g_log_cfg.socket = err;
-                    err = ESP_OK;
-                    // Configure server address
-                    g_log_cfg.log_server.sin_family = AF_INET;
-                    g_log_cfg.log_server.sin_port = htons(port);
-                    inet_pton(AF_INET, server_ip, &g_log_cfg.log_server.sin_addr);
-
-                    // Connect to the log server
-                    err = connect(g_log_cfg.socket,
-                                  (struct sockaddr *) &g_log_cfg.log_server,
-                                  sizeof(g_log_cfg.log_server));
-                    if (err == 0) {
-                         // Set socket to non-blocking to avoid being a hog
-                        int flags = fcntl(g_log_cfg.socket, F_GETFL, 0);
-                        fcntl(g_log_cfg.socket, F_SETFL, flags | O_NONBLOCK);
-                        g_log_cfg.connected = true;
-                        g_log_cfg.running= true;
-                        // Start a task to reconnect in the background on failure
-                        if (xTaskCreate(&log_reconnect_task, "log_reconnect_task", 1024 * 4, NULL, 5, &g_log_cfg.task_handle) != pdPASS) {
-                            err = -ESP_ERR_NO_MEM;
-                            ESP_LOGE(TAG, "Failed to create reconnect task %d (%s)!", errno, strerror(errno));
-                        }
-                    } else {
-                        ESP_LOGE(TAG, "Failed to connect to log server %d (%s)!", errno, strerror(errno));
-                        close(g_log_cfg.socket);
-                        g_log_cfg.socket = -1;
-                    }
-                } else {
-                    ESP_LOGE(TAG, "Unable to create log socket %d (%s)!", errno, strerror(errno));
+            // Create connection to server
+            err = fgr_socket_channel_start(server_ip, port,
+                                           &g_log_cfg.sock,
+                                           &g_log_cfg.context_sock);
+            if (err == ESP_OK) {
+                // Maintain the connection
+                err = fgr_socket_channel_maintain(&g_log_cfg.context_sock,
+                                                  socket_reconnect_cb,
+                                                  &g_log_cfg);
+                if (err != ESP_OK) {
+                    fgr_socket_channel_stop(&g_log_cfg.context_sock);
+                    g_log_cfg.sock = -1;
                 }
             }
 
-            xSemaphoreGive(g_log_cfg.lock);
+            CONTEXT_UNLOCK(g_log_cfg.lock, "fgr_log_init()");
 
             if (err == ESP_OK) {
                 // Set vprintf handler
+                g_log_cfg.connected = true;
                 esp_log_set_vprintf(tcp_log_vprintf);
                 ESP_LOGI(TAG, "Logs will be forwarded to %s:%d, log level %d.",
                          server_ip, port, g_log_cfg.min_level);
@@ -373,7 +231,7 @@ int32_t fgr_log_init(const char *server_ip, uint16_t port,
         clean_up();
     }
 
-    return (int32_t) err;
+    return err;
 }
 
 // Deinitialise logging
@@ -389,11 +247,11 @@ int32_t fgr_log_set_min_level(fgr_log_level_t level)
 
     if (g_log_cfg.lock) {
 
-        xSemaphoreTake(g_log_cfg.lock, portMAX_DELAY);
+        CONTEXT_LOCK(g_log_cfg.lock, "fgr_log_set_min_level");
 
         g_log_cfg.min_level = level;
 
-        xSemaphoreGive(g_log_cfg.lock);
+        CONTEXT_UNLOCK(g_log_cfg.lock, "fgr_log_set_min_level");
 
         ESP_LOGI(TAG, "Log level set to %d.", g_log_cfg.min_level);
     }

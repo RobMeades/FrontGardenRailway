@@ -37,6 +37,28 @@ extern "C" {
 #  define FGR_UTIL_WATCHDOG_FEED_TIME_MS 10
 #endif
 
+# if 0
+// Lock a context.
+#  define CONTEXT_LOCK(semaphore, dbg)    {                                               \
+                                              printf(TAG "+SEM 0 %s\n", dbg);             \
+                                              xSemaphoreTake(semaphore, portMAX_DELAY);   \
+                                              printf(TAG "+SEM 1 %s\n", dbg)
+
+// Unlock a context.
+#  define CONTEXT_UNLOCK(semaphore, dbg)      printf(TAG "-SEM 1 %s\n", dbg);             \
+                                              xSemaphoreGive(semaphore);                  \
+                                              printf(TAG "-SEM 0 %s\n", dbg);             \
+                                          }
+#else
+// Lock a context.
+#  define CONTEXT_LOCK(semaphore, dbg)    {                                             \
+                                              xSemaphoreTake(semaphore, portMAX_DELAY)
+
+// Unlock a context.
+#  define CONTEXT_UNLOCK(semaphore, dbg)      xSemaphoreGive(semaphore);                \
+                                          }
+#endif
+
 /* ----------------------------------------------------------------
  * TYPES
  * -------------------------------------------------------------- */
