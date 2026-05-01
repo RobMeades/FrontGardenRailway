@@ -1,21 +1,4 @@
 #!/usr/bin/env python3
-
-# Copyright 2026 Rob Meades
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
-# All written by DeepSeek :-)
-
 """
 Controller for Front Garden Railway network.
 
@@ -26,14 +9,19 @@ Node handlers are loaded dynamically from the 'nodes' directory.
 Each handler file should be named 'node_*.py' and contain a class that
 inherits from NodeHandler (usually named with the node type in CamelCase).
 
+Configuration hierarchy (each level overrides the previous):
+1. Built-in defaults
+2. nodes/<node_type>/cfg.json (per-node-type defaults)
+3. nodes.json (global node configuration - highest priority)
+
 Usage:
     python controller.py [--ip LISTEN_IP] [--port PORT] [--cfg CFG_FILE]
     
 Examples:
-    python controller.py                          # Use defaults (10.10.3.1:5000)
-    python controller.py --ip 0.0.0.0            # Listen on all interfaces
-    python controller.py --port 6000             # Use port 6000
-    python controller.py --ip 192.168.1.100 --port 5000
+    python controller.py                              # Use defaults
+    python controller.py --ip 0.0.0.0                # Listen on all interfaces
+    python controller.py --port 6000                 # Use port 6000
+    python controller.py --cfg my_nodes.json         # Load nodes from JSON file
 """
 
 import argparse
@@ -47,7 +35,6 @@ import importlib.util
 import inspect
 import sys
 import json
-import yaml
 from typing import Dict, Optional, Any, List, Type
 from dataclasses import dataclass, field
 from enum import IntEnum
@@ -100,17 +87,19 @@ class Node:
     """Represents a connected node"""
     ip: str
     name: str
-    node_type: str = ""  # e.g., "level_gauge", "stand", "lift", "door"
+    node_type: str = ""
     sock: Optional[socket.socket] = None
     state: NodeState = NodeState.DISCONNECTED
     fgr_state: int = fgr.FGRState.FGR_STATE_NOT_POPULATED
     reference_counter: int = 0
     pending_requests: Dict[int, queue.Queue] = field(default_factory=dict)
     last_heartbeat: float = 0
-    cfg_data: Optional[Dict[str, Any]] = None  # Changed from config_data
+    cfg_data: Optional[Dict[str, Any]] = None
     handler: Optional['NodeHandler'] = None
     rx_thread: Optional[threading.Thread] = None
-    custom_data: Dict[str, Any] = field(default_factory=dict)  # For handler-specific data
+    custom_data: Dict[str, Any] = field(default_factory=dict)
+    stop_event: threading.Event = field(default_factory=threading.Event)
+    heartbeat_timeout: int = 60
 
 
 # ============================================================================
@@ -174,7 +163,6 @@ class NodeHandler:
     
     def on_needs_cfg(self, msg: fgr.FGRMsg):
         """Called when node sends FGR_IND_RSP_NEEDS_CFG"""
-        # Default behavior: send empty cfg
         self.controller.send_response_to_node(self.node.name, msg.subtype, msg.reference, b"")
     
     def on_start(self, msg: fgr.FGRMsg):
@@ -186,32 +174,16 @@ class NodeHandler:
         pass
     
     def on_confirmation(self, msg: fgr.FGRMsg) -> bool:
-        """
-        Handle a confirmation message (FGR_MSG_TYPE_CNF).
-        Return True if handled, False to pass to generic handler.
-        """
-        return False
-    
-    def on_log(self, msg: fgr.FGRMsg) -> bool:
-        """
-        Handle a log message (FGR_MSG_TYPE_LOG).
-        Return True if handled, False to pass to generic handler.
-        """
+        """Handle a confirmation message (FGR_MSG_TYPE_CNF)"""
         return False
     
     def on_response(self, msg: fgr.FGRMsg) -> bool:
-        """
-        Handle a response message (FGR_MSG_TYPE_RSP).
-        Return True if handled, False to pass to generic handler.
-        """
+        """Handle a response message (FGR_MSG_TYPE_RSP)"""
         return False
     
     def send_request(self, req_type: int, contents: bytes = b"",
                      timeout: float = 5.0) -> Optional[fgr.FGRMsg]:
-        """
-        Send a request to this node and wait for confirmation.
-        Returns confirmation message or None on timeout/error.
-        """
+        """Send a request to this node and wait for confirmation"""
         return self.controller.send_request_to_node(self.node.name, req_type, contents, timeout)
     
     def send_response(self, rsp_type: int, reference: int, contents: bytes = b"") -> bool:
@@ -241,6 +213,82 @@ class NodeHandler:
 
 
 # ============================================================================
+# Configuration Manager
+# ============================================================================
+
+class ConfigManager:
+    """
+    Manages hierarchical node configuration.
+    
+    Priority (highest to lowest):
+    1. Global node config (nodes.json)
+    2. Per-node-type config (nodes/<type>/cfg.json)
+    3. Built-in defaults
+    """
+    
+    DEFAULTS = {
+        "heartbeat_timeout": 60
+    }
+    
+    def __init__(self, nodes_dir: Path, global_cfg_file: Optional[Path] = None):
+        self.nodes_dir = nodes_dir
+        self.global_cfg: Dict[str, Dict] = {}
+        self.type_cfgs: Dict[str, Dict] = {}
+        
+        if global_cfg_file and global_cfg_file.exists():
+            self._load_global_cfg(global_cfg_file)
+        
+        self._load_type_cfgs()
+    
+    def _load_global_cfg(self, cfg_file: Path):
+        """Load global configuration file"""
+        try:
+            with open(cfg_file, 'r') as f:
+                self.global_cfg = json.load(f)
+            logging.getLogger("Config").info(f"Loaded global config from {cfg_file}")
+        except Exception as e:
+            logging.getLogger("Config").error(f"Failed to load global config: {e}")
+    
+    def _load_type_cfgs(self):
+        """Load per-node-type configuration files (nodes/<type>/cfg.json)"""
+        if not self.nodes_dir.exists():
+            return
+        
+        for type_dir in self.nodes_dir.glob("node_*"):
+            if not type_dir.is_dir():
+                continue
+            
+            node_type = type_dir.name[5:]  # Remove 'node_' prefix
+            cfg_file = type_dir / "cfg.json"
+            
+            if cfg_file.exists():
+                try:
+                    with open(cfg_file, 'r') as f:
+                        self.type_cfgs[node_type] = json.load(f)
+                    logging.getLogger("Config").info(f"Loaded type config for '{node_type}' from {cfg_file}")
+                except Exception as e:
+                    logging.getLogger("Config").error(f"Failed to load type config for '{node_type}': {e}")
+    
+    def get_node_config(self, name: str, node_type: str = "") -> Dict[str, Any]:
+        """Get merged configuration for a node"""
+        config = self.DEFAULTS.copy()
+        
+        # Apply per-type defaults
+        if node_type and node_type in self.type_cfgs:
+            config.update(self.type_cfgs[node_type])
+        
+        # Apply global config (highest priority)
+        if name in self.global_cfg:
+            config.update(self.global_cfg[name])
+        
+        return config
+    
+    def get_all_nodes(self) -> Dict[str, Dict]:
+        """Get all nodes from global config"""
+        return self.global_cfg.copy()
+
+
+# ============================================================================
 # Controller Class
 # ============================================================================
 
@@ -248,35 +296,37 @@ class Controller:
     """
     Main controller for FGR network.
     Listens for incoming connections, manages nodes, dispatches messages.
-    Dynamically loads node handlers from the 'nodes' directory.
     """
     
     def __init__(self, listen_ip: str = "10.10.3.1", port: int = 5000,
-                 nodes_dir: str = None):
+                 nodes_dir: str = None, cfg_file: str = None):
         self.listen_ip = listen_ip
         self.port = port
         self.logger = logging.getLogger("Controller")
         
         # Determine nodes directory
         if nodes_dir is None:
-            # Default: look for 'nodes' directory next to this script
             self.nodes_dir = SCRIPT_DIR / "nodes"
         else:
             self.nodes_dir = Path(nodes_dir)
         
-        self.nodes: Dict[str, Node] = {}  # keyed by name
-        self.nodes_by_ip: Dict[str, Node] = {}  # keyed by IP
-        self.node_handlers: Dict[str, Type[NodeHandler]] = {}  # node_type -> handler class
+        # Configuration manager
+        self.config_mgr = ConfigManager(self.nodes_dir, cfg_file)
+        
+        self.nodes: Dict[str, Node] = {}
+        self.nodes_by_ip: Dict[str, Node] = {}
+        self.node_handlers: Dict[str, Type[NodeHandler]] = {}
         
         self.running = False
         self.listen_sock: Optional[socket.socket] = None
         self.listen_thread: Optional[threading.Thread] = None
         self.heartbeat_thread: Optional[threading.Thread] = None
         
-        self._next_global_ref = 0
-        
-        # Load node handlers from nodes directory
+        # Load node handlers
         self._load_node_handlers()
+        
+        # Load nodes from configuration
+        self._load_nodes_from_cfg()
     
     def _load_node_handlers(self):
         """Dynamically load all node handlers from the nodes directory"""
@@ -284,99 +334,78 @@ class Controller:
             self.logger.warning(f"Nodes directory not found: {self.nodes_dir}")
             return
         
-        # Add parent directory to Python path for imports
         parent_dir = self.nodes_dir.parent
         if str(parent_dir) not in sys.path:
             sys.path.insert(0, str(parent_dir))
         
-        # Find all node_*.py files
         for py_file in sorted(self.nodes_dir.glob("node_*.py")):
             if py_file.name == "node_base.py":
                 continue
             
             module_name = f"nodes.{py_file.stem}"
             try:
-                # Import the module
                 spec = importlib.util.spec_from_file_location(module_name, py_file)
                 module = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(module)
                 
-                # Find handler classes in the module
                 for name, obj in inspect.getmembers(module, inspect.isclass):
                     if issubclass(obj, NodeHandler) and obj != NodeHandler:
-                        # Extract node type from filename (node_XXX.py -> XXX)
-                        node_type = py_file.stem[5:]  # Remove 'node_' prefix
+                        node_type = py_file.stem[5:]
                         self.node_handlers[node_type] = obj
-                        self.logger.info(f"Loaded handler {obj.__name__} for node type '{node_type}' from {py_file.name}")
-                        
+                        self.logger.info(f"Loaded handler {obj.__name__} for node type '{node_type}'")
             except Exception as e:
                 self.logger.error(f"Failed to load handler from {py_file.name}: {e}")
+    
+    def _load_nodes_from_cfg(self):
+        """Load node definitions from configuration"""
+        nodes_cfg = self.config_mgr.get_all_nodes()
         
-        if not self.node_handlers:
-            self.logger.warning("No node handlers loaded")
+        for name, node_cfg in nodes_cfg.items():
+            ip = node_cfg.get("ip")
+            if not ip:
+                self.logger.error(f"Node {name} has no IP address, skipping")
+                continue
+            
+            node_type = node_cfg.get("type", "")
+            
+            # Get merged config
+            merged_cfg = self.config_mgr.get_node_config(name, node_type)
+            heartbeat_timeout = merged_cfg.get("heartbeat_timeout", 60)
+            
+            self.add_node(name, ip, node_type, heartbeat_timeout)
     
     def _get_handler_for_node(self, node: Node) -> NodeHandler:
         """Create appropriate handler instance for a node"""
-        # Try to get handler by node_type
         if node.node_type and node.node_type in self.node_handlers:
-            handler_class = self.node_handlers[node.node_type]
-            return handler_class(node, self)
+            return self.node_handlers[node.node_type](node, self)
         
-        # Try to match by name prefix (fallback for old naming)
         for prefix, handler_class in self.node_handlers.items():
             if node.name.startswith(prefix):
                 return handler_class(node, self)
         
-        # Default handler
-        self.logger.warning(f"No specific handler found for node '{node.name}' (type='{node.node_type}'), using base handler")
         return NodeHandler(node, self)
     
-    def add_node(self, name: str, ip: str, node_type: str = "") -> None:
-        """Add a node definition (pre-connection)"""
+    def add_node(self, name: str, ip: str, node_type: str = "", heartbeat_timeout: int = 60) -> None:
+        """Add a node definition"""
         if name in self.nodes:
             self.logger.warning(f"Node {name} already exists")
             return
         
-        node = Node(ip=ip, name=name, node_type=node_type)
+        node = Node(ip=ip, name=name, node_type=node_type, heartbeat_timeout=heartbeat_timeout)
         self.nodes[name] = node
         self.nodes_by_ip[ip] = node
-        self.logger.info(f"Added node: {name} ({ip}) type='{node_type}'")
-    
-    def add_nodes_from_cfg(self, cfg: Dict[str, Dict]) -> None:
-        """
-        Add multiple nodes from a configuration dictionary.
-        Expected format:
-        {
-            "node_name": {"ip": "10.10.3.2", "type": "level_gauge"},
-            "stand_1": {"ip": "10.10.3.3", "type": "stand"},
-            ...
-        }
-        """
-        for name, node_cfg in cfg.items():
-            self.add_node(
-                name=name,
-                ip=node_cfg.get("ip"),
-                node_type=node_cfg.get("type", "")
-            )
-    
-    def remove_node(self, name: str) -> None:
-        """Remove a node definition"""
-        if name in self.nodes:
-            node = self.nodes[name]
-            if node.sock:
-                self._disconnect_node(node)
-            del self.nodes_by_ip[node.ip]
-            del self.nodes[name]
-            self.logger.info(f"Removed node: {name}")
+        self.logger.info(f"Added node: {name} ({ip}) type='{node_type}', timeout={heartbeat_timeout}s")
     
     def _disconnect_node(self, node: Node) -> None:
         """Internal: disconnect a node"""
-        # Set a flag to indicate we're disconnecting
+        if node.state == NodeState.DISCONNECTED:
+            return
+        
+        node.stop_event.set()
         node.state = NodeState.DISCONNECTED
         
         if node.sock:
             try:
-                # Shutdown first to break any blocking reads
                 node.sock.shutdown(socket.SHUT_RDWR)
             except Exception:
                 pass
@@ -386,7 +415,6 @@ class Controller:
                 pass
             node.sock = None
         
-        # Cancel pending requests
         for ref, q in node.pending_requests.items():
             try:
                 q.put_nowait(None)
@@ -394,8 +422,6 @@ class Controller:
                 pass
         node.pending_requests.clear()
         
-        # Note: Don't clear rx_thread here - let it finish on its own
-        # Just call handler's on_disconnected once
         if node.handler:
             node.handler.on_disconnected()
     
@@ -403,7 +429,6 @@ class Controller:
         """Start the controller server"""
         self.running = True
         
-        # Create listening socket
         try:
             self.listen_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.listen_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -414,12 +439,10 @@ class Controller:
             self.logger.error(f"Failed to bind: {e}")
             return False
         
-        # Start listening thread
         self.listen_thread = threading.Thread(target=self._accept_loop, name="Listener")
         self.listen_thread.daemon = True
         self.listen_thread.start()
         
-        # Start heartbeat thread
         self.heartbeat_thread = threading.Thread(target=self._heartbeat_loop, name="Heartbeat")
         self.heartbeat_thread.daemon = True
         self.heartbeat_thread.start()
@@ -430,7 +453,9 @@ class Controller:
         """Stop the controller"""
         self.running = False
         
-        # Close all node connections
+        for node in self.nodes.values():
+            node.stop_event.set()
+        
         for node in self.nodes.values():
             if node.sock:
                 try:
@@ -438,16 +463,17 @@ class Controller:
                 except Exception:
                     pass
         
-        # Close listening socket
         if self.listen_sock:
             try:
                 self.listen_sock.close()
             except Exception:
                 pass
         
-        # Wait for threads
         if self.listen_thread:
             self.listen_thread.join(timeout=2)
+        for node in self.nodes.values():
+            if node.rx_thread and node.rx_thread.is_alive():
+                node.rx_thread.join(timeout=1)
         if self.heartbeat_thread:
             self.heartbeat_thread.join(timeout=2)
         
@@ -461,25 +487,22 @@ class Controller:
                 client_sock, addr = self.listen_sock.accept()
                 self.logger.info(f"Connection from {addr[0]}:{addr[1]}")
                 
-                # Find node by IP
                 ip = addr[0]
                 if ip in self.nodes_by_ip:
                     node = self.nodes_by_ip[ip]
                     
-                    # Disconnect existing if any
                     if node.sock:
                         self._disconnect_node(node)
                     
+                    node.stop_event.clear()
                     node.sock = client_sock
                     node.state = NodeState.CONNECTED
                     node.last_heartbeat = time.time()
                     node.reference_counter = 0
                     node.pending_requests.clear()
                     
-                    # Create handler
                     node.handler = self._get_handler_for_node(node)
                     
-                    # Start receive thread
                     node.rx_thread = threading.Thread(
                         target=self._receive_loop,
                         args=(node,),
@@ -502,30 +525,26 @@ class Controller:
     
     def _receive_loop(self, node: Node) -> None:
         """Receive messages from a node"""
-        while self.running and node.sock and node.state != NodeState.DISCONNECTED:
+        while self.running and node.sock and not node.stop_event.is_set():
             try:
                 msg = fgr.receive_message(node.sock, timeout=0.5)
                 if msg is None:
-                    # Check if we've been disconnected
-                    if node.state == NodeState.DISCONNECTED:
-                        break
                     continue
                 
                 node.last_heartbeat = time.time()
                 self._dispatch_message(node, msg)
                 
+            except socket.timeout:
+                continue
             except socket.error as e:
-                if self.running and node.state != NodeState.DISCONNECTED:
-                    # Only log if we're not already disconnecting
-                    if e.errno != 9:  # Bad file descriptor - expected during disconnect
-                        self.logger.error(f"Socket error from {node.name}: {e}")
+                if not node.stop_event.is_set():
+                    self.logger.error(f"Socket error from {node.name}: {e}")
                 break
             except Exception as e:
-                if self.running and node.state != NodeState.DISCONNECTED:
+                if not node.stop_event.is_set():
                     self.logger.error(f"Receive error from {node.name}: {e}")
                 break
         
-        # Only call disconnect if we're not already disconnected
         if node.state != NodeState.DISCONNECTED:
             self._disconnect_node(node)
             self.logger.info(f"Node {node.name} disconnected")
@@ -535,7 +554,6 @@ class Controller:
         msg_type = msg.message_type
         
         if msg_type == fgr.FGRMsgType.FGR_MSG_TYPE_CNF:
-            # Confirmation - check for pending request
             ref = msg.reference
             if ref in node.pending_requests:
                 q = node.pending_requests.pop(ref)
@@ -544,12 +562,10 @@ class Controller:
                 except queue.Full:
                     pass
             
-            # Also pass to handler
             if node.handler:
                 node.handler.on_confirmation(msg)
         
         elif msg_type == fgr.FGRMsgType.FGR_MSG_TYPE_IND:
-            # Indication
             handled = False
             if node.handler:
                 handled = node.handler.on_indication(msg)
@@ -557,34 +573,21 @@ class Controller:
             if not handled:
                 self._handle_generic_indication(node, msg)
         
-        elif msg_type == fgr.FGRMsgType.FGR_MSG_TYPE_LOG:
-            # Log message
-            handled = False
-            if node.handler:
-                handled = node.handler.on_log(msg)
-            
-            if not handled:
-                self._handle_generic_log(node, msg)
-        
         elif msg_type == fgr.FGRMsgType.FGR_MSG_TYPE_RSP:
-            # Response to an indication we sent
-            handled = False
             if node.handler:
-                handled = node.handler.on_response(msg)
-            
-            if not handled:
-                self.logger.debug(f"Unhandled RSP from {node.name}: type=0x{msg.subtype:03X}")
+                node.handler.on_response(msg)
         
         elif msg_type == fgr.FGRMsgType.FGR_MSG_TYPE_REQ:
-            # Requests from node to controller (unusual, but handle)
-            self.logger.warning(f"Unexpected REQ from {node.name}: type=0x{msg.subtype:03X}")
+            self.logger.warning(f"Unexpected REQ from {node.name}")
+        
+        # LOG messages are ignored - they go to a different endpoint
     
     def _handle_generic_indication(self, node: Node, msg: fgr.FGRMsg) -> None:
-        """Handle indications that weren't handled by node-specific code"""
+        """Handle indications not handled by node-specific code"""
         ind_type = msg.subtype
         
         if ind_type == fgr.FGRIndRsp.FGR_IND_RSP_NEEDS_CFG:
-            self.logger.info(f"Node {node.name}: needs configuration (no handler)")
+            self.logger.info(f"Node {node.name}: needs configuration")
             self.send_response_to_node(node.name, ind_type, msg.reference, b"")
         
         elif ind_type == fgr.FGRIndRsp.FGR_IND_RSP_START:
@@ -594,54 +597,30 @@ class Controller:
             self.logger.info(f"Node {node.name}: stopped")
         
         elif ind_type == fgr.FGRIndRsp.FGR_IND_RSP_HEARTBEAT:
-            # Heartbeat - just log at debug level
             self.logger.debug(f"Node {node.name}: heartbeat received")
-            # Note: node.last_heartbeat is already updated in _receive_loop
-            # Optionally send a response if nodes expect one
-            # self.send_response_to_node(node.name, ind_type, msg.reference, b"")
         
         elif ind_type > fgr.FGRIndRsp.FGR_IND_RSP_LAST:
-            # Device-specific indication
-            self.logger.debug(f"Node {node.name}: device-specific indication 0x{ind_type:03X}, value={msg.error_or_state}")
-    
-    def _handle_generic_log(self, node: Node, msg: fgr.FGRMsg) -> None:
-        """Handle log messages"""
-        level_map = {
-            fgr.FGRLogLevel.FGR_LOG_LEVEL_DEBUG: logging.DEBUG,
-            fgr.FGRLogLevel.FGR_LOG_LEVEL_INFO: logging.INFO,
-            fgr.FGRLogLevel.FGR_LOG_LEVEL_WARN: logging.WARNING,
-            fgr.FGRLogLevel.FGR_LOG_LEVEL_ERROR: logging.ERROR,
-        }
-        level = level_map.get(msg.header.log_level, logging.INFO)
-        log_msg = msg.get_log_message()
-        self.logger.log(level, f"[{node.name}] {log_msg}")
+            self.logger.debug(f"Node {node.name}: device indication 0x{ind_type:03X}")
     
     def _heartbeat_loop(self) -> None:
-        """Monitor node heartbeats - nodes must send periodic HEARTBEAT indications"""
+        """Monitor node heartbeats"""
         while self.running:
-            time.sleep(30)
+            time.sleep(15)
             now = time.time()
             for node in self.nodes.values():
                 if node.sock and node.state != NodeState.DISCONNECTED:
-                    # Check if we've received any message (including heartbeat) recently
-                    if now - node.last_heartbeat > 60:  # 60 second timeout
-                        self.logger.warning(f"Node {node.name} heartbeat timeout (last: {node.last_heartbeat:.1f}s ago)")
+                    if now - node.last_heartbeat > node.heartbeat_timeout:
+                        self.logger.warning(f"Node {node.name} heartbeat timeout")
                         self._disconnect_node(node)
-                    elif now - node.last_heartbeat > 45:  # Getting close to timeout
-                        self.logger.debug(f"Node {node.name} heartbeat overdue: {now - node.last_heartbeat:.1f}s")
     
     def _get_next_reference(self, node: Node) -> int:
-        """Get next reference number for a node"""
         node.reference_counter = (node.reference_counter + 1) & 0xFF
         return node.reference_counter
     
     def send_request_to_node(self, node_name: str, req_type: int,
                              contents: bytes = b"",
                              timeout: float = 5.0) -> Optional[fgr.FGRMsg]:
-        """
-        Send a request to a specific node and wait for confirmation.
-        Returns confirmation message or None on timeout/error.
-        """
+        """Send a request to a node and wait for confirmation"""
         node = self.nodes.get(node_name)
         if not node or not node.sock:
             self.logger.error(f"Node {node_name} not connected")
@@ -650,7 +629,6 @@ class Controller:
         reference = self._get_next_reference(node)
         msg = fgr.FGRMsg.create_req(req_type, reference, contents)
         
-        # Create queue for confirmation
         response_queue = queue.Queue(maxsize=1)
         node.pending_requests[reference] = response_queue
         
@@ -659,15 +637,12 @@ class Controller:
                 node.pending_requests.pop(reference, None)
                 return None
             
-            # Wait for confirmation
             try:
-                cnf = response_queue.get(timeout=timeout)
-                return cnf
+                return response_queue.get(timeout=timeout)
             except queue.Empty:
-                self.logger.warning(f"Timeout waiting for confirmation from {node_name} (ref={reference})")
+                self.logger.warning(f"Timeout waiting for confirmation from {node_name}")
                 node.pending_requests.pop(reference, None)
                 return None
-                
         except Exception as e:
             self.logger.error(f"Error sending to {node_name}: {e}")
             node.pending_requests.pop(reference, None)
@@ -684,33 +659,19 @@ class Controller:
         msg = fgr.FGRMsg.create_rsp(rsp_type, reference, contents)
         return fgr.send_message(node.sock, msg)
     
-    def send_request_to_all(self, req_type: int, contents: bytes = b"",
-                            timeout: float = 5.0) -> Dict[str, Optional[fgr.FGRMsg]]:
-        """Send a request to all connected nodes"""
-        results = {}
-        for node_name in self.nodes:
-            if self.nodes[node_name].sock:
-                rsp = self.send_request_to_node(node_name, req_type, contents, timeout)
-                results[node_name] = rsp
-        return results
-    
-    def cfg_node(self, node_name: str, cfg_data: bytes,
-                 timeout: float = 5.0) -> bool:
-        """Send configuration to a node"""
-        cnf = self.send_request_to_node(node_name, fgr.FGRReqCnf.FGR_REQ_CNF_CFG,
-                                        cfg_data, timeout)
+    def cfg_node(self, node_name: str, cfg_data: bytes, timeout: float = 5.0) -> bool:
+        """Configure a node"""
+        cnf = self.send_request_to_node(node_name, fgr.FGRReqCnf.FGR_REQ_CNF_CFG, cfg_data, timeout)
         if cnf and cnf.error_or_state == fgr.FGRError.FGR_ERROR_NONE:
             node = self.nodes.get(node_name)
             if node:
                 node.state = NodeState.READY
-                node.cfg_data = {"raw": cfg_data}  # Store raw cfg
             return True
         return False
     
     def start_node(self, node_name: str, timeout: float = 5.0) -> bool:
-        """Start a node's operation"""
-        cnf = self.send_request_to_node(node_name, fgr.FGRReqCnf.FGR_REQ_CNF_START,
-                                        b"", timeout)
+        """Start a node"""
+        cnf = self.send_request_to_node(node_name, fgr.FGRReqCnf.FGR_REQ_CNF_START, b"", timeout)
         if cnf and cnf.error_or_state == fgr.FGRError.FGR_ERROR_NONE:
             node = self.nodes.get(node_name)
             if node:
@@ -719,9 +680,8 @@ class Controller:
         return False
     
     def stop_node(self, node_name: str, timeout: float = 5.0) -> bool:
-        """Stop a node's operation"""
-        cnf = self.send_request_to_node(node_name, fgr.FGRReqCnf.FGR_REQ_CNF_STOP,
-                                        b"", timeout)
+        """Stop a node"""
+        cnf = self.send_request_to_node(node_name, fgr.FGRReqCnf.FGR_REQ_CNF_STOP, b"", timeout)
         if cnf and cnf.error_or_state == fgr.FGRError.FGR_ERROR_NONE:
             node = self.nodes.get(node_name)
             if node:
@@ -729,83 +689,14 @@ class Controller:
             return True
         return False
     
-    def reboot_node(self, node_name: str, timeout: float = 2.0) -> bool:
-        """Reboot a node"""
-        cnf = self.send_request_to_node(node_name, fgr.FGRReqCnf.FGR_REQ_CNF_REBOOT,
-                                        b"", timeout)
-        return cnf is not None and cnf.error_or_state == fgr.FGRError.FGR_ERROR_NONE
-    
-    def set_node_log_level(self, node_name: str, level: int, timeout: float = 2.0) -> bool:
-        """Set a node's log level"""
-        cnf = self.send_request_to_node(node_name, fgr.FGRReqCnf.FGR_REQ_CNF_LOG_LEVEL,
-                                        bytes([level]), timeout)
-        return cnf is not None and cnf.error_or_state == fgr.FGRError.FGR_ERROR_NONE
-    
     def get_node(self, name: str) -> Optional[Node]:
-        """Get node by name"""
         return self.nodes.get(name)
     
-    def get_nodes_by_state(self, state: NodeState) -> List[Node]:
-        """Get all nodes in a given state"""
-        return [n for n in self.nodes.values() if n.state == state]
-    
     def get_connected_nodes(self) -> List[Node]:
-        """Get all connected nodes"""
         return [n for n in self.nodes.values() if n.sock is not None]
     
     def get_node_names(self) -> List[str]:
-        """Get list of all node names"""
         return list(self.nodes.keys())
-    
-    def get_node_types(self) -> List[str]:
-        """Get list of available node handler types"""
-        return list(self.node_handlers.keys())
-    
-    def reload_handlers(self) -> None:
-        """Reload node handlers from disk (useful for development)"""
-        self.logger.info("Reloading node handlers...")
-        # Clear existing handlers
-        self.node_handlers.clear()
-        # Reload
-        self._load_node_handlers()
-        
-        # Recreate handlers for connected nodes
-        for node in self.nodes.values():
-            if node.sock and node.handler:
-                node.handler = self._get_handler_for_node(node)
-                self.logger.info(f"Updated handler for {node.name}")
-
-
-# ============================================================================
-# Configuration Loading
-# ============================================================================
-
-def load_node_cfg(cfg_file: Path) -> Dict[str, Dict]:
-    """Load node configuration from JSON or YAML file"""
-    if not cfg_file.exists():
-        raise FileNotFoundError(f"Configuration file not found: {cfg_file}")
-    
-    with open(cfg_file, 'r') as f:
-        if cfg_file.suffix in ['.yaml', '.yml']:
-            return yaml.safe_load(f)
-        else:
-            return json.load(f)
-
-
-def get_default_node_cfg() -> Dict[str, Dict]:
-    """Get the default node configuration"""
-    return {
-        # Test node for development
-        "test_1": {
-            "ip": "10.10.3.2",
-            "type": "test"
-        },
-        # Level gauge node
-        "level_gauge_1": {
-            "ip": "10.10.3.3",
-            "type": "level_gauge"
-        }
-    }
 
 
 # ============================================================================
@@ -813,62 +704,53 @@ def get_default_node_cfg() -> Dict[str, Dict]:
 # ============================================================================
 
 def parse_args():
-    """Parse command line arguments"""
-    parser = argparse.ArgumentParser(
-        description="FGR Railway Controller",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  %(prog)s                              # Use defaults (10.10.3.1:5000)
-  %(prog)s --ip 0.0.0.0                # Listen on all interfaces
-  %(prog)s --port 6000                 # Use port 6000
-  %(prog)s --ip 192.168.1.100 --port 5000
-  %(prog)s --cfg nodes.yaml            # Load nodes from config file
-  %(prog)s --log-level DEBUG           # Enable debug logging
-        """
-    )
+    parser = argparse.ArgumentParser(description="FGR Railway Controller")
     
-    parser.add_argument(
-        "--ip",
-        type=str,
-        default="10.10.3.1",
-        help="IP address to listen on (default: 10.10.3.1)"
-    )
+    parser.add_argument("--ip", type=str, default="10.10.3.1",
+                        help="IP address to listen on (default: 10.10.3.1)")
     
-    parser.add_argument(
-        "--port",
-        type=int,
-        default=5000,
-        help="Port to listen on (default: 5000)"
-    )
+    parser.add_argument("--port", type=int, default=5000,
+                        help="Port to listen on (default: 5000)")
     
-    parser.add_argument(
-        "--cfg",
-        type=Path,
-        help="Path to node configuration file (JSON or YAML)"
-    )
+    parser.add_argument("--cfg", type=Path,
+                        help="Path to node configuration file (JSON format)")
     
-    parser.add_argument(
-        "--nodes-dir",
-        type=Path,
-        help="Directory containing node handlers (default: ./nodes)"
-    )
+    parser.add_argument("--nodes-dir", type=Path,
+                        help="Directory containing node handlers (default: ./nodes)")
     
-    parser.add_argument(
-        "--log-level",
-        type=str,
-        default="INFO",
-        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
-        help="Logging level (default: INFO)"
-    )
-    
-    parser.add_argument(
-        "--log-file",
-        type=Path,
-        help="Write logs to file instead of console"
-    )
+    parser.add_argument("--log-level", type=str, default="INFO",
+                        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+                        help="Logging level (default: INFO)")
     
     return parser.parse_args()
+
+
+# ============================================================================
+# Default Configuration
+# ============================================================================
+
+def get_default_cfg_path() -> Path:
+    """Get default configuration file path"""
+    default_cfg = SCRIPT_DIR / "nodes.json"
+    if default_cfg.exists():
+        return default_cfg
+    return None
+
+
+def get_default_node_cfg() -> Dict[str, Dict]:
+    """Get default node configuration (used if no cfg file provided)"""
+    return {
+        "test_1": {
+            "ip": "10.10.3.2",
+            "type": "test",
+            "heartbeat_timeout": 30
+        },
+        "level_gauge_1": {
+            "ip": "10.10.3.3",
+            "type": "level_gauge",
+            "heartbeat_timeout": 60
+        }
+    }
 
 
 # ============================================================================
@@ -876,54 +758,38 @@ Examples:
 # ============================================================================
 
 def main():
-    """Main entry point"""
     args = parse_args()
     
-    # Setup logging
-    log_level = getattr(logging, args.log_level)
-    log_format = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    
-    if args.log_file:
-        logging.basicConfig(
-            level=log_level,
-            format=log_format,
-            filename=args.log_file,
-            filemode='a'
-        )
-        # Also log to console
-        console = logging.StreamHandler()
-        console.setLevel(log_level)
-        console.setFormatter(logging.Formatter(log_format))
-        logging.getLogger('').addHandler(console)
-    else:
-        logging.basicConfig(
-            level=log_level,
-            format=log_format
-        )
+    logging.basicConfig(
+        level=getattr(logging, args.log_level),
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
     
     logger = logging.getLogger("Main")
+    
+    # Determine config file
+    cfg_file = args.cfg
+    if not cfg_file:
+        cfg_file = get_default_cfg_path()
     
     # Create controller
     controller = Controller(
         listen_ip=args.ip,
         port=args.port,
-        nodes_dir=args.nodes_dir
+        nodes_dir=args.nodes_dir,
+        cfg_file=cfg_file
     )
     
-    # Load node configuration
-    if args.cfg:
-        try:
-            node_cfg = load_node_cfg(args.cfg)
-            logger.info(f"Loaded node configuration from {args.cfg}")
-        except Exception as e:
-            logger.error(f"Failed to load configuration: {e}")
-            sys.exit(1)
-    else:
-        node_cfg = get_default_node_cfg()
-        logger.info("Using default node configuration")
-    
-    # Add nodes to controller
-    controller.add_nodes_from_cfg(node_cfg)
+    # If no config file and no nodes loaded, add defaults
+    if not cfg_file and not controller.get_node_names():
+        logger.info("No configuration file found, using defaults")
+        for name, node_cfg in get_default_node_cfg().items():
+            controller.add_node(
+                name=name,
+                ip=node_cfg["ip"],
+                node_type=node_cfg.get("type", ""),
+                heartbeat_timeout=node_cfg.get("heartbeat_timeout", 60)
+            )
     
     # Print startup information
     print("\n" + "=" * 60)
@@ -932,17 +798,17 @@ def main():
     print(f"Listening on:    {args.ip}:{args.port}")
     print(f"Log level:       {args.log_level}")
     print(f"Nodes directory: {controller.nodes_dir}")
-    print(f"Protocol from:   {PROTOCOL_DIR / 'fgr_protocol.py'}")
+    if cfg_file and cfg_file.exists():
+        print(f"Config file:     {cfg_file}")
     print("\nConfigured nodes:")
     for name, node in controller.nodes.items():
-        print(f"  - {name:20} {node.ip:15} (type: {node.node_type or 'none'})")
+        print(f"  - {name:20} {node.ip:15} (type: {node.node_type or 'none'}, timeout: {node.heartbeat_timeout}s)")
     print("=" * 60)
     print("Press Ctrl+C to stop\n")
     
     # Start controller
     if controller.start():
         try:
-            # Keep main thread alive
             while True:
                 time.sleep(1)
         except KeyboardInterrupt:
