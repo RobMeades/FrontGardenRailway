@@ -389,7 +389,7 @@ int32_t fgr_socket_receive_start(int sock,
                                  void *rx_cb_param, void **context);
 
 /** Stop receiving data on a socket.  When this function has returned
- * rx_cb() and reconnect_cb() will no longer be called.
+ * reconnect_cb() and rx_cb() will no longer be called.
  *
  * @param context the same pointer as was passed to
  *                fgr_socket_receive_start().

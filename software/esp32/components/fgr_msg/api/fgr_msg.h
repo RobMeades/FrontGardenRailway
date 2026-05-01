@@ -36,6 +36,14 @@ extern "C" {
  * TYPES
  * -------------------------------------------------------------- */
 
+/** Function to call when a message is received.
+ *
+ * @param msg    a pointer to the message: this should be handled/
+ *               copied/whatever before the callback returns.
+ * @param param  cb_param as passed to fgr_msg_receive_start().
+ */
+typedef void (*fgr_msg_rx_cb_t)(fgr_msg_t *msg, void *param);
+
 /* ----------------------------------------------------------------
  * FUNCTIONS
  * -------------------------------------------------------------- */
@@ -71,7 +79,7 @@ int32_t fgr_msg_init(const char *server_ip, uint16_t port,
  *
  * @param cnf     the CNF message to send.
  * @param error   the error to send, 0 for success.
- * @param buffer  data to include in the message contents, may
+ * @param buffer  data to include in the message contents; may
  *                be NULL, must be non-NULL if length is non-zero.
  * @param length  the amount of data at buffer, ignored if
  *                buffer is NULL.
@@ -85,7 +93,7 @@ int32_t fgr_msg_send_cnf(fgr_req_cnf_t cnf, fgr_error_t error,
  *
  * @param ind     the IND message to send.
  * @param state   the state to include.
- * @param buffer  data to include in the message contents, may
+ * @param buffer  data to include in the message contents; may
  *                be NULL, must be non-NULL if length is non-zero.
  * @param length  the amount of data at buffer, ignored if
  *                buffer is NULL.
@@ -94,6 +102,24 @@ int32_t fgr_msg_send_cnf(fgr_req_cnf_t cnf, fgr_error_t error,
  */
 int32_t fgr_msg_send_ind(fgr_ind_rsp_t ind, fgr_state_t state,
                          const void *buffer, size_t length);
+
+/** Start receiving messages.  A task is created to receive
+ * messages and cb() may be called from this task until
+ * fgr_msg_receive_stop() is called.
+ *
+ * @param cb        callback to be called when a message is
+ *                  received.
+ * @param cb_param  user parameter to be passed to cb()
+ *                  when it is called; may be NULL.
+ * @return          ESP_OK on success, else a negative value
+ *                  from esp_err_t.
+ */
+int32_t fgr_msg_receive_start(fgr_msg_rx_cb_t cb, void *cb_param);
+
+/** Stop receiving messages.  When this function has returned
+ * cb() will no longer be called.
+ */
+void fgr_msg_receive_stop();
 
 /** Deinitialise the messaging interface.
  */

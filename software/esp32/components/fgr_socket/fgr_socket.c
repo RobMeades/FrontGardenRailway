@@ -263,10 +263,10 @@ static void task_rx(void *param)
             int32_t err = recv(context->sock, buffer, sizeof(buffer), 0);
             if (err > 0) {
                 // Process received data
-                ESP_LOGD(TAG, "Received %d byte(s) from server:", err);
+                ESP_LOGI(TAG, "Received %d byte(s) from server:", err);
                 char debug_buffer[128];
                 fgr_debug_hex_dump_to_buffer((const void *) buffer, err, debug_buffer, sizeof(debug_buffer));
-                ESP_LOGD(TAG, "%s", debug_buffer);
+                ESP_LOGI(TAG, "%s", debug_buffer);
                 if (context->rx_cb) {
                     context->rx_cb(buffer, err, context->rx_cb_param);
                 }
@@ -587,7 +587,7 @@ void fgr_socket_connect_stop(void **context)
 }
 
 /* ----------------------------------------------------------------
- * FUNCTIONS: "CHANNEL" COMPOUND OPERATIONS
+ * PUBLIC FUNCTIONS: "CHANNEL" COMPOUND OPERATIONS
  * -------------------------------------------------------------- */
 
 // Create and connect a [non-blocking] socket.
@@ -739,7 +739,7 @@ void fgr_socket_channel_stop(void **context)
 }
 
 /* ----------------------------------------------------------------
- * FUNCTIONS: SEND AND RECEIVE
+ * PUBLIC FUNCTIONS: SEND AND RECEIVE
  * -------------------------------------------------------------- */
 
 // Send data on a socket.

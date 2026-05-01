@@ -65,13 +65,13 @@ extern const uint8_t g_server_cert_pem_start[] asm("_binary_ca_cert_pem_start");
  * -------------------------------------------------------------- */
 
 // Generic initialisation.
-esp_err_t init(void)
+static int32_t init(fgr_state_t *state)
 {
     // Print out our Wi-Fi MAC address
     fgr_debug_print_mac_address();
 
     // Create the default event loop, for everyone's use
-    esp_err_t err = esp_event_loop_create_default();
+    int32_t err = esp_event_loop_create_default();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to create default event loop: %s.", esp_err_to_name(err));
     }
@@ -106,7 +106,7 @@ esp_err_t init(void)
 
     // Initialise messaging
     if (err == ESP_OK) {
-        err = fgr_msg_init(CONFIG_FGR_NETWORK_CONTROLLER_IP_ADDRESS, CONFIG_FGR_MSG_PORT, FGR_MSG_HEARTBEAT_SECONDS, NULL);
+        err = fgr_msg_init(CONFIG_FGR_NETWORK_CONTROLLER_IP_ADDRESS, CONFIG_FGR_MSG_PORT, FGR_MSG_HEARTBEAT_SECONDS, state);
     }
 
 #else
@@ -116,6 +116,14 @@ esp_err_t init(void)
     return err;
 }
 
+// Message receive callback
+static void msg_receive_cb(fgr_msg_t *msg, void *param)
+{
+    (void) param;
+
+    ESP_LOGI(TAG, "Received message header 0x%08x.", msg->header.header);
+}
+
 /* ----------------------------------------------------------------
  * PUBLIC FUNCTIONS
  * -------------------------------------------------------------- */
@@ -123,16 +131,27 @@ esp_err_t init(void)
 // Entry point.
 void app_main(void)
 {
+    fgr_state_t state = FGR_STATE_NEEDS_CFG;
+
     ESP_LOGI(TAG, "app_main start.");
 
-    int32_t err = init();
+    int32_t err = init(&state);
     if (err == ESP_OK) {
         ESP_LOGI(TAG, "Initialization complete.");
+
+        // Start receiving messages
+        err = fgr_msg_receive_start(msg_receive_cb, NULL);
+    }
+
+    if (err == ESP_OK) {
+
+        // Request configuration
+        ESP_LOGI(TAG, "Requesting configuration.");
+        fgr_msg_send_ind(FGR_IND_RSP_NEEDS_CFG, state, NULL, 0);
 
         // Allow us to feed the watchdog
         esp_task_wdt_add(NULL);
         while(1) {
-            ESP_LOGI(TAG, "Test node idle.");
             vTaskDelay(pdMS_TO_TICKS(4000));
             esp_task_wdt_reset();
         }
@@ -143,6 +162,7 @@ void app_main(void)
         vTaskDelay(pdMS_TO_TICKS(5000));
     }
 
+    fgr_msg_receive_stop();
     fgr_log_deinit();
     fgr_network_deinit();
     esp_restart();

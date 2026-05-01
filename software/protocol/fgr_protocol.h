@@ -21,8 +21,11 @@
  * @brief Protocol definition for comms between an ESP32 node and
  * a controlling entity in the front garden railway.
  *
- * Note: endianness is not considered here since the ESP32 and a
- * Raspberry Pi are both little-endian.
+ * Note: the message elements are encoded big-endian or network
+ * order on the wire (this is most readable and most common);
+ * since the ESP32 and Raspberry Pi are both little-endian,
+ * conversion is required for the type (htons/ntohs) and length
+ * (htonl/ntohl) fields.
  *
  * Note: the underlying transport is assumed to be perfect and ordered.
  */

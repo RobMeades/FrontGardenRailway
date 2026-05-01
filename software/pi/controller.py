@@ -1,4 +1,21 @@
 #!/usr/bin/env python3
+
+# Copyright 2026 Rob Meades
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+#  Written by DeepSeek :-).
+
 """
 Controller for Front Garden Railway network.
 
@@ -334,27 +351,55 @@ class Controller:
             self.logger.warning(f"Nodes directory not found: {self.nodes_dir}")
             return
         
+        self.logger.info(f"Looking for handlers in: {self.nodes_dir}")
+        
         parent_dir = self.nodes_dir.parent
         if str(parent_dir) not in sys.path:
             sys.path.insert(0, str(parent_dir))
         
         for py_file in sorted(self.nodes_dir.glob("node_*.py")):
+            self.logger.info(f"Found file: {py_file}")
             if py_file.name == "node_base.py":
                 continue
             
             module_name = f"nodes.{py_file.stem}"
+            self.logger.info(f"Attempting to load module: {module_name}")
             try:
-                spec = importlib.util.spec_from_file_location(module_name, py_file)
-                module = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(module)
+                # Read the source file
+                with open(py_file, 'r') as f:
+                    source = f.read()
+                
+                # Create a new module
+                module = importlib.util.module_from_spec(
+                    importlib.util.spec_from_file_location(module_name, py_file)
+                )
+                
+                # Inject NodeHandler into the module's globals
+                module.NodeHandler = NodeHandler
+                module.fgr = fgr  # Also inject fgr for convenience
+                module.__dict__['NodeHandler'] = NodeHandler
+                module.__dict__['fgr'] = fgr
+                
+                # Execute the module with our injected globals
+                exec(source, module.__dict__)
+                
+                self.logger.info(f"Module loaded successfully")
                 
                 for name, obj in inspect.getmembers(module, inspect.isclass):
-                    if issubclass(obj, NodeHandler) and obj != NodeHandler:
+                    try:
+                        is_subclass = issubclass(obj, NodeHandler) and obj != NodeHandler
+                    except TypeError:
+                        continue
+                    
+                    if is_subclass:
                         node_type = py_file.stem[5:]
                         self.node_handlers[node_type] = obj
                         self.logger.info(f"Loaded handler {obj.__name__} for node type '{node_type}'")
+                    else:
+                        self.logger.debug(f"Skipping class {name} (not a handler)")
+                        
             except Exception as e:
-                self.logger.error(f"Failed to load handler from {py_file.name}: {e}")
+                self.logger.error(f"Failed to load handler from {py_file.name}: {e}", exc_info=True)
     
     def _load_nodes_from_cfg(self):
         """Load node definitions from configuration"""
@@ -628,7 +673,7 @@ class Controller:
         elif ind_type == fgr.FGRIndRsp.FGR_IND_RSP_STOP:
             self.logger.info(f"Node {node.name}: stopped")
         
-        elif ind_type == 0x0004:  # FGR_IND_RSP_HEARTBEAT
+        elif ind_type == fgr.FGRIndRsp.FGR_IND_RSP_HEARTBEAT:
             node.heartbeat_count += 1
             if self.logger.isEnabledFor(logging.DEBUG):
                 self.logger.debug(f"[{node.name}] HEARTBEAT #{node.heartbeat_count} (type=0x{ind_type:03X}, state={msg.error_or_state})")
