@@ -1,4 +1,21 @@
 #!/usr/bin/env python3
+
+# Copyright 2026 Rob Meades
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# All written by DeepSeek :-)
+
 """
 Controller for Front Garden Railway network.
 
@@ -354,15 +371,20 @@ class Controller:
     
     def _disconnect_node(self, node: Node) -> None:
         """Internal: disconnect a node"""
+        # Set a flag to indicate we're disconnecting
+        node.state = NodeState.DISCONNECTED
+        
         if node.sock:
+            try:
+                # Shutdown first to break any blocking reads
+                node.sock.shutdown(socket.SHUT_RDWR)
+            except Exception:
+                pass
             try:
                 node.sock.close()
             except Exception:
                 pass
             node.sock = None
-        
-        node.state = NodeState.DISCONNECTED
-        node.rx_thread = None
         
         # Cancel pending requests
         for ref, q in node.pending_requests.items():
@@ -372,6 +394,8 @@ class Controller:
                 pass
         node.pending_requests.clear()
         
+        # Note: Don't clear rx_thread here - let it finish on its own
+        # Just call handler's on_disconnected once
         if node.handler:
             node.handler.on_disconnected()
     
@@ -478,23 +502,33 @@ class Controller:
     
     def _receive_loop(self, node: Node) -> None:
         """Receive messages from a node"""
-        while self.running and node.sock:
+        while self.running and node.sock and node.state != NodeState.DISCONNECTED:
             try:
                 msg = fgr.receive_message(node.sock, timeout=0.5)
                 if msg is None:
+                    # Check if we've been disconnected
+                    if node.state == NodeState.DISCONNECTED:
+                        break
                     continue
                 
                 node.last_heartbeat = time.time()
                 self._dispatch_message(node, msg)
                 
+            except socket.error as e:
+                if self.running and node.state != NodeState.DISCONNECTED:
+                    # Only log if we're not already disconnecting
+                    if e.errno != 9:  # Bad file descriptor - expected during disconnect
+                        self.logger.error(f"Socket error from {node.name}: {e}")
+                break
             except Exception as e:
-                if self.running:
+                if self.running and node.state != NodeState.DISCONNECTED:
                     self.logger.error(f"Receive error from {node.name}: {e}")
                 break
         
-        # Node disconnected
-        self._disconnect_node(node)
-        self.logger.info(f"Node {node.name} disconnected")
+        # Only call disconnect if we're not already disconnected
+        if node.state != NodeState.DISCONNECTED:
+            self._disconnect_node(node)
+            self.logger.info(f"Node {node.name} disconnected")
     
     def _dispatch_message(self, node: Node, msg: fgr.FGRMsg) -> None:
         """Dispatch a message to the appropriate handler"""
@@ -551,7 +585,6 @@ class Controller:
         
         if ind_type == fgr.FGRIndRsp.FGR_IND_RSP_NEEDS_CFG:
             self.logger.info(f"Node {node.name}: needs configuration (no handler)")
-            # Send empty cfg as default response
             self.send_response_to_node(node.name, ind_type, msg.reference, b"")
         
         elif ind_type == fgr.FGRIndRsp.FGR_IND_RSP_START:
@@ -559,6 +592,13 @@ class Controller:
         
         elif ind_type == fgr.FGRIndRsp.FGR_IND_RSP_STOP:
             self.logger.info(f"Node {node.name}: stopped")
+        
+        elif ind_type == fgr.FGRIndRsp.FGR_IND_RSP_HEARTBEAT:
+            # Heartbeat - just log at debug level
+            self.logger.debug(f"Node {node.name}: heartbeat received")
+            # Note: node.last_heartbeat is already updated in _receive_loop
+            # Optionally send a response if nodes expect one
+            # self.send_response_to_node(node.name, ind_type, msg.reference, b"")
         
         elif ind_type > fgr.FGRIndRsp.FGR_IND_RSP_LAST:
             # Device-specific indication
@@ -577,14 +617,18 @@ class Controller:
         self.logger.log(level, f"[{node.name}] {log_msg}")
     
     def _heartbeat_loop(self) -> None:
-        """Check node health periodically"""
+        """Monitor node heartbeats - nodes must send periodic HEARTBEAT indications"""
         while self.running:
             time.sleep(30)
             now = time.time()
             for node in self.nodes.values():
-                if node.sock and now - node.last_heartbeat > 60:
-                    self.logger.warning(f"Node {node.name} heartbeat timeout")
-                    self._disconnect_node(node)
+                if node.sock and node.state != NodeState.DISCONNECTED:
+                    # Check if we've received any message (including heartbeat) recently
+                    if now - node.last_heartbeat > 60:  # 60 second timeout
+                        self.logger.warning(f"Node {node.name} heartbeat timeout (last: {node.last_heartbeat:.1f}s ago)")
+                        self._disconnect_node(node)
+                    elif now - node.last_heartbeat > 45:  # Getting close to timeout
+                        self.logger.debug(f"Node {node.name} heartbeat overdue: {now - node.last_heartbeat:.1f}s")
     
     def _get_next_reference(self, node: Node) -> int:
         """Get next reference number for a node"""

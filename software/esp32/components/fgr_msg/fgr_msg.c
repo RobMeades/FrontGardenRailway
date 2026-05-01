@@ -68,10 +68,15 @@ static void socket_reconnect_cb(int sock, void *param)
     msg_cfg_t *msg_cfg = (msg_cfg_t *) param;
 
     if (msg_cfg->lock) {
-        // Nothing to do other than update the socket
-        // since the previous has probably been closed
-        // and set the connected flag back to true
+
         CONTEXT_LOCK(msg_cfg->lock, "socket_reconnect_cb() 2");
+        int32_t err = fgr_socket_enable_tcp_keep_alive(sock,
+                                                       FGR_SOCKET_TCP_KEEP_ALIVE_IDLE_TIME_SECONDS,
+                                                       FGR_SOCKET_TCP_KEEP_ALIVE_PROBE_INTERVAL_SECONDS,
+                                                       FGR_SOCKET_TCP_KEEP_ALIVE_COUNT);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "fgr_socket_enable_tcp_keep_alive() returned error: %s.", esp_err_to_name(err));
+        }
         msg_cfg->sock = sock;
         msg_cfg->connected = true;
         CONTEXT_UNLOCK(msg_cfg->lock, "socket_reconnect_cb() 2");
@@ -119,6 +124,12 @@ int32_t fgr_msg_init(const char *server_ip, uint16_t port)
                                            &g_msg_cfg.sock,
                                            &g_msg_cfg.context_sock);
             if (err == ESP_OK) {
+
+                CONTEXT_UNLOCK(g_msg_cfg.lock, "fgr_msg_init()");
+                // Do initial extra socket configuration
+                socket_reconnect_cb(g_msg_cfg.sock, &g_msg_cfg);
+                CONTEXT_LOCK(g_msg_cfg.lock, "fgr_msg_init()");
+
                 // Maintain the connection
                 err = fgr_socket_channel_maintain(&g_msg_cfg.context_sock,
                                                   socket_reconnect_cb,
@@ -133,7 +144,9 @@ int32_t fgr_msg_init(const char *server_ip, uint16_t port)
         }
     }
 
-    if (err != ESP_OK) {
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "Connected to controller.");
+    } else {
         clean_up();
     }
 

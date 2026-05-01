@@ -89,6 +89,7 @@ typedef enum {
                                                   // (matches FGR_REQ_CNF_CFG)
     FGR_IND_RSP_START                  = 0x0002,  // The device has started by itself (matches FGR_REQ_CNF_START)
     FGR_IND_RSP_STOP                   = 0x0003,  // The device has stopped by itself (matches FGR_REQ_CNF_STOP)
+    FGR_IND_RSP_HEARTBEAT              = 0x0004,  // Periodic heartbeat
     FGR_IND_RSP_LAST                   = 0x001f
     // Indication/response messages beyond FGR_IND_RSP_LAST are device specific
 } fgr_ind_rsp_t;

@@ -100,9 +100,9 @@ esp_err_t init(void)
     }
 
     // Initialise messaging
-    //if (err == ESP_OK) {
-    //    err = fgr_msg_init(CONFIG_FGR_NETWORK_CONTROLLER_IP_ADDRESS, CONFIG_FGR_MSG_PORT);
-    //}
+    if (err == ESP_OK) {
+        err = fgr_msg_init(CONFIG_FGR_NETWORK_CONTROLLER_IP_ADDRESS, CONFIG_FGR_MSG_PORT);
+    }
 
 #else
     ESP_LOGW(TAG, "CONFIG_FGR_APP_NO_WIFI is defined, not connecting to WiFi.");

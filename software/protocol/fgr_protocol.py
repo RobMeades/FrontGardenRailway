@@ -42,6 +42,7 @@ class FGRIndRsp(IntEnum):
     FGR_IND_RSP_NEEDS_CFG = 1
     FGR_IND_RSP_START = 2
     FGR_IND_RSP_STOP = 3
+    FGR_IND_RSP_HEARTBEAT = 4
     FGR_IND_RSP_LAST = 31
 
 class FGRLogLevel(IntEnum):
