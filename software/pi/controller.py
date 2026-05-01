@@ -98,7 +98,6 @@ class Node:
     # Debug counters
     message_count: int = 0
     heartbeat_count: int = 0
-    last_debug_log: float = 0
 
 
 # ============================================================================
@@ -488,14 +487,15 @@ class Controller:
                 self.logger.info(f"Connection from {addr[0]}:{addr[1]}")
                 
                 # Peek at first bytes for debugging
-                try:
-                    client_sock.settimeout(0.5)
-                    peek_data = client_sock.recv(8, socket.MSG_PEEK)
-                    if peek_data:
-                        self.logger.debug(f"First bytes from {addr[0]}: {self._hex_dump(peek_data)}")
-                except:
-                    pass
-                client_sock.settimeout(None)
+                if self.logger.isEnabledFor(logging.DEBUG):
+                    try:
+                        client_sock.settimeout(0.5)
+                        peek_data = client_sock.recv(8, socket.MSG_PEEK)
+                        if peek_data:
+                            self.logger.debug(f"First bytes from {addr[0]}: {self._hex_dump(peek_data)}")
+                    except:
+                        pass
+                    client_sock.settimeout(None)
                 
                 ip = addr[0]
                 if ip in self.nodes_by_ip:
@@ -546,14 +546,15 @@ class Controller:
                     continue
                 
                 node.message_count += 1
-                msg_type_name = msg_type_names.get(msg.message_type, f"UNK({msg.message_type})")
                 
-                self.logger.debug(
-                    f"[{node.name}] RCVD #{node.message_count}: "
-                    f"type={msg_type_name}, subtype=0x{msg.subtype:03X}, "
-                    f"ref={msg.reference}, err/state={msg.error_or_state}, "
-                    f"len={len(msg.contents)}"
-                )
+                if self.logger.isEnabledFor(logging.DEBUG):
+                    msg_type_name = msg_type_names.get(msg.message_type, f"UNK({msg.message_type})")
+                    self.logger.debug(
+                        f"[{node.name}] RCVD #{node.message_count}: "
+                        f"type={msg_type_name}, subtype=0x{msg.subtype:03X}, "
+                        f"ref={msg.reference}, err/state={msg.error_or_state}, "
+                        f"len={len(msg.contents)}"
+                    )
                 
                 node.last_heartbeat = time.time()
                 self._dispatch_message(node, msg)
@@ -611,16 +612,11 @@ class Controller:
         ind_type = msg.subtype
         
         # Debug: Show raw values for all indications
-        self.logger.debug(
-            f"[{node.name}] IND: type=0x{ind_type:03X} ({ind_type}), "
-            f"state={msg.error_or_state}, ref={msg.reference}"
-        )
-        
-        # Check for heartbeat - support both integer and enum
-        heartbeat_value = None
-        if hasattr(fgr.FGRIndRsp, 'FGR_IND_RSP_HEARTBEAT'):
-            heartbeat_value = fgr.FGRIndRsp.FGR_IND_RSP_HEARTBEAT
-            self.logger.debug(f"[{node.name}] Heartbeat expected value = {heartbeat_value}")
+        if self.logger.isEnabledFor(logging.DEBUG):
+            self.logger.debug(
+                f"[{node.name}] IND: type=0x{ind_type:03X} ({ind_type}), "
+                f"state={msg.error_or_state}, ref={msg.reference}"
+            )
         
         if ind_type == fgr.FGRIndRsp.FGR_IND_RSP_NEEDS_CFG:
             self.logger.info(f"Node {node.name}: needs configuration")
@@ -632,12 +628,14 @@ class Controller:
         elif ind_type == fgr.FGRIndRsp.FGR_IND_RSP_STOP:
             self.logger.info(f"Node {node.name}: stopped")
         
-        elif heartbeat_value is not None and ind_type == heartbeat_value:
+        elif ind_type == 0x0004:  # FGR_IND_RSP_HEARTBEAT
             node.heartbeat_count += 1
-            self.logger.info(f"♥ [{node.name}] HEARTBEAT #{node.heartbeat_count} (type=0x{ind_type:03X}, state={msg.error_or_state})")
+            if self.logger.isEnabledFor(logging.DEBUG):
+                self.logger.debug(f"[{node.name}] HEARTBEAT #{node.heartbeat_count} (type=0x{ind_type:03X}, state={msg.error_or_state})")
         
         elif ind_type > fgr.FGRIndRsp.FGR_IND_RSP_LAST:
-            self.logger.debug(f"Node {node.name}: device indication 0x{ind_type:03X}")
+            if self.logger.isEnabledFor(logging.DEBUG):
+                self.logger.debug(f"Node {node.name}: device indication 0x{ind_type:03X}")
     
     def _heartbeat_loop(self) -> None:
         """Monitor node heartbeats"""
@@ -655,7 +653,7 @@ class Controller:
                             f"msgs={node.message_count}, hb={node.heartbeat_count})"
                         )
                         self._disconnect_node(node)
-                    elif time_since > node.heartbeat_timeout - 15:
+                    elif time_since > node.heartbeat_timeout - 15 and self.logger.isEnabledFor(logging.DEBUG):
                         self.logger.debug(
                             f"Node {node.name} heartbeat due soon "
                             f"(last: {time_since:.1f}s ago, timeout: {node.heartbeat_timeout}s)"
@@ -677,7 +675,8 @@ class Controller:
         reference = self._get_next_reference(node)
         msg = fgr.FGRMsg.create_req(req_type, reference, contents)
         
-        self.logger.debug(f"[{node_name}] Sending REQ type=0x{req_type:03X}, ref={reference}, len={len(contents)}")
+        if self.logger.isEnabledFor(logging.DEBUG):
+            self.logger.debug(f"[{node_name}] Sending REQ type=0x{req_type:03X}, ref={reference}, len={len(contents)}")
         
         response_queue = queue.Queue(maxsize=1)
         node.pending_requests[reference] = response_queue
@@ -707,7 +706,10 @@ class Controller:
             return False
         
         msg = fgr.FGRMsg.create_rsp(rsp_type, reference, contents)
-        self.logger.debug(f"[{node_name}] Sending RSP type=0x{rsp_type:03X}, ref={reference}, len={len(contents)}")
+        
+        if self.logger.isEnabledFor(logging.DEBUG):
+            self.logger.debug(f"[{node_name}] Sending RSP type=0x{rsp_type:03X}, ref={reference}, len={len(contents)}")
+        
         return fgr.send_message(node.sock, msg)
     
     def cfg_node(self, node_name: str, cfg_data: bytes, timeout: float = 5.0) -> bool:
@@ -852,17 +854,6 @@ def main():
     print("\nConfigured nodes:")
     for name, node in controller.nodes.items():
         print(f"  - {name:20} {node.ip:15} (type: {node.node_type or 'none'}, timeout: {node.heartbeat_timeout}s)")
-    print("=" * 60)
-    
-    # Show heartbeat constant info
-    if hasattr(fgr.FGRIndRsp, 'FGR_IND_RSP_HEARTBEAT'):
-        print(f"Heartbeat constant: FGR_IND_RSP_HEARTBEAT = {fgr.FGRIndRsp.FGR_IND_RSP_HEARTBEAT}")
-    else:
-        print("WARNING: FGR_IND_RSP_HEARTBEAT not defined in protocol!")
-        print("Looking for any value 0x0004 in FGRIndRsp...")
-        for name, value in fgr.FGRIndRsp.__members__.items():
-            if value == 4:
-                print(f"  Found {name} = {value} - using this for heartbeat")
     print("=" * 60)
     print("Press Ctrl+C to stop\n")
     

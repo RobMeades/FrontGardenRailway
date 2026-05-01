@@ -116,10 +116,10 @@ int32_t send_msg(uint16_t type, uint8_t error_state,
 
             fgr_msg_header_t *_header;
             uint32_t *_length;
-            uint32_t header[(sizeof(*_header) + sizeof(*_length)) / sizeof(uint32_t)] = {0};
-            _header = (fgr_msg_header_t *) &(header[0]);
-            _length = &(header[sizeof(*_header) / sizeof(uint32_t)]);
-            // We can fill in the CNF bit of the union, the
+            uint32_t header_length[(sizeof(*_header) + sizeof(*_length)) / sizeof(uint32_t)] = {0};
+            _header = (fgr_msg_header_t *) &(header_length[0]);
+            _length = &(header_length[sizeof(*_header) / sizeof(uint32_t)]);
+            // We can just fill in the CNF bit of the union, the
             // IND part follows the same pattern
             _header->cnf.type = type;
             _header->cnf.error = error_state;
@@ -131,13 +131,12 @@ int32_t send_msg(uint16_t type, uint8_t error_state,
 
             CONTEXT_LOCK(g_msg_cfg.lock, "send_msg()");
             // Send header and length
-            err = fgr_socket_send(g_msg_cfg.sock, &header, sizeof(header), FGR_SOCKET_TX_RETRY_COUNT);
+            err = fgr_socket_send(g_msg_cfg.sock, &header_length, sizeof(header_length), FGR_SOCKET_TX_RETRY_COUNT);
             if ((err == ESP_OK) && (buffer != NULL)) {
                 // Send contents
                 err = fgr_socket_send(g_msg_cfg.sock, buffer, length, FGR_SOCKET_TX_RETRY_COUNT);
             }
             if (err == ESP_OK) {
-                ESP_LOGI("DEBUG", "Message sent");
                 fgr_socket_channel_activity(&g_msg_cfg.context_sock);
             } else {
                 fgr_socket_channel_failed(&g_msg_cfg.context_sock);

@@ -161,6 +161,7 @@ static void task_maintain(void *arg)
 
                             CONTEXT_LOCK(context_channel->lock, "task_maintain() 1");
                             context_channel->connected = true;
+                            context_channel->last_activity_time_us = esp_timer_get_time();
                             CONTEXT_UNLOCK(context_channel->lock, "task_maintain() 1");
 
                             ESP_LOGI(TAG, "Reconnected immediately.");
@@ -176,6 +177,7 @@ static void task_maintain(void *arg)
                             CONTEXT_LOCK(context_channel->lock, "task_maintain() 2");
                             if (err == ESP_OK) {
                                 context_channel->connected = true;
+                                context_channel->last_activity_time_us = esp_timer_get_time();
                                 ESP_LOGI(TAG, "Reconnected after %" PRId32 " ms.", elapsed_ms);
                             } else {
                                 if (err == -ESP_ERR_NOT_FINISHED) {
