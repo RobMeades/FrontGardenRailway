@@ -5,4 +5,9 @@ menu "FGR Log Configuration"
         default 5001
         range 1024 65535
 
+    config FGR_LOG_HEARTBEAT_SECONDS
+        int "how often to check the underlying channel"
+        default 290
+        range 30 65535
+
 endmenu

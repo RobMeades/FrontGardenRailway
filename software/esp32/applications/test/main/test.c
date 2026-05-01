@@ -44,6 +44,11 @@
  // Logging prefix
  #define TAG "test"
 
+// The message heartbeat to use during testing
+#ifndef FGR_MSG_HEARTBEAT_SECONDS
+# define FGR_MSG_HEARTBEAT_SECONDS 25
+#endif
+
 /* ----------------------------------------------------------------
  * TYPES
  * -------------------------------------------------------------- */
@@ -101,7 +106,7 @@ esp_err_t init(void)
 
     // Initialise messaging
     if (err == ESP_OK) {
-        err = fgr_msg_init(CONFIG_FGR_NETWORK_CONTROLLER_IP_ADDRESS, CONFIG_FGR_MSG_PORT);
+        err = fgr_msg_init(CONFIG_FGR_NETWORK_CONTROLLER_IP_ADDRESS, CONFIG_FGR_MSG_PORT, FGR_MSG_HEARTBEAT_SECONDS, NULL);
     }
 
 #else

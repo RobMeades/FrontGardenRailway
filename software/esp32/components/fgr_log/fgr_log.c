@@ -127,7 +127,9 @@ static int tcp_log_vprintf(const char *fmt, va_list args)
             body->length = (uint32_t) length;
             body->contents[length] = 0; // Ensure terminator
 
-            if (fgr_socket_send(g_log_cfg.sock, (const uint8_t *) &log_msg, sizeof(log_msg), 0) != ESP_OK) {
+            if (fgr_socket_send(g_log_cfg.sock, (const uint8_t *) &log_msg, sizeof(log_msg), 0) == ESP_OK) {
+                fgr_socket_channel_activity(&g_log_cfg.context_sock);
+            } else {
                 fgr_socket_channel_failed(&g_log_cfg.context_sock);
                 g_log_cfg.connected = false;
             }
@@ -140,7 +142,23 @@ static int tcp_log_vprintf(const char *fmt, va_list args)
     return vprintf(fmt, args);
 }
 
-// Callback called by fgr_socket_channel_maintain().
+// Callback to send a heartbeat log, called by
+// fgr_socket_channel_maintain().
+static void socket_heartbeat_cb(int sock, void *param)
+{
+    log_cfg_t *log_cfg = (log_cfg_t *) param;
+    (void) sock;
+
+    if (log_cfg->lock) {
+        ESP_LOGI(TAG, "Log heartbeat.");
+        CONTEXT_LOCK(log_cfg->lock, "socket_heartbeat_cb() 1");
+        fgr_socket_channel_activity(&log_cfg->context_sock);
+        CONTEXT_UNLOCK(log_cfg->lock, "socket_heartbeat_cb() 1");
+    }
+}
+
+// Callback on socket reconnection, called by
+// fgr_socket_channel_maintain().
 static void socket_reconnect_cb(int sock, void *param)
 {
     log_cfg_t *log_cfg = (log_cfg_t *) param;
@@ -206,6 +224,8 @@ int32_t fgr_log_init(const char *server_ip, uint16_t port,
             if (err == ESP_OK) {
                 // Maintain the connection
                 err = fgr_socket_channel_maintain(&g_log_cfg.context_sock,
+                                                  CONFIG_FGR_LOG_HEARTBEAT_SECONDS,
+                                                  socket_heartbeat_cb,
                                                   socket_reconnect_cb,
                                                   &g_log_cfg);
                 if (err != ESP_OK) {

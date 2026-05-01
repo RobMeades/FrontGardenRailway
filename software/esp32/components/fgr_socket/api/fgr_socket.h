@@ -58,12 +58,12 @@ extern "C" {
  * TYPES
  * -------------------------------------------------------------- */
 
-/** Function to call to configure a socket.
+/** Function to call to configure a socket or to send a heartbeat.
  *
  * @param sock   the socket.
- * @param param  cfg_cb_param as passed to fgr_socket_channel_start().
+ * @param param  cb_param as passed to fgr_socket_channel_maintain().
  */
-typedef void (*fgr_socket_cfg_cb_t)(int sock, void *param);
+typedef void (*fgr_socket_channel_cb_t)(int sock, void *param);
 
 /** Function to call when data is received on a socket.
  *
@@ -72,13 +72,14 @@ typedef void (*fgr_socket_cfg_cb_t)(int sock, void *param);
  * @param length the amount of data at buffer.
  * @param param  rx_cb_param as passed to fgr_socket_receive_start().
  */
-typedef void (*fgr_socket_rx_cb_t)(uint8_t *buffer, size_t length,
+typedef void (*fgr_socket_rx_cb_t)(void *buffer, size_t length,
                                    void *param);
 
 /** Function to call to trigger a reconnction: matches the
  * function signature of fgr_socket_channel_failed().
  *
- * @param context the pointer passed to fgr_socket_channel_start().
+ * @param context reconnect_cb_param as passed to
+ *                fgr_socket_receive_start().
  */
 typedef void (*fgr_socket_reconnect_cb_t)(void **context);
 
@@ -252,7 +253,7 @@ void fgr_socket_connect_stop(void **context);
  * - perform any additional socket configration (e.g call
  *   fgr_socket_enable_tcp_keep_alive() or use posix socket configuration
  *   functions directly); you may wish to put all of these configurations
- *   into a function that follows the signature fgr_socket_cfg_cb_t:
+ *   into a function that follows the signature fgr_socket_channel_cb_t:
  *   see the definition of fgr_socket_channel_maintain() for why.
  * - call fgr_socket_channel_maintain(): maintains the connection.
  * - when done, call fgr_socket_channel_stop() to closethe connection
@@ -279,24 +280,48 @@ int32_t fgr_socket_channel_start(const char *server_ip, uint16_t port,
  * connection is re-made on failure.  A task is created to
  * maintain the connection and cfg_cb() may be called from that task.
  *
- * @param context      the same pointer as was passed to
- *                     fgr_socket_channel_start().
- * @param cfg_cb       a callback that will be called after the
- *                     connection has been recreated due to
- *                     a failure.  The value of sock passed to
- *                     cfg_cb() is the new socket and should replace
- *                     the sock returned by fgr_socket_channel_start().
- *                     You may perform any custom configuration
- *                     of the socket (e.g. calling
- *                     fgr_socket_enable_tcp_keep_alive()) in this
- *                     callback.
- * @param cfg_cb_param user parameter to be passed to cfg_cb()
- *                     when it is called; may be NULL.
+ * @param context            the same pointer as was passed to
+ *                           fgr_socket_channel_start().
+ * @param heatbeat_seconds   how often to call hearbeat_cb() in seconds,
+ *                           ignored if hearbeat_cb() is NULL.
+ * @param heartbeat_cb       a callback that will be called every
+ *                           heatbeat_seconds if there has been
+ *                           no other activity; the callback should
+ *                           send a heartbeat message to the far end;
+ *                           must be non-NULL if heartbeat_seconds is
+ *                           non-zero.  Note that the callback should
+ *                           call fgr_socket_channel_activity() if sending
+ *                           succeeds or fgr_socket_channel_failed()
+ *                           if sending fails.
+ * @param cfg_cb             a callback that will be called after the
+ *                           connection has been recreated due to
+ *                           a failure.  The value of sock passed to
+ *                           cfg_cb() is the new socket and should replace
+ *                           the sock returned by fgr_socket_channel_start().
+ *                           You may perform any custom configuration
+ *                           of the socket (e.g. calling
+ *                           fgr_socket_enable_tcp_keep_alive()) in this
+ *                           callback.
+ * @param cb_param           user parameter to be passed to hearbeat_cb()
+ *                           and cfg_cb() when they are called; may be NULL.
  *
  */
 int32_t fgr_socket_channel_maintain(void **context,
-                                    fgr_socket_cfg_cb_t cfg_cb,
-                                    void *cfg_cb_param);
+                                    size_t heartbeat_seconds,
+                                    fgr_socket_channel_cb_t heartbeat_cb,
+                                    fgr_socket_channel_cb_t cfg_cb,
+                                    void *cb_param);
+
+/** If fgr_socket_channel_maintain() has been called with
+ * a heartbeat callback, you should call this function
+ * whenever there is activity (i.e. a successful send or
+ * a receive) on the socket.  This allows the hearbeat to
+ * be skipped if there has been other activity.
+ *
+ * @param context      the same pointer as was passed to
+ *                     fgr_socket_channel_start().
+ */
+void fgr_socket_channel_activity(void **context);
 
 /** If fgr_socket_channel_maintain() has been called, calling this
  * function will trigger a reconnection attempt.
@@ -329,7 +354,7 @@ void fgr_socket_channel_stop(void **context);
  *                       FGR_SOCKET_TX_RETRY_COUNT.
  * @return               ESP_OK on success, else a negative value from esp_err_t.
  */
-int32_t fgr_socket_send(int sock, const uint8_t *buffer, size_t length,
+int32_t fgr_socket_send(int sock, const void *buffer, size_t length,
                         size_t retry_count);
 
 /** Start receiving data on a socket.  A task is created to receive

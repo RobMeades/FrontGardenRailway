@@ -47,6 +47,8 @@ typedef struct {
     void *context_sock;
     bool connected;
     SemaphoreHandle_t lock;
+    uint8_t reference;
+    fgr_state_t *heartbeat_state;
 } msg_cfg_t;
 
 /* ----------------------------------------------------------------
@@ -61,6 +63,25 @@ static msg_cfg_t g_msg_cfg = {
 /* ----------------------------------------------------------------
  * STATIC FUNCTIONS
  * -------------------------------------------------------------- */
+
+// Callback to send a heartbeat message.
+static void socket_heartbeat_cb(int sock, void *param)
+{
+    msg_cfg_t *msg_cfg = (msg_cfg_t *) param;
+
+    if (msg_cfg->lock) {
+
+        uint8_t state = FGR_STATE_NOT_POPULATED;
+
+        CONTEXT_LOCK(msg_cfg->lock, "socket_heartbeat_cb() 2");
+        if (g_msg_cfg.heartbeat_state) {
+            state = *g_msg_cfg.heartbeat_state;
+        }
+        CONTEXT_UNLOCK(msg_cfg->lock, "socket_heartbeat_cb() 2");
+
+        fgr_msg_send_ind(FGR_IND_RSP_HEARTBEAT, state, NULL, 0);
+    }
+}
 
 // Callback called by fgr_socket_channel_maintain().
 static void socket_reconnect_cb(int sock, void *param)
@@ -83,6 +104,52 @@ static void socket_reconnect_cb(int sock, void *param)
     }
 }
 
+// Send a CNF or IND message.
+int32_t send_msg(uint16_t type, uint8_t error_state,
+                 const uint8_t *buffer, size_t length)
+{
+    int32_t err = -ESP_ERR_INVALID_STATE;
+
+    if (g_msg_cfg.lock) {
+        err = -ESP_ERR_INVALID_ARG;
+        if ((length == 0) || (buffer != NULL)) {
+
+            fgr_msg_header_t *_header;
+            uint32_t *_length;
+            uint32_t header[(sizeof(*_header) + sizeof(*_length)) / sizeof(uint32_t)] = {0};
+            _header = (fgr_msg_header_t *) &(header[0]);
+            _length = &(header[sizeof(*_header) / sizeof(uint32_t)]);
+            // We can fill in the CNF bit of the union, the
+            // IND part follows the same pattern
+            _header->cnf.type = type;
+            _header->cnf.error = error_state;
+            _header->cnf.reference = g_msg_cfg.reference;
+            g_msg_cfg.reference++;
+            if (buffer != NULL) {
+                *_length = length;
+            }
+
+            CONTEXT_LOCK(g_msg_cfg.lock, "send_msg()");
+            // Send header and length
+            err = fgr_socket_send(g_msg_cfg.sock, &header, sizeof(header), FGR_SOCKET_TX_RETRY_COUNT);
+            if ((err == ESP_OK) && (buffer != NULL)) {
+                // Send contents
+                err = fgr_socket_send(g_msg_cfg.sock, buffer, length, FGR_SOCKET_TX_RETRY_COUNT);
+            }
+            if (err == ESP_OK) {
+                ESP_LOGI("DEBUG", "Message sent");
+                fgr_socket_channel_activity(&g_msg_cfg.context_sock);
+            } else {
+                fgr_socket_channel_failed(&g_msg_cfg.context_sock);
+            }
+            CONTEXT_UNLOCK(g_msg_cfg.lock, "send_msg()");
+        }
+    }
+
+    return err;
+}
+
+
 // Clean up.
 static void clean_up()
 {
@@ -104,7 +171,8 @@ static void clean_up()
  * -------------------------------------------------------------- */
 
 // Initialise the messaging interface.
-int32_t fgr_msg_init(const char *server_ip, uint16_t port)
+int32_t fgr_msg_init(const char *server_ip, uint16_t port,
+                     size_t hearbeat_seconds, fgr_state_t *state)
 {
     int32_t err = ESP_OK;
 
@@ -119,6 +187,10 @@ int32_t fgr_msg_init(const char *server_ip, uint16_t port)
 
             CONTEXT_LOCK(g_msg_cfg.lock, "fgr_msg_init()");
 
+            if (hearbeat_seconds > 0) {
+                g_msg_cfg.heartbeat_state = state;
+            }
+
             // Create connection to server
             err = fgr_socket_channel_start(server_ip, port,
                                            &g_msg_cfg.sock,
@@ -132,11 +204,14 @@ int32_t fgr_msg_init(const char *server_ip, uint16_t port)
 
                 // Maintain the connection
                 err = fgr_socket_channel_maintain(&g_msg_cfg.context_sock,
+                                                  hearbeat_seconds,
+                                                  socket_heartbeat_cb,
                                                   socket_reconnect_cb,
                                                   &g_msg_cfg);
                 if (err != ESP_OK) {
                     fgr_socket_channel_stop(&g_msg_cfg.context_sock);
                     g_msg_cfg.sock = -1;
+                    g_msg_cfg.heartbeat_state = NULL;
                 }
             }
 
@@ -151,6 +226,22 @@ int32_t fgr_msg_init(const char *server_ip, uint16_t port)
     }
 
     return (int32_t) err;
+}
+
+// Send a CNF message.
+int32_t fgr_msg_send_cnf(fgr_req_cnf_t cnf, fgr_error_t error,
+                         const void *buffer, size_t length)
+{
+    cnf = (cnf & (0x0fff)) | (FGR_MSG_TYPE_CNF << 12);
+    return send_msg((uint16_t) cnf, (uint8_t) error, buffer, length);
+}
+
+// Send an IND message.
+int32_t fgr_msg_send_ind(fgr_ind_rsp_t ind, fgr_state_t state,
+                         const void *buffer, size_t length)
+{
+    ind = (ind & (0x0fff)) | (FGR_MSG_TYPE_IND << 12);
+    return send_msg((uint16_t) ind, (uint8_t) state, (const uint8_t *) buffer, length);
 }
 
 // Deinitialise the messaging interface.

@@ -18,7 +18,7 @@
  #define _FGR_PROTOCOL_H_
  
 /** @file
- * @brief Protocol definition for comms between an ESP32 device and
+ * @brief Protocol definition for comms between an ESP32 node and
  * a controlling entity in the front garden railway.
  *
  * Note: endianness is not considered here since the ESP32 and a
@@ -59,39 +59,39 @@ extern "C" {
 // confirmation/indication/response/log message. 
 typedef enum {
     FGR_MSG_TYPE_NULL = 0,
-    FGR_MSG_TYPE_REQ  = 1,   // Sent from a controller to a device to initiate an action
-    FGR_MSG_TYPE_CNF  = 2,   // Sent from a device back to a controller confirming the action
-    FGR_MSG_TYPE_IND  = 3,   // Sent from a device to a controller indicating that something has happened
-    FGR_MSG_TYPE_RSP  = 4,   // Sent from a controller to a device responding to an indication
-    FGR_MSG_TYPE_LOG  = 5    // A log message sent from a device to a controller
+    FGR_MSG_TYPE_REQ  = 1,   // Sent from a controller to a node to initiate an action
+    FGR_MSG_TYPE_CNF  = 2,   // Sent from a node back to a controller confirming the action
+    FGR_MSG_TYPE_IND  = 3,   // Sent from a node to a controller indicating that something has happened
+    FGR_MSG_TYPE_RSP  = 4,   // Sent from a controller to a node responding to an indication
+    FGR_MSG_TYPE_LOG  = 5    // A log message sent from a node to a controller
 } fgr_msg_type_t;
 
 // Request/confirmation messages; note that the top four bits must
 // be zero as they will be ORed with fgr_msg_type_t.
 typedef enum {
     FGR_REQ_CNF_NULL                   = 0x0000,
-    FGR_REQ_CNF_CFG                    = 0x0001, // Configure a device; the message contents are device specific
-    FGR_REQ_CNF_START                  = 0x0002, // The device should start
-    FGR_REQ_CNF_STOP                   = 0x0003, // The device should stop
+    FGR_REQ_CNF_CFG                    = 0x0001, // Configure a node; the message contents are node specific
+    FGR_REQ_CNF_START                  = 0x0002, // The node should start
+    FGR_REQ_CNF_STOP                   = 0x0003, // The node should stop
     FGR_REQ_CNF_LOG_LEVEL              = 0x0004, // Set the log level; the message contents will contain the log level
-    FGR_REQ_CNF_LOG_START              = 0x0005, // The device should start logging
-    FGR_REQ_CNF_LOG_STOP               = 0x0006, // The device should stop logging
-    FGR_REQ_CNF_REBOOT                 = 0x0007, // The device should reboot
+    FGR_REQ_CNF_LOG_START              = 0x0005, // The node should start logging
+    FGR_REQ_CNF_LOG_STOP               = 0x0006, // The node should stop logging
+    FGR_REQ_CNF_REBOOT                 = 0x0007, // The node should reboot
     FGR_REQ_CNF_LAST                   = 0x001f
-    // Request/confirmation messages beyond FGR_REQ_CNF_LAST are device specific
+    // Request/confirmation messages beyond FGR_REQ_CNF_LAST are node specific
 } fgr_req_cnf_t;
 
 // Indication/response messages; note that the top four bits must
 // be zero as they will be ORed with fgr_msg_type_t.
 typedef enum {
     FGR_IND_RSP_NULL                   = 0x0000,
-    FGR_IND_RSP_NEEDS_CFG              = 0x0001,  // The device has begun but has not yet been configured and so has not started
+    FGR_IND_RSP_NEEDS_CFG              = 0x0001,  // The node has begun but has not yet been configured and so has not started
                                                   // (matches FGR_REQ_CNF_CFG)
-    FGR_IND_RSP_START                  = 0x0002,  // The device has started by itself (matches FGR_REQ_CNF_START)
-    FGR_IND_RSP_STOP                   = 0x0003,  // The device has stopped by itself (matches FGR_REQ_CNF_STOP)
+    FGR_IND_RSP_START                  = 0x0002,  // The node has started by itself (matches FGR_REQ_CNF_START)
+    FGR_IND_RSP_STOP                   = 0x0003,  // The node has stopped by itself (matches FGR_REQ_CNF_STOP)
     FGR_IND_RSP_HEARTBEAT              = 0x0004,  // Periodic heartbeat
     FGR_IND_RSP_LAST                   = 0x001f
-    // Indication/response messages beyond FGR_IND_RSP_LAST are device specific
+    // Indication/response messages beyond FGR_IND_RSP_LAST are node specific
 } fgr_ind_rsp_t;
 
 // Log levels.
@@ -127,7 +127,7 @@ typedef enum {
     FGR_STATE_GENERIC_FAILED   = 5,
     FGR_STATE_HARDWARE_FAILURE = 6,
     FGR_STATE_LAST             = 0x1f
-    // States beyond FGR_STATE_LAST are device specific
+    // States beyond FGR_STATE_LAST are node specific
 } fgr_state_t;
 
 // Request message header.

@@ -26,6 +26,8 @@
 extern "C" {
 #endif
 
+#include "../../../../../protocol/fgr_protocol.h"
+
 /* ----------------------------------------------------------------
  * COMPILE-TIME MACROS
  * -------------------------------------------------------------- */
@@ -42,15 +44,56 @@ extern "C" {
  *
  * Note: this will create a mutex that is never destroyed.
  *
- * @param server_ip IP address of the server, e.g. 10.10.3.1.
- *                  IMPORTANT: this is NOT copied, it must remain
- *                  static until fgr_msg_deinit() is called.
- * @param port      the port on the server that is listening for
- *                  FGR protocol messages.
- * @return          ESP_OK on success, else a negative value from
- *                  esp_err_t.
+ * @param server_ip         IP address of the server, e.g. 10.10.3.1.
+ *                          IMPORTANT: this is NOT copied, it must remain
+ *                          static until fgr_msg_deinit() is called.
+ * @param port              the port on the server that is listening for
+ *                          FGR protocol messages.
+ * @param heartbeat_seconds how frequently to ensure a message is
+ *                          sent in order to maintain the channel;
+ *                          if this is zero then there will be no
+ *                          way of detecting closure of a socket
+ *                          by the far end.
+ * @param state             a pointer to a place to get the state
+ *                          to put in the heartbeat message; ignored
+ *                          if heartbeat_seconds is zero, may be NULL
+ *                          (in which case FGR_STATE_NOT_POPULATED
+ *                          will be used).  IMPORTANT: this pointer
+ *                          must remain valid until fgr_msg_deinit()
+ *                          is called.
+ * @return                  ESP_OK on success, else a negative value
+ *                          from esp_err_t.
  */
-int32_t fgr_msg_init(const char *server_ip, uint16_t port);
+int32_t fgr_msg_init(const char *server_ip, uint16_t port,
+                     size_t heartbeat_seconds, fgr_state_t *state);
+
+/** Send a CNF message.
+ *
+ * @param cnf     the CNF message to send.
+ * @param error   the error to send, 0 for success.
+ * @param buffer  data to include in the message contents, may
+ *                be NULL, must be non-NULL if length is non-zero.
+ * @param length  the amount of data at buffer, ignored if
+ *                buffer is NULL.
+ * @return        ESP_OK on success, else a negative value
+ *                from esp_err_t.
+ */
+int32_t fgr_msg_send_cnf(fgr_req_cnf_t cnf, fgr_error_t error,
+                         const void *buffer, size_t length);
+
+/** Send an IND message.
+ *
+ * @param ind     the IND message to send.
+ * @param state   the state to include.
+ * @param buffer  data to include in the message contents, may
+ *                be NULL, must be non-NULL if length is non-zero.
+ * @param length  the amount of data at buffer, ignored if
+ *                buffer is NULL.
+ * @return        ESP_OK on success, else a negative value
+ *                from esp_err_t.
+ */
+int32_t fgr_msg_send_ind(fgr_ind_rsp_t ind, fgr_state_t state,
+                         const void *buffer, size_t length);
 
 /** Deinitialise the messaging interface.
  */

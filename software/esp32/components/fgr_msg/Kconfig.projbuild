@@ -5,4 +5,9 @@ menu "FGR Message Configuration"
         default 5000
         range 1024 65535
 
+    config FGR_MSG_HEARTBEAT_SECONDS
+        int "how often to check the underlying channel"
+        default 50
+        range 30 65535
+
 endmenu

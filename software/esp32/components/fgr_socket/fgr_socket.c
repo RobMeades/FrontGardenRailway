@@ -26,6 +26,7 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_task_wdt.h"
+#include "esp_timer.h"
 #include "errno.h"
 #include "lwip/sockets.h"
 
@@ -50,17 +51,17 @@
 #  define FGR_SOCKET_RECONNECT_TIMEOUT_MS  5000
 #endif
 
-#ifndef FGR_SOCKET_RECONNECT_WAIT_MS
+#ifndef FGR_SOCKET_MAINTAIN_WAIT_MS
 // Reconnection wait time in milliseconds
-#  define FGR_SOCKET_RECONNECT_WAIT_MS  1000
+#  define FGR_SOCKET_MAINTAIN_WAIT_MS  1000
 #endif
 
-#ifndef FGR_SOCKET_RX_TASK_STACK_SIZE
-#  define FGR_SOCKET_RX_TASK_STACK_SIZE (1024 * 4)
+#ifndef FGR_SOCKET_TASK_RX_STACK_SIZE
+#  define FGR_SOCKET_TASK_RX_STACK_SIZE (1024 * 4)
 #endif
 
-#ifndef FGR_SOCKET_RECONNECT_TASK_STACK_SIZE
-#  define FGR_SOCKET_RECONNECT_TASK_STACK_SIZE (1024 * 4)
+#ifndef FGR_SOCKET_TASK_MAINTAIN_STACK_SIZE
+#  define FGR_SOCKET_TASK_MAINTAIN_STACK_SIZE (1024 * 4)
 #endif
 /* ----------------------------------------------------------------
  * TYPES
@@ -80,7 +81,10 @@ typedef struct {
     uint16_t port;
     bool connected;
     SemaphoreHandle_t lock;
-    fgr_socket_cfg_cb_t cb;
+    int64_t last_activity_time_us;
+    size_t heartbeat_seconds;
+    fgr_socket_channel_cb_t heartbeat_cb;
+    fgr_socket_channel_cb_t cfg_cb;
     void *cb_param;
     TaskHandle_t task_handle;
     bool running;
@@ -105,11 +109,11 @@ typedef struct {
  * STATIC FUNCTIONS
  * -------------------------------------------------------------- */
 
-// Task to reconnect a socket on failure.
+// Task to maintain a socket.
 // This is _extremely_ complex because the socket is non-blocking
 // and because the reconnect process can take a while, causing the
 // task watchdog to go off.
-static void task_reconnect(void *arg)
+static void task_maintain(void *arg)
 {
     context_channel_t *context_channel = (context_channel_t *) arg;
     void *context_connect = NULL;
@@ -117,11 +121,23 @@ static void task_reconnect(void *arg)
     esp_task_wdt_add(NULL);
 
     while (context_channel->running) {
-        if (!context_channel->connected) {
-            ESP_LOGW(TAG, "Reconnecting...");
-
-            // Try to take lock with timeout
-            if (xSemaphoreTake(context_channel->lock, pdMS_TO_TICKS(1000)) == pdTRUE) {
+        // Try to take lock with timeout
+        if (xSemaphoreTake(context_channel->lock, pdMS_TO_TICKS(1000)) == pdTRUE) {
+            if (context_channel->connected) {
+                // Connected: send heartbeat if necessary
+                if ((context_channel->heartbeat_seconds > 0) &&
+                    (context_channel->heartbeat_cb != NULL) &&
+                    (esp_timer_get_time() - context_channel->last_activity_time_us > ((int64_t) context_channel->heartbeat_seconds) * 1000000)) {
+                    // Unlock the channel context here so that heartbeat_cb()
+                    // can call fgr_socket_channel_activity() or fgr_socket_channel_failed()
+                    xSemaphoreGive(context_channel->lock);
+                    context_channel->heartbeat_cb(context_channel->sock, context_channel->cb_param);
+                } else {
+                    xSemaphoreGive(context_channel->lock);
+                }
+            } else {
+                ESP_LOGW(TAG, "%s:%d connection lost, reconnecting...",
+                         context_channel->server_ip, context_channel->port);
 
                 // Close old socket if it exists
                 fgr_socket_destroy(&context_channel->sock);
@@ -143,9 +159,9 @@ static void task_reconnect(void *arg)
                         if (err == ESP_OK) {
                             // Connected immediately
 
-                            CONTEXT_LOCK(context_channel->lock, "task_reconnect() 1");
+                            CONTEXT_LOCK(context_channel->lock, "task_maintain() 1");
                             context_channel->connected = true;
-                            CONTEXT_UNLOCK(context_channel->lock, "task_reconnect() 1");
+                            CONTEXT_UNLOCK(context_channel->lock, "task_maintain() 1");
 
                             ESP_LOGI(TAG, "Reconnected immediately.");
                         } else if (err == -ESP_ERR_NOT_FINISHED) {
@@ -157,7 +173,7 @@ static void task_reconnect(void *arg)
                                 elapsed_ms += timeout_ms;
                             }
 
-                            CONTEXT_LOCK(context_channel->lock, "task_reconnect() 2");
+                            CONTEXT_LOCK(context_channel->lock, "task_maintain() 2");
                             if (err == ESP_OK) {
                                 context_channel->connected = true;
                                 ESP_LOGI(TAG, "Reconnected after %" PRId32 " ms.", elapsed_ms);
@@ -170,16 +186,16 @@ static void task_reconnect(void *arg)
                                 fgr_socket_connect_stop(&context_connect);
                                 fgr_socket_destroy(&context_channel->sock);
                             }
-                            CONTEXT_UNLOCK(context_channel->lock, "task_reconnect() 2");
+                            CONTEXT_UNLOCK(context_channel->lock, "task_maintain() 2");
 
                         } else {
                             // Connect failed immediately
 
                             ESP_LOGE(TAG, "Connect failed immediately: %d (%s)", errno, strerror(errno));
 
-                            CONTEXT_LOCK(context_channel->lock, "task_reconnect() 3");
+                            CONTEXT_LOCK(context_channel->lock, "task_maintain() 3");
                             fgr_socket_destroy(&context_channel->sock);
-                            CONTEXT_UNLOCK(context_channel->lock, "task_reconnect() 3");
+                            CONTEXT_UNLOCK(context_channel->lock, "task_maintain() 3");
                         }
                     } else {
                         xSemaphoreGive(context_channel->lock);
@@ -187,22 +203,22 @@ static void task_reconnect(void *arg)
                 } else {
                     xSemaphoreGive(context_channel->lock);
                 }
-            } else {
-                ESP_LOGE(TAG, "Could not take lock, skipping reconnect attempt");
-            }
 
-            if (context_channel->connected && context_channel->cb) {
-                // If we have reconnected and there is a user configuration
-                // callback, call it
-                context_channel->cb(context_channel->sock, context_channel->cb_param);
+                if (context_channel->connected && context_channel->cfg_cb) {
+                    // If we have reconnected and there is a user configuration
+                    // callback, call it
+                    context_channel->cfg_cb(context_channel->sock, context_channel->cb_param);
+                }
             }
+        } else {
+            ESP_LOGW(TAG, "Could not take lock, skipping channel maintenance this time.");
         }
 
-        vTaskDelay(pdMS_TO_TICKS(FGR_SOCKET_RECONNECT_WAIT_MS));
+        vTaskDelay(pdMS_TO_TICKS(FGR_SOCKET_MAINTAIN_WAIT_MS));
         esp_task_wdt_reset();
     }
 
-    ESP_LOGI(TAG, "Reconnect task exiting.");
+    ESP_LOGI(TAG, "Socket maintenance task exiting.");
     esp_task_wdt_delete(NULL);
     vTaskDelete(NULL);
 }
@@ -490,7 +506,7 @@ int32_t fgr_socket_connect_start(int sock, const char *server_ip,
             context_connect->server.sin_port = htons(port);
             inet_pton(AF_INET, server_ip, &context_connect->server.sin_addr);
 
-            ESP_LOGI(TAG, "Starting connecting to %s:%d...",  server_ip, port);
+            ESP_LOGI(TAG, "Start connecting to %s:%d...",  server_ip, port);
 
             // Start connecting to the server
             err = -ESP_FAIL;
@@ -569,7 +585,7 @@ void fgr_socket_connect_stop(void **context)
 }
 
 /* ----------------------------------------------------------------
- * FUNCTIONS: COMPOUND OPERATIONS
+ * FUNCTIONS: "CHANNEL" COMPOUND OPERATIONS
  * -------------------------------------------------------------- */
 
 // Create and connect a [non-blocking] socket.
@@ -605,6 +621,7 @@ int32_t fgr_socket_channel_start(const char *server_ip, uint16_t port,
                     context_channel->server_ip = server_ip;
                     context_channel->port = port;
                     context_channel->connected = true;
+                    context_channel->last_activity_time_us = esp_timer_get_time();
                     CONTEXT_UNLOCK(context_channel->lock, "fgr_socket_channel_start()");
                 }
             }
@@ -623,26 +640,40 @@ int32_t fgr_socket_channel_start(const char *server_ip, uint16_t port,
 }
 
 // Maintain a socket connection.
-int32_t fgr_socket_channel_maintain(void **context, fgr_socket_cfg_cb_t cfg_cb,
-                                    void *cfg_cb_param)
+int32_t fgr_socket_channel_maintain(void **context,
+                                    size_t heartbeat_seconds,
+                                    fgr_socket_channel_cb_t heartbeat_cb,
+                                    fgr_socket_channel_cb_t cfg_cb,
+                                    void *cb_param)
 {
     int32_t err = -ESP_ERR_INVALID_ARG;
 
-    if (context && *context) {
+    if (context && *context &&
+        ((heartbeat_seconds == 0) || (heartbeat_cb != NULL))) {
         context_channel_t *context_channel = (context_channel_t *) *context;
-        // Start a task to reconnect in the background on failure
+        // Start a task that will send hearbeats and reconnect the socket
+        // in the background on failure
         err = -ESP_ERR_NO_MEM;
 
         CONTEXT_LOCK(context_channel->lock, "fgr_socket_maintain()");
         context_channel->running = true;
-        context_channel->cb = cfg_cb;
-        context_channel->cb_param = cfg_cb_param;
-        if (xTaskCreate(&task_reconnect, "socket_reconnect", FGR_SOCKET_RECONNECT_TASK_STACK_SIZE, context_channel,
+        context_channel->heartbeat_seconds = heartbeat_seconds;
+        context_channel->heartbeat_cb = heartbeat_cb;
+        context_channel->cfg_cb = cfg_cb;
+        context_channel->cb_param = cb_param;
+        if (xTaskCreate(&task_maintain, "socket_maintain", FGR_SOCKET_TASK_MAINTAIN_STACK_SIZE, context_channel,
                         5, &context_channel->task_handle) == pdPASS) {
             err = ESP_OK;
+            char buffer[32];
+            snprintf(buffer, sizeof(buffer), "heartbeat %d second(s)", context_channel->heartbeat_seconds);
+            ESP_LOGI(TAG, "Maintaining connection to %s:%d, %s.",
+                     context_channel->server_ip, context_channel->port,
+                     context_channel->heartbeat_seconds ? buffer : "no hearbeat though");
         } else {
             context_channel->running = false;
-            context_channel->cb = NULL;
+            context_channel->heartbeat_seconds = 0;
+            context_channel->heartbeat_cb = NULL;
+            context_channel->cfg_cb = NULL;
             context_channel->cb_param = NULL;
             ESP_LOGE(TAG, "Failed to create reconnect task %d (%s)!", errno, strerror(errno));
         }
@@ -652,7 +683,21 @@ int32_t fgr_socket_channel_maintain(void **context, fgr_socket_cfg_cb_t cfg_cb,
     return err;
 }
 
-// Trigger a reconnection attempt
+// Log activity on a channel.
+void fgr_socket_channel_activity(void **context)
+{
+    if (context && *context) {
+        context_channel_t *context_channel = (context_channel_t *) *context;
+        if (context_channel->lock) {
+
+            CONTEXT_LOCK(context_channel->lock, "fgr_socket_channel_activity()");
+            context_channel->last_activity_time_us = esp_timer_get_time();
+            CONTEXT_UNLOCK(context_channel->lock, "fgr_socket_channel_activity()");
+        }
+    }
+}
+
+// Trigger a reconnection attempt.
 void fgr_socket_channel_failed(void **context)
 {
     if (context && *context) {
@@ -696,7 +741,7 @@ void fgr_socket_channel_stop(void **context)
  * -------------------------------------------------------------- */
 
 // Send data on a socket.
-int32_t fgr_socket_send(int sock, const uint8_t *buffer, size_t length,
+int32_t fgr_socket_send(int sock, const void *buffer, size_t length,
                         size_t retry_count)
 {
     esp_err_t err = ESP_OK;
@@ -705,7 +750,7 @@ int32_t fgr_socket_send(int sock, const uint8_t *buffer, size_t length,
 
     if (buffer) {
       while ((total_written < length) && (err == ESP_OK) && (retries <= retry_count)) {
-          int32_t len_written = send(sock, buffer + total_written, length - total_written, MSG_DONTWAIT);
+          int32_t len_written = send(sock, ((uint8_t *) buffer) + total_written, length - total_written, MSG_DONTWAIT);
           if (len_written >= 0) {
               total_written += len_written;
               retries = 0;  // Reset on success
@@ -752,7 +797,7 @@ int32_t fgr_socket_receive_start(int sock,
             context_rx->rx_cb = rx_cb;
             context_rx->rx_cb_param = rx_cb_param;
             context_rx->running = true;
-            if (xTaskCreate(&task_rx, "socket_rx", FGR_SOCKET_RX_TASK_STACK_SIZE, context_rx,
+            if (xTaskCreate(&task_rx, "socket_rx", FGR_SOCKET_TASK_RX_STACK_SIZE, context_rx,
                             5, &context_rx->task_handle) == pdPASS) {
                 err = ESP_OK;
             }

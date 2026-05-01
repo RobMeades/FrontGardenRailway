@@ -7,7 +7,7 @@ handlers, and maintains node state.
 
 Node handlers are loaded dynamically from the 'nodes' directory.
 Each handler file should be named 'node_*.py' and contain a class that
-inherits from NodeHandler (usually named with the node type in CamelCase).
+inherits from NodeHandler.
 
 Configuration hierarchy (each level overrides the previous):
 1. Built-in defaults
@@ -15,13 +15,14 @@ Configuration hierarchy (each level overrides the previous):
 3. nodes.json (global node configuration - highest priority)
 
 Usage:
-    python controller.py [--ip LISTEN_IP] [--port PORT] [--cfg CFG_FILE]
+    python controller.py [--ip LISTEN_IP] [--port PORT] [--cfg CFG_FILE] [--log-level LEVEL]
     
 Examples:
-    python controller.py                              # Use defaults
-    python controller.py --ip 0.0.0.0                # Listen on all interfaces
-    python controller.py --port 6000                 # Use port 6000
-    python controller.py --cfg my_nodes.json         # Load nodes from JSON file
+    python controller.py                                    # Use defaults
+    python controller.py --ip 0.0.0.0                      # Listen on all interfaces
+    python controller.py --port 6000                       # Use port 6000
+    python controller.py --cfg my_nodes.json               # Load nodes from JSON file
+    python controller.py --log-level DEBUG                 # Enable debug logging
 """
 
 import argparse
@@ -44,17 +45,12 @@ from pathlib import Path
 # Setup paths for protocol import
 # ============================================================================
 
-# Get the directory where this script is located
 SCRIPT_DIR = Path(__file__).parent.absolute()
-
-# The protocol module is in ../protocol/fgr_protocol.py relative to this script
 PROTOCOL_DIR = SCRIPT_DIR.parent / "protocol"
 
-# Add protocol directory to Python path if not already there
 if str(PROTOCOL_DIR) not in sys.path:
     sys.path.insert(0, str(PROTOCOL_DIR))
 
-# Now import the protocol
 try:
     import fgr_protocol as fgr
 except ImportError as e:
@@ -68,7 +64,6 @@ except ImportError as e:
 # ============================================================================
 
 class NodeState(IntEnum):
-    """Node operational states (extends FGR_STATE_*)"""
     DISCONNECTED = 0
     CONNECTED = 1
     NEEDS_CFG = fgr.FGRState.FGR_STATE_NEEDS_CFG
@@ -77,8 +72,8 @@ class NodeState(IntEnum):
     BUSY = fgr.FGRState.FGR_STATE_BUSY
     GENERIC_FAILED = fgr.FGRState.FGR_STATE_GENERIC_FAILED
     HARDWARE_FAILURE = fgr.FGRState.FGR_STATE_HARDWARE_FAILURE
-    CONFIGURING = 100  # Local state while sending cfg
-    READY = 101        # Configured but not started
+    CONFIGURING = 100
+    READY = 101
     ERROR = 102
 
 
@@ -100,6 +95,10 @@ class Node:
     custom_data: Dict[str, Any] = field(default_factory=dict)
     stop_event: threading.Event = field(default_factory=threading.Event)
     heartbeat_timeout: int = 60
+    # Debug counters
+    message_count: int = 0
+    heartbeat_count: int = 0
+    last_debug_log: float = 0
 
 
 # ============================================================================
@@ -273,11 +272,9 @@ class ConfigManager:
         """Get merged configuration for a node"""
         config = self.DEFAULTS.copy()
         
-        # Apply per-type defaults
         if node_type and node_type in self.type_cfgs:
             config.update(self.type_cfgs[node_type])
         
-        # Apply global config (highest priority)
         if name in self.global_cfg:
             config.update(self.global_cfg[name])
         
@@ -304,13 +301,11 @@ class Controller:
         self.port = port
         self.logger = logging.getLogger("Controller")
         
-        # Determine nodes directory
         if nodes_dir is None:
             self.nodes_dir = SCRIPT_DIR / "nodes"
         else:
             self.nodes_dir = Path(nodes_dir)
         
-        # Configuration manager
         self.config_mgr = ConfigManager(self.nodes_dir, cfg_file)
         
         self.nodes: Dict[str, Node] = {}
@@ -322,11 +317,17 @@ class Controller:
         self.listen_thread: Optional[threading.Thread] = None
         self.heartbeat_thread: Optional[threading.Thread] = None
         
-        # Load node handlers
         self._load_node_handlers()
-        
-        # Load nodes from configuration
         self._load_nodes_from_cfg()
+    
+    def _hex_dump(self, data: bytes, max_bytes: int = 32) -> str:
+        """Return a hex dump of data for debugging"""
+        if not data:
+            return "(empty)"
+        hex_str = ' '.join(f'{b:02x}' for b in data[:max_bytes])
+        if len(data) > max_bytes:
+            hex_str += f' ... (+{len(data)-max_bytes} bytes)'
+        return hex_str
     
     def _load_node_handlers(self):
         """Dynamically load all node handlers from the nodes directory"""
@@ -367,8 +368,6 @@ class Controller:
                 continue
             
             node_type = node_cfg.get("type", "")
-            
-            # Get merged config
             merged_cfg = self.config_mgr.get_node_config(name, node_type)
             heartbeat_timeout = merged_cfg.get("heartbeat_timeout", 60)
             
@@ -401,6 +400,7 @@ class Controller:
         if node.state == NodeState.DISCONNECTED:
             return
         
+        self.logger.debug(f"[{node.name}] Disconnecting node (msgs_rcvd={node.message_count}, heartbeats={node.heartbeat_count})")
         node.stop_event.set()
         node.state = NodeState.DISCONNECTED
         
@@ -487,6 +487,16 @@ class Controller:
                 client_sock, addr = self.listen_sock.accept()
                 self.logger.info(f"Connection from {addr[0]}:{addr[1]}")
                 
+                # Peek at first bytes for debugging
+                try:
+                    client_sock.settimeout(0.5)
+                    peek_data = client_sock.recv(8, socket.MSG_PEEK)
+                    if peek_data:
+                        self.logger.debug(f"First bytes from {addr[0]}: {self._hex_dump(peek_data)}")
+                except:
+                    pass
+                client_sock.settimeout(None)
+                
                 ip = addr[0]
                 if ip in self.nodes_by_ip:
                     node = self.nodes_by_ip[ip]
@@ -500,6 +510,8 @@ class Controller:
                     node.last_heartbeat = time.time()
                     node.reference_counter = 0
                     node.pending_requests.clear()
+                    node.message_count = 0
+                    node.heartbeat_count = 0
                     
                     node.handler = self._get_handler_for_node(node)
                     
@@ -525,11 +537,23 @@ class Controller:
     
     def _receive_loop(self, node: Node) -> None:
         """Receive messages from a node"""
+        msg_type_names = {1: "REQ", 2: "CNF", 3: "IND", 4: "RSP", 5: "LOG"}
+        
         while self.running and node.sock and not node.stop_event.is_set():
             try:
                 msg = fgr.receive_message(node.sock, timeout=0.5)
                 if msg is None:
                     continue
+                
+                node.message_count += 1
+                msg_type_name = msg_type_names.get(msg.message_type, f"UNK({msg.message_type})")
+                
+                self.logger.debug(
+                    f"[{node.name}] RCVD #{node.message_count}: "
+                    f"type={msg_type_name}, subtype=0x{msg.subtype:03X}, "
+                    f"ref={msg.reference}, err/state={msg.error_or_state}, "
+                    f"len={len(msg.contents)}"
+                )
                 
                 node.last_heartbeat = time.time()
                 self._dispatch_message(node, msg)
@@ -580,11 +604,23 @@ class Controller:
         elif msg_type == fgr.FGRMsgType.FGR_MSG_TYPE_REQ:
             self.logger.warning(f"Unexpected REQ from {node.name}")
         
-        # LOG messages are ignored - they go to a different endpoint
+        # LOG messages (type 5) are ignored - they go to a different endpoint
     
     def _handle_generic_indication(self, node: Node, msg: fgr.FGRMsg) -> None:
         """Handle indications not handled by node-specific code"""
         ind_type = msg.subtype
+        
+        # Debug: Show raw values for all indications
+        self.logger.debug(
+            f"[{node.name}] IND: type=0x{ind_type:03X} ({ind_type}), "
+            f"state={msg.error_or_state}, ref={msg.reference}"
+        )
+        
+        # Check for heartbeat - support both integer and enum
+        heartbeat_value = None
+        if hasattr(fgr.FGRIndRsp, 'FGR_IND_RSP_HEARTBEAT'):
+            heartbeat_value = fgr.FGRIndRsp.FGR_IND_RSP_HEARTBEAT
+            self.logger.debug(f"[{node.name}] Heartbeat expected value = {heartbeat_value}")
         
         if ind_type == fgr.FGRIndRsp.FGR_IND_RSP_NEEDS_CFG:
             self.logger.info(f"Node {node.name}: needs configuration")
@@ -596,8 +632,9 @@ class Controller:
         elif ind_type == fgr.FGRIndRsp.FGR_IND_RSP_STOP:
             self.logger.info(f"Node {node.name}: stopped")
         
-        elif ind_type == fgr.FGRIndRsp.FGR_IND_RSP_HEARTBEAT:
-            self.logger.debug(f"Node {node.name}: heartbeat received")
+        elif heartbeat_value is not None and ind_type == heartbeat_value:
+            node.heartbeat_count += 1
+            self.logger.info(f"♥ [{node.name}] HEARTBEAT #{node.heartbeat_count} (type=0x{ind_type:03X}, state={msg.error_or_state})")
         
         elif ind_type > fgr.FGRIndRsp.FGR_IND_RSP_LAST:
             self.logger.debug(f"Node {node.name}: device indication 0x{ind_type:03X}")
@@ -609,9 +646,20 @@ class Controller:
             now = time.time()
             for node in self.nodes.values():
                 if node.sock and node.state != NodeState.DISCONNECTED:
-                    if now - node.last_heartbeat > node.heartbeat_timeout:
-                        self.logger.warning(f"Node {node.name} heartbeat timeout")
+                    time_since = now - node.last_heartbeat
+                    
+                    if time_since > node.heartbeat_timeout:
+                        self.logger.warning(
+                            f"Node {node.name} heartbeat timeout "
+                            f"(last: {time_since:.1f}s ago, timeout: {node.heartbeat_timeout}s, "
+                            f"msgs={node.message_count}, hb={node.heartbeat_count})"
+                        )
                         self._disconnect_node(node)
+                    elif time_since > node.heartbeat_timeout - 15:
+                        self.logger.debug(
+                            f"Node {node.name} heartbeat due soon "
+                            f"(last: {time_since:.1f}s ago, timeout: {node.heartbeat_timeout}s)"
+                        )
     
     def _get_next_reference(self, node: Node) -> int:
         node.reference_counter = (node.reference_counter + 1) & 0xFF
@@ -628,6 +676,8 @@ class Controller:
         
         reference = self._get_next_reference(node)
         msg = fgr.FGRMsg.create_req(req_type, reference, contents)
+        
+        self.logger.debug(f"[{node_name}] Sending REQ type=0x{req_type:03X}, ref={reference}, len={len(contents)}")
         
         response_queue = queue.Queue(maxsize=1)
         node.pending_requests[reference] = response_queue
@@ -657,6 +707,7 @@ class Controller:
             return False
         
         msg = fgr.FGRMsg.create_rsp(rsp_type, reference, contents)
+        self.logger.debug(f"[{node_name}] Sending RSP type=0x{rsp_type:03X}, ref={reference}, len={len(contents)}")
         return fgr.send_message(node.sock, msg)
     
     def cfg_node(self, node_name: str, cfg_data: bytes, timeout: float = 5.0) -> bool:
@@ -767,12 +818,10 @@ def main():
     
     logger = logging.getLogger("Main")
     
-    # Determine config file
     cfg_file = args.cfg
     if not cfg_file:
         cfg_file = get_default_cfg_path()
     
-    # Create controller
     controller = Controller(
         listen_ip=args.ip,
         port=args.port,
@@ -804,9 +853,19 @@ def main():
     for name, node in controller.nodes.items():
         print(f"  - {name:20} {node.ip:15} (type: {node.node_type or 'none'}, timeout: {node.heartbeat_timeout}s)")
     print("=" * 60)
+    
+    # Show heartbeat constant info
+    if hasattr(fgr.FGRIndRsp, 'FGR_IND_RSP_HEARTBEAT'):
+        print(f"Heartbeat constant: FGR_IND_RSP_HEARTBEAT = {fgr.FGRIndRsp.FGR_IND_RSP_HEARTBEAT}")
+    else:
+        print("WARNING: FGR_IND_RSP_HEARTBEAT not defined in protocol!")
+        print("Looking for any value 0x0004 in FGRIndRsp...")
+        for name, value in fgr.FGRIndRsp.__members__.items():
+            if value == 4:
+                print(f"  Found {name} = {value} - using this for heartbeat")
+    print("=" * 60)
     print("Press Ctrl+C to stop\n")
     
-    # Start controller
     if controller.start():
         try:
             while True:
