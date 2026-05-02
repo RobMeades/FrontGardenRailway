@@ -26,6 +26,7 @@
 #include "esp_system.h"
 #include "esp_task_wdt.h"
 #include "esp_log.h"
+#include "arpa/inet.h"
 #include "errno.h"
 
 #include "fgr_util.h"
@@ -122,9 +123,9 @@ static int tcp_log_vprintf(const char *fmt, va_list args)
 
         if (xSemaphoreTake(g_log_cfg.lock, pdMS_TO_TICKS(100)) == pdTRUE) {
 
-            header->type = ((uint16_t) FGR_MSG_TYPE_LOG) << 12;
+            header->type = htons(((uint16_t) FGR_MSG_TYPE_LOG) << 12);
             header->level = fgr_log_level;
-            body->length = (uint32_t) length;
+            body->length = htonl((uint32_t) length);
             body->contents[length] = 0; // Ensure terminator
 
             if (fgr_socket_send(g_log_cfg.sock, (const uint8_t *) &log_msg, sizeof(log_msg), 0) == ESP_OK) {
