@@ -121,7 +121,11 @@ static void msg_receive_cb(fgr_msg_t *msg, void *param)
 {
     (void) param;
 
-    ESP_LOGI(TAG, "Received message header 0x%08x.", msg->header.header);
+    ESP_LOGI(TAG, "Received message header 0x%08x, which is"
+             " a type of 0x%04x, reference %d; message body"
+             " length is %d.",
+             msg->header.header, msg->header.req.type,
+             msg->header.req.reference, msg->body.length);
 }
 
 /* ----------------------------------------------------------------

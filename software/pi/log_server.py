@@ -53,7 +53,6 @@ from datetime import datetime
 script_dir = Path(__file__).resolve().parent
 
 # Navigate up to the common directory where fgr_protocol.py lives
-# Adjust this path based on your actual directory structure
 protocol_dir = script_dir.parent / 'protocol'
 sys.path.insert(0, str(protocol_dir))
 
@@ -187,7 +186,8 @@ class FGRLogServer:
                             
                             # Extract log message and level
                             log_text = msg.get_log_message()
-                            log_level = msg.header.log_level
+                            # In the header, error_or_state contains the log level for LOG messages
+                            log_level = msg.error_or_state
                             
                             # Write to journal
                             self._write_to_journal(log_text, log_level, device_info)
