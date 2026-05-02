@@ -51,20 +51,20 @@ typedef struct {
     bool connected;
     SemaphoreHandle_t lock;
     fgr_log_level_t min_level;  // Minimum level to forward
-} log_cfg_t;
+} context_t;
 
 /* ----------------------------------------------------------------
  * VARIABLES
  * -------------------------------------------------------------- */
 
 // Context.
-static log_cfg_t g_log_cfg = {
+static context_t g_context = {
     .sock = -1,
     .min_level = FGR_LOG_LEVEL_INFO  // Default: forward INFO and above
 };
 
 /* ----------------------------------------------------------------
- * STATIC FUNCTIONS
+ * STATIC FUNCTIONS: CALLBACKS
  * -------------------------------------------------------------- */
 
 // Custom vprintf handler with level filtering
@@ -119,23 +119,23 @@ static int tcp_log_vprintf(const char *fmt, va_list args)
     }
 
     // Forward if level meets minimum and we're connected
-    if ((length > 0) && g_log_cfg.connected && (fgr_log_level >= g_log_cfg.min_level)) {
+    if ((length > 0) && g_context.connected && (fgr_log_level >= g_context.min_level)) {
 
-        if (xSemaphoreTake(g_log_cfg.lock, pdMS_TO_TICKS(100)) == pdTRUE) {
+        if (xSemaphoreTake(g_context.lock, pdMS_TO_TICKS(100)) == pdTRUE) {
 
             header->type = htons(((uint16_t) FGR_MSG_TYPE_LOG) << 12);
             header->level = fgr_log_level;
             body->length = htonl((uint32_t) length);
             body->contents[length] = 0; // Ensure terminator
 
-            if (fgr_socket_send(g_log_cfg.sock, (const uint8_t *) &log_msg, sizeof(log_msg), 0) == ESP_OK) {
-                fgr_socket_channel_activity(&g_log_cfg.context_sock);
+            if (fgr_socket_send(g_context.sock, (const uint8_t *) &log_msg, sizeof(log_msg), 0) == ESP_OK) {
+                fgr_socket_channel_activity(&g_context.context_sock);
             } else {
-                fgr_socket_channel_failed(&g_log_cfg.context_sock);
-                g_log_cfg.connected = false;
+                fgr_socket_channel_failed(&g_context.context_sock);
+                g_context.connected = false;
             }
 
-            xSemaphoreGive(g_log_cfg.lock);
+            xSemaphoreGive(g_context.lock);
         }
     }
 
@@ -147,14 +147,14 @@ static int tcp_log_vprintf(const char *fmt, va_list args)
 // fgr_socket_channel_maintain().
 static void socket_heartbeat_cb(int sock, void *param)
 {
-    log_cfg_t *log_cfg = (log_cfg_t *) param;
+    context_t *context = (context_t *) param;
     (void) sock;
 
-    if (log_cfg->lock) {
+    if (context->lock) {
         ESP_LOGI(TAG, "Log heartbeat.");
-        CONTEXT_LOCK(log_cfg->lock, "socket_heartbeat_cb() 1");
-        fgr_socket_channel_activity(&log_cfg->context_sock);
-        CONTEXT_UNLOCK(log_cfg->lock, "socket_heartbeat_cb() 1");
+        CONTEXT_LOCK(context->lock, "socket_heartbeat_cb() log");
+        fgr_socket_channel_activity(&context->context_sock);
+        CONTEXT_UNLOCK(context->lock, "socket_heartbeat_cb() log");
     }
 }
 
@@ -162,18 +162,22 @@ static void socket_heartbeat_cb(int sock, void *param)
 // fgr_socket_channel_maintain().
 static void socket_reconnect_cb(int sock, void *param)
 {
-    log_cfg_t *log_cfg = (log_cfg_t *) param;
+    context_t *context = (context_t *) param;
 
-    if (log_cfg->lock) {
+    if (context->lock) {
         // Nothing to do other than update the socket
         // since the previous has probably been closed
         // and set the connected flag back to true
-        CONTEXT_LOCK(log_cfg->lock, "socket_reconnect_cb() 1");
-        log_cfg->sock = sock;
-        log_cfg->connected = true;
-        CONTEXT_UNLOCK(log_cfg->lock, "socket_reconnect_cb() 1");
+        CONTEXT_LOCK(context->lock, "socket_reconnect_cb() log");
+        context->sock = sock;
+        context->connected = true;
+        CONTEXT_UNLOCK(context->lock, "socket_reconnect_cb() log");
     }
 }
+
+/* ----------------------------------------------------------------
+ * STATIC FUNCTIONS: MISC
+ * -------------------------------------------------------------- */
 
 // Wot it says.
 static void clean_up()
@@ -181,17 +185,17 @@ static void clean_up()
     // Restore default logging
     esp_log_set_vprintf(vprintf);
 
-    if (g_log_cfg.lock) {
+    if (g_context.lock) {
 
         ESP_LOGI(TAG, "Stopping log forwarding.");
 
-        CONTEXT_LOCK(g_log_cfg.lock, "clean_up() 1");
+        CONTEXT_LOCK(g_context.lock, "clean_up() log");
 
         // Lose the socket
-        fgr_socket_channel_stop(&g_log_cfg.context_sock);
-        g_log_cfg.sock = -1;
+        fgr_socket_channel_stop(&g_context.context_sock);
+        g_context.sock = -1;
 
-        CONTEXT_UNLOCK(g_log_cfg.lock, "clean_up() 1");
+        CONTEXT_UNLOCK(g_context.lock, "clean_up() log");
         // Don't delete the semaphore, someone might have it still
     }
 }
@@ -206,43 +210,43 @@ int32_t fgr_log_init(const char *server_ip, uint16_t port,
 {
     int32_t err = ESP_OK;
 
-    if (g_log_cfg.sock < 0) {
-        if (!g_log_cfg.lock) {
+    if (g_context.sock < 0) {
+        if (!g_context.lock) {
             // Create mutex
             err = -ESP_ERR_NO_MEM;
-            g_log_cfg.lock = xSemaphoreCreateMutex();
+            g_context.lock = xSemaphoreCreateMutex();
         }
 
-        if (g_log_cfg.lock) {
+        if (g_context.lock) {
 
-            CONTEXT_LOCK(g_log_cfg.lock, "fgr_log_init()");
+            CONTEXT_LOCK(g_context.lock, "fgr_log_init()");
 
-            g_log_cfg.min_level = min_level;
+            g_context.min_level = min_level;
             // Create connection to server
             err = fgr_socket_channel_start(server_ip, port,
-                                           &g_log_cfg.sock,
-                                           &g_log_cfg.context_sock);
+                                           &g_context.sock,
+                                           &g_context.context_sock);
             if (err == ESP_OK) {
                 // Maintain the connection
-                err = fgr_socket_channel_maintain(&g_log_cfg.context_sock,
+                err = fgr_socket_channel_maintain(&g_context.context_sock,
                                                   CONFIG_FGR_LOG_HEARTBEAT_SECONDS,
                                                   socket_heartbeat_cb,
                                                   socket_reconnect_cb,
-                                                  &g_log_cfg);
+                                                  &g_context);
                 if (err != ESP_OK) {
-                    fgr_socket_channel_stop(&g_log_cfg.context_sock);
-                    g_log_cfg.sock = -1;
+                    fgr_socket_channel_stop(&g_context.context_sock);
+                    g_context.sock = -1;
                 }
             }
 
-            CONTEXT_UNLOCK(g_log_cfg.lock, "fgr_log_init()");
+            CONTEXT_UNLOCK(g_context.lock, "fgr_log_init()");
 
             if (err == ESP_OK) {
                 // Set vprintf handler
-                g_log_cfg.connected = true;
+                g_context.connected = true;
                 esp_log_set_vprintf(tcp_log_vprintf);
                 ESP_LOGI(TAG, "Logs will be forwarded to %s:%d, log level %d.",
-                         server_ip, port, g_log_cfg.min_level);
+                         server_ip, port, g_context.min_level);
 
             }
         }
@@ -266,15 +270,15 @@ int32_t fgr_log_set_min_level(fgr_log_level_t level)
 {
     int32_t err = -ESP_ERR_INVALID_STATE;
 
-    if (g_log_cfg.lock) {
+    if (g_context.lock) {
 
-        CONTEXT_LOCK(g_log_cfg.lock, "fgr_log_set_min_level");
+        CONTEXT_LOCK(g_context.lock, "fgr_log_set_min_level()");
 
-        g_log_cfg.min_level = level;
+        g_context.min_level = level;
 
-        CONTEXT_UNLOCK(g_log_cfg.lock, "fgr_log_set_min_level");
+        CONTEXT_UNLOCK(g_context.lock, "fgr_log_set_min_level()");
 
-        ESP_LOGI(TAG, "Log level set to %d.", g_log_cfg.min_level);
+        ESP_LOGI(TAG, "Log level set to %d.", g_context.min_level);
     }
 
     return err;

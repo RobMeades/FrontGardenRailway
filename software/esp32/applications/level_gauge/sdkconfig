@@ -510,12 +510,14 @@ CONFIG_FGR_DEBUG_LED_PIN=8
 # FGR Log Configuration
 #
 CONFIG_FGR_LOG_PORT=5001
+CONFIG_FGR_LOG_HEARTBEAT_SECONDS=290
 # end of FGR Log Configuration
 
 #
 # FGR Message Configuration
 #
 CONFIG_FGR_MSG_PORT=5000
+CONFIG_FGR_MSG_HEARTBEAT_SECONDS=50
 # end of FGR Message Configuration
 
 #

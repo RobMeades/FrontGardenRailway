@@ -116,16 +116,18 @@ static int32_t init(fgr_state_t *state)
     return err;
 }
 
-// Message receive callback
-static void msg_receive_cb(fgr_msg_t *msg, void *param)
+// Default message receive callback.
+static bool msg_receive_default_cb(fgr_msg_t *msg, void *param)
 {
     (void) param;
 
-    ESP_LOGI(TAG, "Received message header 0x%08x, which is"
-             " a type of 0x%04x, reference %d; message body"
-             " length is %d.",
-             msg->header.header, msg->header.req.type,
-             msg->header.req.reference, msg->body.length);
+    char buffer_str[64] = {0};
+    fgr_msg_name(msg->header.req.type, buffer_str, sizeof(buffer_str));
+    ESP_LOGI(TAG, "Received %s [0x%04x], reference %d, body length %d.",
+             buffer_str, msg->header.req.type, msg->header.req.reference,
+             msg->body.length);
+
+    return true;
 }
 
 /* ----------------------------------------------------------------
@@ -136,22 +138,27 @@ static void msg_receive_cb(fgr_msg_t *msg, void *param)
 void app_main(void)
 {
     fgr_state_t state = FGR_STATE_NEEDS_CFG;
+    char buffer_str[64] = {0};
 
     ESP_LOGI(TAG, "app_main start.");
 
     int32_t err = init(&state);
     if (err == ESP_OK) {
         ESP_LOGI(TAG, "Initialization complete.");
-
         // Start receiving messages
-        err = fgr_msg_receive_start(msg_receive_cb, NULL);
+        err = fgr_msg_receive_start();
+    }
+    if (err == ESP_OK) {
+        // Add a default message handler
+        err = fgr_msg_receive_handler_add(0, msg_receive_default_cb, NULL);
     }
 
     if (err == ESP_OK) {
-
         // Request configuration
-        ESP_LOGI(TAG, "Requesting configuration.");
-        fgr_msg_send_ind(FGR_IND_RSP_NEEDS_CFG, state, NULL, 0);
+        if (fgr_msg_send_ind(FGR_IND_RSP_NEEDS_CFG, state, NULL, 0) == ESP_OK) {
+            fgr_msg_name(MSG_IND(FGR_IND_RSP_NEEDS_CFG), buffer_str, sizeof(buffer_str));
+            ESP_LOGI(TAG, "Sent %s [0x%04x].", buffer_str, MSG_IND(FGR_IND_RSP_NEEDS_CFG));
+        }
 
         // Allow us to feed the watchdog
         esp_task_wdt_add(NULL);
@@ -167,6 +174,7 @@ void app_main(void)
     }
 
     fgr_msg_receive_stop();
+    fgr_msg_deinit();
     fgr_log_deinit();
     fgr_network_deinit();
     esp_restart();

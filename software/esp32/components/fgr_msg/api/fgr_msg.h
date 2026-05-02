@@ -32,6 +32,18 @@ extern "C" {
  * COMPILE-TIME MACROS
  * -------------------------------------------------------------- */
 
+// Make a REQ message type from a REQ_CNF.
+#define MSG_REQ(msg) ((msg & 0x0fff) | (FGR_MSG_TYPE_REQ` << 12))
+
+// Make a CNF message type from a REQ_CNF.
+#define MSG_CNF(msg) ((msg & 0x0fff) | (FGR_MSG_TYPE_CNF` << 12))
+
+// Make an IND message type from an IND_RSP.
+#define MSG_IND(msg) ((msg & 0x0fff) | (FGR_MSG_TYPE_IND << 12))
+
+// Make a RSP message type from an IND_RSP.
+#define MSG_RSP(msg) ((msg & 0x0fff) | (FGR_MSG_TYPE_RSP << 12))
+
 /* ----------------------------------------------------------------
  * TYPES
  * -------------------------------------------------------------- */
@@ -40,9 +52,11 @@ extern "C" {
  *
  * @param msg    a pointer to the message: this should be handled/
  *               copied/whatever before the callback returns.
- * @param param  cb_param as passed to fgr_msg_receive_start().
+ * @param param  cb_param as passed to fgr_msg_receive_handler_add().
+ * @return       true if the message is handled, false if it
+ *               can be passed to subsequent handlers.
  */
-typedef void (*fgr_msg_rx_cb_t)(fgr_msg_t *msg, void *param);
+typedef bool (*fgr_msg_rx_cb_t)(fgr_msg_t *msg, void *param);
 
 /* ----------------------------------------------------------------
  * FUNCTIONS
@@ -92,7 +106,7 @@ int32_t fgr_msg_send_cnf(fgr_req_cnf_t cnf, fgr_error_t error,
 /** Send an IND message.
  *
  * @param ind     the IND message to send.
- * @param state   the state to include.
+ * @param state   the state to include, 0 if there is no state.
  * @param buffer  data to include in the message contents; may
  *                be NULL, must be non-NULL if length is non-zero.
  * @param length  the amount of data at buffer, ignored if
@@ -104,22 +118,97 @@ int32_t fgr_msg_send_ind(fgr_ind_rsp_t ind, fgr_state_t state,
                          const void *buffer, size_t length);
 
 /** Start receiving messages.  A task is created to receive
- * messages and cb() may be called from this task until
- * fgr_msg_receive_stop() is called.
+ * messages; call fgr_msg_receive_handler_add() to get them,
+ * call fgr_msg_receive_stop() when done.
  *
- * @param cb        callback to be called when a message is
- *                  received.
+ * @return ESP_OK on success, else a negative value from esp_err_t.
+ */
+int32_t fgr_msg_receive_start();
+
+
+/** Add a message receive handler: when a message of the given
+ * type has been decoded the handler will be called;  If the
+ * handler returns true then the message is handled, if the
+ * handler returns false the message will be offered to any
+ * other handlers registered against the same message type.
+ * Handlers added most recently have priority (i.e. the list
+ * is populated from the head).  Try not to do too much in a
+ * handler, nothing time consuming; each handler blocks message
+ * reception.
+ *
+ * fgr_msg_receive_start() must have been called for any handlers
+ * to be called.
+ *
+ * @param msg_type  the message type that should cause the
+ *                  handler to be called, i.e. one of
+ *                  fgr_req_cnf_t or fgr_ind_rsp_t, with
+ *                  the top 4 bits OR'ed with FGR_MSG_TYPE_REQ
+ *                  or FGR_MSG_TYPE_RSP (no need for CNF or
+ *                  IND since those are never received by
+ *                  a node), native endian.  Use zero
+ *                  to indicate all message types.
+ *                  You may wish to use the MSG_CNF() and
+ *                  MSG_RSP() macros to form this variable
+ *                  from an fgr_req_cnf_t or a fgr_ind_rsp_t
+ *                  type.
+ * @param cb        handler to be called when a message
+ *                  of type msg_type has been received.
  * @param cb_param  user parameter to be passed to cb()
  *                  when it is called; may be NULL.
  * @return          ESP_OK on success, else a negative value
  *                  from esp_err_t.
  */
-int32_t fgr_msg_receive_start(fgr_msg_rx_cb_t cb, void *cb_param);
+int32_t fgr_msg_receive_handler_add(uint16_t msg_type,
+                                    fgr_msg_rx_cb_t cb,
+                                    void *cb_param);
+
+/** Remove a message receive handler that was added with
+ * fgr_msg_receive_handler_add().  ALL message handlers with
+ * the given address will be removed.  There is no need to
+ * call this when exiting: fgr_msg_receive_stop() will
+ * clean up.
+ *
+ * @param cb  address of the handler that was added with
+ *            fgr_msg_receive_handler_add().
+ */
+void fgr_msg_receive_handler_remove_by_cb(fgr_msg_rx_cb_t cb);
+
+/** Remove a message receive handler that was added with
+ * fgr_msg_receive_handler_add().  ALL message handlers with
+ * the given message type will be removed.  There is no need to
+ * call this when exiting: fgr_msg_receive_stop() will
+ * clean up.
+ *
+ * @param msg_type  the message type for the handler(s) added
+ *                  with fgr_msg_receive_handler_add().
+ */
+void fgr_msg_receive_handler_remove_by_type(uint16_t msg_type);
 
 /** Stop receiving messages.  When this function has returned
- * cb() will no longer be called.
+ * cb() will no longer be called and all message handlers
+ * will be removed.
  */
 void fgr_msg_receive_stop();
+
+/** Populate a buffer with a string that is the name of the
+ * given message type.  The returned string is guaranteed
+ * to be null terminated.
+ *
+ * @param msg_type  the message type i.e. one of
+ *                  fgr_req_cnf_t or fgr_ind_rsp_t, with
+ *                  the top 4 bits OR'ed with FGR_MSG_TYPE_REQ
+ *                  FGR_MSG_TYPE_CNF, FGR_MSG_TYPE_IND or
+ *                  FGR_MSG_TYPE_RSP, native endian.
+ * @param buffer    a buffer in which to store the message
+ *                  name; allow at least 64 characters; cannot
+ *                  be NULL.
+ * @param length    the amount of storage at buffer, must be
+ *                  non-zero.
+ * @return          the length of the string written to buffer
+ *                  (i.e. what strlen() would return) else
+ *                  negative error code from esp_err_t.
+ */
+int32_t fgr_msg_name(uint16_t msg_type, char *buffer, size_t length);
 
 /** Deinitialise the messaging interface.
  */

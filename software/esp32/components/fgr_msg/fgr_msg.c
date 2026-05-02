@@ -26,6 +26,7 @@
 #include "esp_task_wdt.h"
 #include "esp_log.h"
 #include "arpa/inet.h"
+#include "sys/queue.h"
 
 #include "fgr_util.h"
 #include "fgr_socket.h"
@@ -37,6 +38,9 @@
 
 // Logging prefix.
 #define TAG "msg"
+
+// String to use to describe an unknown message.
+#define MSG_UNKNOWN_STR "UNKNOWN"
 
 /* ----------------------------------------------------------------
  * TYPES
@@ -57,7 +61,19 @@ typedef struct {
     size_t contents_bytes_read;
     uint32_t expected_contents_length;
     fgr_msg_t *msg;  // Will be allocated when length is known
-} msg_decoder_t;
+} context_decoder_t;
+
+// Structure to store a message receive callback and its parameter
+// as part of a linked list
+typedef struct msg_rx_cb_t {
+    fgr_msg_rx_cb_t cb;
+    void *cb_param;
+    uint16_t msg_type;
+    SLIST_ENTRY(msg_rx_cb_t) next;
+} msg_rx_cb_t;
+
+// Message receive callback list head.
+SLIST_HEAD(msg_rx_cb_list_t, msg_rx_cb_t);
 
 // Context.
 typedef struct {
@@ -67,67 +83,38 @@ typedef struct {
     SemaphoreHandle_t lock;
     uint8_t reference;
     fgr_state_t *heartbeat_state;
-    fgr_msg_rx_cb_t cb;
-    void * cb_param;
     void *context_rx;
-    msg_decoder_t msg_decoder;
-} msg_cfg_t;
+    struct msg_rx_cb_list_t msg_rx_cb_list;
+    context_decoder_t context_decoder;
+} context_t;
 
 /* ----------------------------------------------------------------
  * VARIABLES
  * -------------------------------------------------------------- */
 
+// List of known message variety names, in order.
+static const char * g_msg_variety_str_list[] = {"NULL", "REQ", "CNF", "IND", "RSP", "LOG"};
+
+// List of known message REQ/CNF names, in order.
+static const char * g_msg_req_cnf_str_list[] = {"NULL", "CFG", "START", "STOP",
+                                                "LOG_LEVEL", "LOG_START", "LOG_STOP",
+                                                "REBOOT"};
+
+// Table of known message IND/RSP names, in order.
+static const char * g_msg_ind_rsp_str_list[] = {"NULL", "NEEDS_CFG", "START", "STOP",
+                                                "HEARTBEAT"};
+
 // Context.
-static msg_cfg_t g_msg_cfg = {
+static context_t g_context = {
     .sock = -1
 };
 
 /* ----------------------------------------------------------------
- * STATIC FUNCTIONS
+ * STATIC FUNCTIONS: MESSAGE DECODING
  * -------------------------------------------------------------- */
 
-// Callback to send a heartbeat message.
-static void socket_heartbeat_cb(int sock, void *param)
-{
-    msg_cfg_t *msg_cfg = (msg_cfg_t *) param;
-
-    if (msg_cfg->lock) {
-
-        fgr_state_t state = FGR_STATE_NOT_POPULATED;
-
-        CONTEXT_LOCK(msg_cfg->lock, "socket_heartbeat_cb() 2");
-        if (g_msg_cfg.heartbeat_state) {
-            state = *g_msg_cfg.heartbeat_state;
-        }
-        CONTEXT_UNLOCK(msg_cfg->lock, "socket_heartbeat_cb() 2");
-
-        fgr_msg_send_ind(FGR_IND_RSP_HEARTBEAT, state, NULL, 0);
-    }
-}
-
-// Callback called by fgr_socket_channel_maintain().
-static void socket_reconnect_cb(int sock, void *param)
-{
-    msg_cfg_t *msg_cfg = (msg_cfg_t *) param;
-
-    if (msg_cfg->lock) {
-
-        CONTEXT_LOCK(msg_cfg->lock, "socket_reconnect_cb() 2");
-        int32_t err = fgr_socket_enable_tcp_keep_alive(sock,
-                                                       FGR_SOCKET_TCP_KEEP_ALIVE_IDLE_TIME_SECONDS,
-                                                       FGR_SOCKET_TCP_KEEP_ALIVE_PROBE_INTERVAL_SECONDS,
-                                                       FGR_SOCKET_TCP_KEEP_ALIVE_COUNT);
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "fgr_socket_enable_tcp_keep_alive() returned error: %s.", esp_err_to_name(err));
-        }
-        msg_cfg->sock = sock;
-        msg_cfg->connected = true;
-        CONTEXT_UNLOCK(msg_cfg->lock, "socket_reconnect_cb() 2");
-    }
-}
-
 // Initialize a message decoder.
-static void decoder_init(msg_decoder_t *decoder)
+static void decoder_init(context_decoder_t *decoder)
 {
     decoder->state = DECODER_STATE_HEADER;
     decoder->header_bytes_read = 0;
@@ -138,7 +125,7 @@ static void decoder_init(msg_decoder_t *decoder)
 }
 
 // Free a decoder.
-static void decoder_free(msg_decoder_t *decoder)
+static void decoder_free(context_decoder_t *decoder)
 {
     if (decoder->msg) {
         free(decoder->msg);
@@ -152,7 +139,7 @@ static void decoder_free(msg_decoder_t *decoder)
 // responsible for free()ing it.
 // Note: this decoder written by Deep Seek, and hence has
 // multiple return statements, which is OK 'cos it's a parser.
-static int32_t decode_msg(msg_decoder_t *decoder, const uint8_t *buffer,
+static int32_t decode_msg(context_decoder_t *decoder, const uint8_t *buffer,
                           size_t length, fgr_msg_t **msg)
 {
 
@@ -271,27 +258,88 @@ static int32_t decode_msg(msg_decoder_t *decoder, const uint8_t *buffer,
     return bytes_processed;
 }
 
+/* ----------------------------------------------------------------
+ * STATIC FUNCTIONS: CALLBACKS
+ * -------------------------------------------------------------- */
+
+// Callback to send a heartbeat message.
+static void socket_heartbeat_cb(int sock, void *param)
+{
+    context_t *context = (context_t *) param;
+
+    if (context->lock) {
+
+        fgr_state_t state = FGR_STATE_NOT_POPULATED;
+
+        CONTEXT_LOCK(context->lock, "socket_heartbeat_cb() msg");
+        if (context->heartbeat_state) {
+            state = *context->heartbeat_state;
+        }
+        CONTEXT_UNLOCK(context->lock, "socket_heartbeat_cb() msg");
+
+        fgr_msg_send_ind(FGR_IND_RSP_HEARTBEAT, state, NULL, 0);
+    }
+}
+
+// Callback called by fgr_socket_channel_maintain().
+static void socket_reconnect_cb(int sock, void *param)
+{
+    context_t *context = (context_t *) param;
+
+    if (context->lock) {
+
+        CONTEXT_LOCK(context->lock, "socket_reconnect_cb() msg");
+        int32_t err = fgr_socket_enable_tcp_keep_alive(sock,
+                                                       FGR_SOCKET_TCP_KEEP_ALIVE_IDLE_TIME_SECONDS,
+                                                       FGR_SOCKET_TCP_KEEP_ALIVE_PROBE_INTERVAL_SECONDS,
+                                                       FGR_SOCKET_TCP_KEEP_ALIVE_COUNT);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "fgr_socket_enable_tcp_keep_alive() returned error: %s.", esp_err_to_name(err));
+        }
+        context->sock = sock;
+        context->connected = true;
+        CONTEXT_UNLOCK(context->lock, "socket_reconnect_cb() msg");
+    }
+}
+
 // Callback to be called when data has been received.
 static void receive_cb(void *buffer, size_t length, void *param)
 {
-    msg_cfg_t *msg_cfg = (msg_cfg_t *) param;
+    context_t *context = (context_t *) param;
 
-    if (msg_cfg->lock && buffer && (length > 0)) {
+    if (context->lock && buffer && (length > 0)) {
 
-        CONTEXT_LOCK(msg_cfg->lock, "receive_cb()");
+        CONTEXT_LOCK(context->lock, "receive_cb()");
         fgr_msg_t *msg = NULL;
-        decode_msg(&msg_cfg->msg_decoder, (uint8_t *) buffer, length, &msg);
+        decode_msg(&context->context_decoder, (uint8_t *) buffer, length, &msg);
         if (msg != NULL) {
-            // Got a complete message, call the callback
-            if (msg_cfg->cb != NULL) {
-                msg_cfg->cb(msg, msg_cfg->cb_param);
+            char buffer_str[64] = {0};
+            fgr_msg_name(msg->header.req.type, buffer_str, sizeof(buffer_str));
+            ESP_LOGD(TAG, "Received %s [0x%04x], reference %d, body length %d.",
+                     buffer_str, msg->header.req.type, msg->header.req.reference,
+                     msg->body.length);
+
+            // Got a complete message, pass it to all who want it
+            struct msg_rx_cb_t *iter;
+            SLIST_FOREACH(iter, &context->msg_rx_cb_list, next) {
+                if ((iter->msg_type == 0) ||
+                    (iter->msg_type == msg->header.req.type)) {
+                    if (iter->cb(msg, iter->cb_param)) {
+                        // Stop if the callback returns true
+                        break;
+                    }
+                }
             }
             free(msg);
         }
-        fgr_socket_channel_activity(&msg_cfg->context_sock);
-        CONTEXT_UNLOCK(msg_cfg->lock, "receive_cb()");
+        fgr_socket_channel_activity(&context->context_sock);
+        CONTEXT_UNLOCK(context->lock, "receive_cb()");
     }
 }
+
+/* ----------------------------------------------------------------
+ * STATIC FUNCTIONS: SENDING
+ * -------------------------------------------------------------- */
 
 // Send a CNF or IND message.
 static int32_t send_msg(uint16_t type, uint8_t error_state,
@@ -299,7 +347,7 @@ static int32_t send_msg(uint16_t type, uint8_t error_state,
 {
     int32_t err = -ESP_ERR_INVALID_STATE;
 
-    if (g_msg_cfg.lock) {
+    if (g_context.lock) {
         err = -ESP_ERR_INVALID_ARG;
         if ((length == 0) || (buffer != NULL)) {
 
@@ -312,47 +360,57 @@ static int32_t send_msg(uint16_t type, uint8_t error_state,
             // IND part follows the same pattern
             _header->cnf.type = htons(type);
             _header->cnf.error = error_state;
-            _header->cnf.reference = g_msg_cfg.reference;
-            g_msg_cfg.reference++;
+            _header->cnf.reference = g_context.reference;
+            g_context.reference++;
             if (buffer != NULL) {
                 *_length = htonl(length);
             }
 
-            CONTEXT_LOCK(g_msg_cfg.lock, "send_msg()");
+            CONTEXT_LOCK(g_context.lock, "send_msg()");
             // Send header and length
-            err = fgr_socket_send(g_msg_cfg.sock, &header_length, sizeof(header_length), FGR_SOCKET_TX_RETRY_COUNT);
+            err = fgr_socket_send(g_context.sock, &header_length, sizeof(header_length), FGR_SOCKET_TX_RETRY_COUNT);
             if ((err == ESP_OK) && (buffer != NULL)) {
                 // Send contents
-                err = fgr_socket_send(g_msg_cfg.sock, buffer, length, FGR_SOCKET_TX_RETRY_COUNT);
+                err = fgr_socket_send(g_context.sock, buffer, length, FGR_SOCKET_TX_RETRY_COUNT);
             }
             if (err == ESP_OK) {
-                fgr_socket_channel_activity(&g_msg_cfg.context_sock);
+                char buffer_str[64] = {0};
+                fgr_msg_name(type, buffer_str, sizeof(buffer_str));
+                ESP_LOGD(TAG, "Sent %s [0x%04x], reference %d, body length %d.",
+                         buffer_str, type, _header->cnf.reference, *_length);
+                fgr_socket_channel_activity(&g_context.context_sock);
             } else {
-                fgr_socket_channel_failed(&g_msg_cfg.context_sock);
+                fgr_socket_channel_failed(&g_context.context_sock);
             }
-            CONTEXT_UNLOCK(g_msg_cfg.lock, "send_msg()");
+            CONTEXT_UNLOCK(g_context.lock, "send_msg()");
         }
     }
 
     return err;
 }
 
+/* ----------------------------------------------------------------
+ * STATIC FUNCTIONS: MISC
+ * -------------------------------------------------------------- */
 
 // Clean up.
 static void clean_up()
 {
-    if (g_msg_cfg.lock) {
+    // Stop receiving
+    fgr_msg_receive_stop();
 
-        CONTEXT_LOCK(g_msg_cfg.lock, "clean_up() 2");
+    if (g_context.lock) {
+
+        CONTEXT_LOCK(g_context.lock, "clean_up() msg");
 
         // Lose the socket
-        fgr_socket_channel_stop(&g_msg_cfg.context_sock);
-        g_msg_cfg.sock = -1;
+        fgr_socket_channel_stop(&g_context.context_sock);
+        g_context.sock = -1;
 
         // In case we were in the middle of a decode
-        decoder_free(&g_msg_cfg.msg_decoder);
+        decoder_free(&g_context.context_decoder);
 
-        CONTEXT_UNLOCK(g_msg_cfg.lock, "clean_up() 2");
+        CONTEXT_UNLOCK(g_context.lock, "clean_up() msg");
         // Don't delete the semaphore, someone might have it still
     }
 }
@@ -367,46 +425,47 @@ int32_t fgr_msg_init(const char *server_ip, uint16_t port,
 {
     int32_t err = ESP_OK;
 
-    if (g_msg_cfg.sock < 0) {
-        if (!g_msg_cfg.lock) {
+    if (g_context.sock < 0) {
+        if (!g_context.lock) {
             // Create mutex
             err = -ESP_ERR_NO_MEM;
-            g_msg_cfg.lock = xSemaphoreCreateMutex();
+            g_context.lock = xSemaphoreCreateMutex();
+            SLIST_INIT(&g_context.msg_rx_cb_list);
         }
 
-        if (g_msg_cfg.lock) {
+        if (g_context.lock) {
 
-            CONTEXT_LOCK(g_msg_cfg.lock, "fgr_msg_init()");
+            CONTEXT_LOCK(g_context.lock, "fgr_msg_init()");
 
             if (hearbeat_seconds > 0) {
-                g_msg_cfg.heartbeat_state = state;
+                g_context.heartbeat_state = state;
             }
 
             // Create connection to server
             err = fgr_socket_channel_start(server_ip, port,
-                                           &g_msg_cfg.sock,
-                                           &g_msg_cfg.context_sock);
+                                           &g_context.sock,
+                                           &g_context.context_sock);
             if (err == ESP_OK) {
 
-                CONTEXT_UNLOCK(g_msg_cfg.lock, "fgr_msg_init()");
+                CONTEXT_UNLOCK(g_context.lock, "fgr_msg_init()");
                 // Do initial extra socket configuration
-                socket_reconnect_cb(g_msg_cfg.sock, &g_msg_cfg);
-                CONTEXT_LOCK(g_msg_cfg.lock, "fgr_msg_init()");
+                socket_reconnect_cb(g_context.sock, &g_context);
+                CONTEXT_LOCK(g_context.lock, "fgr_msg_init()");
 
                 // Maintain the connection
-                err = fgr_socket_channel_maintain(&g_msg_cfg.context_sock,
+                err = fgr_socket_channel_maintain(&g_context.context_sock,
                                                   hearbeat_seconds,
                                                   socket_heartbeat_cb,
                                                   socket_reconnect_cb,
-                                                  &g_msg_cfg);
+                                                  &g_context);
                 if (err != ESP_OK) {
-                    fgr_socket_channel_stop(&g_msg_cfg.context_sock);
-                    g_msg_cfg.sock = -1;
-                    g_msg_cfg.heartbeat_state = NULL;
+                    fgr_socket_channel_stop(&g_context.context_sock);
+                    g_context.sock = -1;
+                    g_context.heartbeat_state = NULL;
                 }
             }
 
-            CONTEXT_UNLOCK(g_msg_cfg.lock, "fgr_msg_init()");
+            CONTEXT_UNLOCK(g_context.lock, "fgr_msg_init()");
         }
     }
 
@@ -436,43 +495,164 @@ int32_t fgr_msg_send_ind(fgr_ind_rsp_t ind, fgr_state_t state,
 }
 
 // Start receiving messages.
-int32_t fgr_msg_receive_start(fgr_msg_rx_cb_t cb, void *cb_param)
+int32_t fgr_msg_receive_start()
 {
     int32_t err = -ESP_ERR_INVALID_STATE;
 
-    if (g_msg_cfg.lock) {
+    if (g_context.lock) {
 
-        CONTEXT_LOCK(g_msg_cfg.lock, "fgr_msg_receive_start()");
-        g_msg_cfg.cb = cb;
-        g_msg_cfg.cb_param = cb_param;
-        decoder_init(&g_msg_cfg.msg_decoder);
-        err = fgr_socket_receive_start(g_msg_cfg.sock,
+        CONTEXT_LOCK(g_context.lock, "fgr_msg_receive_start()");
+        decoder_init(&g_context.context_decoder);
+        err = fgr_socket_receive_start(g_context.sock,
                                        fgr_socket_channel_failed,
-                                       &g_msg_cfg.context_sock,
+                                       &g_context.context_sock,
                                        receive_cb,
-                                       &g_msg_cfg,
-                                       &g_msg_cfg.context_rx);
-        if (err != ESP_OK) {
-            g_msg_cfg.cb = NULL;
-            g_msg_cfg.cb_param = NULL;
-        }
-        CONTEXT_UNLOCK(g_msg_cfg.lock, "fgr_msg_receive_start()");
+                                       &g_context,
+                                       &g_context.context_rx);
+        CONTEXT_UNLOCK(g_context.lock, "fgr_msg_receive_start()");
     }
 
     return err;
 }
 
+// Add a message receive handler.
+int32_t fgr_msg_receive_handler_add(uint16_t msg_type,
+                                    fgr_msg_rx_cb_t cb,
+                                    void *cb_param)
+{
+    int32_t err = -ESP_ERR_INVALID_STATE;
+
+    if (g_context.lock) {
+        err = -ESP_ERR_INVALID_ARG;
+        if (cb &&
+            ((msg_type == 0) ||
+             (msg_type >> 12 == FGR_MSG_TYPE_REQ) ||
+             (msg_type >> 12 == FGR_MSG_TYPE_IND))) {
+            err = -ESP_ERR_NO_MEM;
+            msg_rx_cb_t *msg_rx_cb = (msg_rx_cb_t *) malloc(sizeof(*msg_rx_cb));
+            if (msg_rx_cb) {
+                msg_rx_cb->msg_type = msg_type;
+                msg_rx_cb->cb = cb;
+                msg_rx_cb->cb_param = cb_param;
+
+                CONTEXT_LOCK(g_context.lock, "fgr_msg_receive_handler_add()");
+                SLIST_INSERT_HEAD(&g_context.msg_rx_cb_list, msg_rx_cb, next);
+                CONTEXT_UNLOCK(g_context.lock, "fgr_msg_receive_handler_add()");
+
+                err = ESP_OK;
+            }
+        }
+    }
+
+    return err;
+}
+
+// Remove a message receive handler.
+void fgr_msg_receive_handler_remove_by_cb(fgr_msg_rx_cb_t cb)
+{
+    if (g_context.lock && cb) {
+
+        CONTEXT_LOCK(g_context.lock, "fgr_msg_receive_handler_remove_by_cb()");
+        struct msg_rx_cb_t *iter;
+        struct msg_rx_cb_t *prev = NULL;
+        SLIST_FOREACH(iter, &g_context.msg_rx_cb_list, next) {
+            if (iter->cb == cb) {  // Found Bob
+                if (prev == NULL) {
+                    // Removing the first element
+                    SLIST_REMOVE_HEAD(&g_context.msg_rx_cb_list, next);
+                } else {
+                    // Removing a middle element
+                    SLIST_REMOVE_AFTER(prev, next);
+                }
+                free(iter);
+            }
+            prev = iter;
+        }
+        CONTEXT_UNLOCK(g_context.lock, "fgr_msg_receive_handler_remove_by_cb()");
+    }
+}
+
+// Remove a message receive handler.
+void fgr_msg_receive_handler_remove_by_type(uint16_t msg_type)
+{
+    if (g_context.lock) {
+
+        CONTEXT_LOCK(g_context.lock, "fgr_msg_receive_handler_remove_by_type()");
+        struct msg_rx_cb_t *iter;
+        struct msg_rx_cb_t *prev = NULL;
+        SLIST_FOREACH(iter, &g_context.msg_rx_cb_list, next) {
+            if (iter->msg_type == msg_type) {  // Found Bob
+                if (prev == NULL) {
+                    // Removing the first element
+                    SLIST_REMOVE_HEAD(&g_context.msg_rx_cb_list, next);
+                } else {
+                    // Removing a middle element
+                    SLIST_REMOVE_AFTER(prev, next);
+                }
+                free(iter);
+            }
+            prev = iter;
+        }
+        CONTEXT_UNLOCK(g_context.lock, "fgr_msg_receive_handler_remove_by_type()");
+    }
+}
+
 // Stop receiving messages.
 void fgr_msg_receive_stop()
 {
-    if (g_msg_cfg.lock) {
+    if (g_context.lock) {
 
-        CONTEXT_LOCK(g_msg_cfg.lock, "fgr_msg_receive_stop()");
-        fgr_socket_receive_stop(&g_msg_cfg.context_rx);
-        g_msg_cfg.cb = NULL;
-        g_msg_cfg.cb_param = NULL;
-        CONTEXT_UNLOCK(g_msg_cfg.lock, "fgr_msg_receive_stop()");
+        CONTEXT_LOCK(g_context.lock, "fgr_msg_receive_stop()");
+        fgr_socket_receive_stop(&g_context.context_rx);
+        while (!SLIST_EMPTY(&g_context.msg_rx_cb_list)) {
+            struct msg_rx_cb_t *p = SLIST_FIRST(&g_context.msg_rx_cb_list);
+            SLIST_REMOVE_HEAD(&g_context.msg_rx_cb_list, next);
+            free(p);
+        }
+        CONTEXT_UNLOCK(g_context.lock, "fgr_msg_receive_stop()");
     }
+}
+
+// Populate a buffer with a string that is the name of the
+// given message type.  Return value is either negative error code
+// or the length of the returned string (i.e. what strlen() would return).
+int32_t fgr_msg_name(uint16_t type, char *buffer, size_t length)
+{
+    int32_t err = -ESP_ERR_INVALID_ARG;
+    uint8_t variety = type >> 12;
+    const char *variety_str = NULL;
+    const char *type_str = NULL;
+
+    if (buffer && (length > 0)) {
+        err = -ESP_ERR_NOT_FOUND;
+        type &= 0x0fff;
+        if (variety < FGR_UTIL_ARRAY_LENGTH(g_msg_variety_str_list)) {
+            variety_str = g_msg_variety_str_list[variety];
+            if ((variety == FGR_MSG_TYPE_REQ) || (variety == FGR_MSG_TYPE_CNF)) {
+                if (type < FGR_UTIL_ARRAY_LENGTH(g_msg_req_cnf_str_list)) {
+                    type_str = g_msg_req_cnf_str_list[type];
+                }
+            } else if ((variety == FGR_MSG_TYPE_IND) || (variety == FGR_MSG_TYPE_RSP)) {
+                if (type < FGR_UTIL_ARRAY_LENGTH(g_msg_ind_rsp_str_list)) {
+                    type_str = g_msg_ind_rsp_str_list[type];
+                }
+            }
+        }
+
+        if (variety_str && type_str) {
+            err = snprintf(buffer, length, "FGR_%s_%s", variety_str, type_str);
+        } else {
+            err = snprintf(buffer, length, "%s", MSG_UNKNOWN_STR);
+        }
+
+        // Ensure a null terminator and no overrun
+        if (err >= (int32_t) length) {
+            err = length - 1;
+            buffer[length - 1] = 0;
+        }
+    }
+
+    return err;
 }
 
 // Deinitialise the messaging interface.

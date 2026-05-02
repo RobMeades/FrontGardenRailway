@@ -106,7 +106,7 @@ typedef struct {
  * -------------------------------------------------------------- */
 
 /* ----------------------------------------------------------------
- * STATIC FUNCTIONS
+ * STATIC FUNCTIONS: TASKS
  * -------------------------------------------------------------- */
 
 // Task to maintain a socket.
@@ -263,10 +263,10 @@ static void task_rx(void *param)
             int32_t err = recv(context->sock, buffer, sizeof(buffer), 0);
             if (err > 0) {
                 // Process received data
-                ESP_LOGI(TAG, "Received %d byte(s) from server:", err);
-                char debug_buffer[128];
-                fgr_debug_hex_dump_to_buffer((const void *) buffer, err, debug_buffer, sizeof(debug_buffer));
-                ESP_LOGI(TAG, "%s", debug_buffer);
+                ESP_LOGD(TAG, "Received %d byte(s) from server:", err);
+                char buffer_str[128];
+                fgr_debug_hex_dump_to_buffer((const void *) buffer, err, buffer_str, sizeof(buffer_str));
+                ESP_LOGD(TAG, "%s", buffer_str);
                 if (context->rx_cb) {
                     context->rx_cb(buffer, err, context->rx_cb_param);
                 }

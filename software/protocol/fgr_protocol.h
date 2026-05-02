@@ -141,27 +141,27 @@ typedef struct __attribute__((packed)) {
 
 // Confirmation message header.
 typedef struct __attribute__((packed)) {
-    uint16_t type;      // fgr_req_cnf_t, top four bits ORed with FGR_MSG_TYPE_CNF
+    uint16_t type;      // fgr_req_cnf_t, top four bits ORed with FGR_MSG_TYPE_CNF, big-endian
     uint8_t reference;  // Reference copied from the request being confirmed
     uint8_t error;      // fgr_error_t;
 } fgr_msg_header_cnf_t;
 
 // Indication message header.
 typedef struct __attribute__((packed)) {
-    uint16_t type;      // fgr_ind_rsp_t, top four bits ORed with FGR_MSG_TYPE_IND
+    uint16_t type;      // fgr_ind_rsp_t, top four bits ORed with FGR_MSG_TYPE_IND, big-endian
     uint8_t reference;  // Reference that may to copied into any response
     uint8_t state;      // fgr_state_t;
 } fgr_msg_header_ind_t;
 
 // Response message header.
 typedef struct __attribute__((packed)) {
-    uint16_t type;      // fgr_ind_rsp_t, top four bits ORed with FGR_MSG_TYPE_RSP
+    uint16_t type;      // fgr_ind_rsp_t, top four bits ORed with FGR_MSG_TYPE_RSP, big-endian
     uint8_t reference;  // Reference copied from the indication that elicited the response
 } fgr_msg_header_rsp_t;
 
 // Log message header.
 typedef struct __attribute__((packed)) {
-    uint16_t type;      // zero, top four bits ORed with FGR_MSG_TYPE_LOG
+    uint16_t type;      // zero, top four bits ORed with FGR_MSG_TYPE_LOG, big-endian
     uint8_t level;      // fgr_log_level_t
 } fgr_msg_header_log_t;
 
@@ -177,7 +177,7 @@ typedef union {
 
 // Message body.
 typedef struct __attribute__((packed)) {
-    uint32_t length;                            // The number of bytes to follow
+    uint32_t length;                            // The number of bytes to follow, big-endian
     uint8_t contents[FGR_MSG_CONTENTS_MAX_LEN]; // The message contents; when used in
                                                 // fgr_log_msg_t the string shall be
                                                 // null-terminated and the length

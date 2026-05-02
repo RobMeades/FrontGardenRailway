@@ -62,7 +62,7 @@ extern const uint8_t g_server_cert_pem_start[] asm("_binary_ca_cert_pem_start");
  * -------------------------------------------------------------- */
 
 // Generic initialisation.
-esp_err_t init(void)
+esp_err_t init(fgr_state_t *state)
 {
     // Print out our Wi-Fi MAC address
     fgr_debug_print_mac_address();
@@ -101,6 +101,11 @@ esp_err_t init(void)
         err = fgr_log_init(CONFIG_FGR_NETWORK_CONTROLLER_IP_ADDRESS, CONFIG_FGR_LOG_PORT, FGR_LOG_LEVEL_INFO);
     }
 
+    // Initialise messaging
+    if (err == ESP_OK) {
+        err = fgr_msg_init(CONFIG_FGR_NETWORK_CONTROLLER_IP_ADDRESS, CONFIG_FGR_MSG_PORT, CONFIG_FGR_MSG_HEARTBEAT_SECONDS, state);
+    }
+
 #else
     ESP_LOGW(TAG, "CONFIG_FGR_APP_NO_WIFI is defined, not connecting to WiFi.");
 #endif
@@ -122,9 +127,10 @@ esp_err_t init(void)
 // Entry point.
 void app_main(void)
 {
+    fgr_state_t state = FGR_STATE_STARTED;
     ESP_LOGI(TAG, "app_main start.");
 
-    int32_t err = init();
+    int32_t err = init(&state);
     if (err == ESP_OK) {
         ESP_LOGI(TAG, "Initialization complete.");
 
@@ -146,6 +152,7 @@ void app_main(void)
     }
 
     fgr_rcwl9610a_deinit();
+    fgr_msg_deinit();
     fgr_log_deinit();
     fgr_network_deinit();
     esp_restart();
