@@ -59,7 +59,7 @@ extern "C" {
 typedef bool (*fgr_msg_rx_cb_t)(fgr_msg_t *msg, void *param);
 
 /* ----------------------------------------------------------------
- * FUNCTIONS
+ * FUNCTIONS: INITIALISATION/DEINITIALISATION
  * -------------------------------------------------------------- */
 
 /** Initialise the messaging interface.
@@ -89,6 +89,14 @@ typedef bool (*fgr_msg_rx_cb_t)(fgr_msg_t *msg, void *param);
 int32_t fgr_msg_init(const char *server_ip, uint16_t port,
                      size_t heartbeat_seconds, fgr_state_t *state);
 
+/** Deinitialise the messaging interface.
+ */
+void fgr_msg_deinit();
+
+/* ----------------------------------------------------------------
+ * FUNCTIONS: SENDING
+ * -------------------------------------------------------------- */
+
 /** Send a CNF message.
  *
  * @param cnf     the CNF message to send.
@@ -97,8 +105,8 @@ int32_t fgr_msg_init(const char *server_ip, uint16_t port,
  *                be NULL, must be non-NULL if length is non-zero.
  * @param length  the amount of data at buffer, ignored if
  *                buffer is NULL.
- * @return        ESP_OK on success, else a negative value
- *                from esp_err_t.
+ * @return        on success the reference that was used in
+ *                the message, else a negative value from esp_err_t.
  */
 int32_t fgr_msg_send_cnf(fgr_req_cnf_t cnf, fgr_error_t error,
                          const void *buffer, size_t length);
@@ -111,11 +119,15 @@ int32_t fgr_msg_send_cnf(fgr_req_cnf_t cnf, fgr_error_t error,
  *                be NULL, must be non-NULL if length is non-zero.
  * @param length  the amount of data at buffer, ignored if
  *                buffer is NULL.
- * @return        ESP_OK on success, else a negative value
- *                from esp_err_t.
+ * @return        on success the reference that was used in
+ *                the message, else a negative value from esp_err_t.
  */
 int32_t fgr_msg_send_ind(fgr_ind_rsp_t ind, fgr_state_t state,
                          const void *buffer, size_t length);
+
+/* ----------------------------------------------------------------
+ * FUNCTIONS: RECEIVING
+ * -------------------------------------------------------------- */
 
 /** Start receiving messages.  A task is created to receive
  * messages; call fgr_msg_receive_handler_add() to get them,
@@ -190,6 +202,10 @@ void fgr_msg_receive_handler_remove_by_type(uint16_t msg_type);
  */
 void fgr_msg_receive_stop();
 
+/* ----------------------------------------------------------------
+ * FUNCTIONS: DEBUG
+ * -------------------------------------------------------------- */
+
 /** Populate a buffer with a string that is the name of the
  * given message type.  The returned string is guaranteed
  * to be null terminated.
@@ -210,9 +226,52 @@ void fgr_msg_receive_stop();
  */
 int32_t fgr_msg_name(uint16_t msg_type, char *buffer, size_t length);
 
-/** Deinitialise the messaging interface.
+/** Populate a buffer with the name of the error value
+ * from a CNF message.  The returned string is guaranteed
+ * to be null terminated.
+ *
+ * @param error   the error.
+ * @param buffer  a buffer in which to store the name; allow
+ *                at least 32 characters; cannot be NULL.
+ * @param length  the amount of storage at buffer, must be
+ *                non-zero.
+ * @return        the length of the string written to buffer
+ *                (i.e. what strlen() would return) else
+ *                negative error code from esp_err_t.
  */
-void fgr_msg_deinit();
+int32_t fgr_msg_error_name(fgr_error_t error, char *buffer, size_t length);
+
+/** Populate a buffer with the name of the state value
+ * from an IND message.  The returned string is guaranteed
+ * to be null terminated.
+ *
+ * @param state   the state.
+ * @param buffer  a buffer in which to store the name; allow
+ *                at least 32 characters; cannot be NULL.
+ * @param length  the amount of storage at buffer, must be
+ *                non-zero.
+ * @return        the length of the string written to buffer
+ *                (i.e. what strlen() would return) else
+ *                negative error code from esp_err_t.
+ */
+int32_t fgr_msg_state_name(fgr_state_t error, char *buffer, size_t length);
+
+/** Print a summary of a message for debug purposes.
+ *
+ * @param msg_type    the message type i.e. one of
+ *                    fgr_req_cnf_t or fgr_ind_rsp_t, with
+ *                    the top 4 bits OR'ed with FGR_MSG_TYPE_REQ
+ *                    FGR_MSG_TYPE_CNF, FGR_MSG_TYPE_IND or
+ *                    FGR_MSG_TYPE_RSP, native endian.
+ * @param error_state the error (for a CNF) or state (for an IND)
+ *                    value from the message, ignored for
+ *                    REQ or RSP messages.
+ * @param reference   the message reference.
+ * @param length      the amount of data included in the body
+ *                    of the message.
+ */
+void fgr_msg_print_summary(uint16_t msg_type, uint8_t error_state,
+                           uint8_t reference, uint32_t length);
 
 #ifdef __cplusplus
 }

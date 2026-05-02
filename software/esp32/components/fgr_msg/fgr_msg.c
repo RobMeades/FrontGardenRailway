@@ -39,7 +39,7 @@
 // Logging prefix.
 #define TAG "msg"
 
-// String to use to describe an unknown message.
+// String to use to describe an unknown message, error value or state.
 #define MSG_UNKNOWN_STR "UNKNOWN"
 
 /* ----------------------------------------------------------------
@@ -93,16 +93,26 @@ typedef struct {
  * -------------------------------------------------------------- */
 
 // List of known message variety names, in order.
-static const char * g_msg_variety_str_list[] = {"NULL", "REQ", "CNF", "IND", "RSP", "LOG"};
+static const char *g_msg_variety_str_list[] = {"NULL", "REQ", "CNF", "IND", "RSP", "LOG"};
 
 // List of known message REQ/CNF names, in order.
-static const char * g_msg_req_cnf_str_list[] = {"NULL", "CFG", "START", "STOP",
-                                                "LOG_LEVEL", "LOG_START", "LOG_STOP",
-                                                "REBOOT"};
+static const char *g_msg_req_cnf_str_list[] = {"NULL", "CFG", "START", "STOP",
+                                               "LOG_LEVEL", "LOG_START", "LOG_STOP",
+                                               "REBOOT"};
 
-// Table of known message IND/RSP names, in order.
-static const char * g_msg_ind_rsp_str_list[] = {"NULL", "NEEDS_CFG", "START", "STOP",
-                                                "HEARTBEAT"};
+// List of known message IND/RSP names, in order.
+static const char *g_msg_ind_rsp_str_list[] = {"NULL", "NEEDS_CFG", "START", "STOP",
+                                               "HEARTBEAT"};
+
+// List of known message error codes, in order.
+static const char *g_msg_error_str_list[] = {"NONE", "GENERIC", "INVALID_REQUEST",
+                                             "UNHANDLED_REQUEST", "MSG_TOO_LONG",
+                                             "ABORTED", "BUSY", "TIMEOUT",
+                                             "OUT_OF_RESOURCES", "HARDWARE"};
+// List of known message states, in order.
+static const char *g_msg_state_str_list[] = {"NOT_POPULATED", "NEEDS_CFG", "STARTED",
+                                             "STOPPED", "BUSY", "GENERIC_FAILED",
+                                             "HARDWARE_FAILURE"};
 
 // Context.
 static context_t g_context = {
@@ -374,6 +384,7 @@ static int32_t send_msg(uint16_t type, uint8_t error_state,
                 err = fgr_socket_send(g_context.sock, buffer, length, FGR_SOCKET_TX_RETRY_COUNT);
             }
             if (err == ESP_OK) {
+                err = _header->cnf.reference;
                 char buffer_str[64] = {0};
                 fgr_msg_name(type, buffer_str, sizeof(buffer_str));
                 ESP_LOGD(TAG, "Sent %s [0x%04x], reference %d, body length %d.",
@@ -416,7 +427,7 @@ static void clean_up()
 }
 
 /* ----------------------------------------------------------------
- * PUBLIC FUNCTIONS
+ * PUBLIC FUNCTIONS: INITIALISATION/DEINITIALISATION
  * -------------------------------------------------------------- */
 
 // Initialise the messaging interface.
@@ -478,6 +489,16 @@ int32_t fgr_msg_init(const char *server_ip, uint16_t port,
     return (int32_t) err;
 }
 
+// Deinitialise the messaging interface.
+void fgr_msg_deinit()
+{
+    clean_up();
+}
+
+/* ----------------------------------------------------------------
+ * PUBLIC FUNCTIONS: SENDING
+ * -------------------------------------------------------------- */
+
 // Send a CNF message.
 int32_t fgr_msg_send_cnf(fgr_req_cnf_t cnf, fgr_error_t error,
                          const void *buffer, size_t length)
@@ -493,6 +514,10 @@ int32_t fgr_msg_send_ind(fgr_ind_rsp_t ind, fgr_state_t state,
     ind = (ind & (0x0fff)) | (FGR_MSG_TYPE_IND << 12);
     return send_msg((uint16_t) ind, (uint8_t) state, (const uint8_t *) buffer, length);
 }
+
+/* ----------------------------------------------------------------
+ * PUBLIC FUNCTIONS: RECEIVING
+ * -------------------------------------------------------------- */
 
 // Start receiving messages.
 int32_t fgr_msg_receive_start()
@@ -526,8 +551,8 @@ int32_t fgr_msg_receive_handler_add(uint16_t msg_type,
         err = -ESP_ERR_INVALID_ARG;
         if (cb &&
             ((msg_type == 0) ||
-             (msg_type >> 12 == FGR_MSG_TYPE_REQ) ||
-             (msg_type >> 12 == FGR_MSG_TYPE_IND))) {
+             ((msg_type >> 12) == FGR_MSG_TYPE_REQ) ||
+             ((msg_type >> 12) == FGR_MSG_TYPE_IND))) {
             err = -ESP_ERR_NO_MEM;
             msg_rx_cb_t *msg_rx_cb = (msg_rx_cb_t *) malloc(sizeof(*msg_rx_cb));
             if (msg_rx_cb) {
@@ -613,34 +638,36 @@ void fgr_msg_receive_stop()
     }
 }
 
-// Populate a buffer with a string that is the name of the
-// given message type.  Return value is either negative error code
-// or the length of the returned string (i.e. what strlen() would return).
-int32_t fgr_msg_name(uint16_t type, char *buffer, size_t length)
+/* ----------------------------------------------------------------
+ * PUBLIC FUNCTIONS: DEBUG
+ * -------------------------------------------------------------- */
+
+// Populate a buffer with a string that is the name of the given message.
+int32_t fgr_msg_name(uint16_t msg_type, char *buffer, size_t length)
 {
     int32_t err = -ESP_ERR_INVALID_ARG;
-    uint8_t variety = type >> 12;
+    uint8_t variety = msg_type >> 12;
     const char *variety_str = NULL;
-    const char *type_str = NULL;
+    const char *msg_type_str = NULL;
 
     if (buffer && (length > 0)) {
         err = -ESP_ERR_NOT_FOUND;
-        type &= 0x0fff;
+        msg_type &= 0x0fff;
         if (variety < FGR_UTIL_ARRAY_LENGTH(g_msg_variety_str_list)) {
             variety_str = g_msg_variety_str_list[variety];
             if ((variety == FGR_MSG_TYPE_REQ) || (variety == FGR_MSG_TYPE_CNF)) {
-                if (type < FGR_UTIL_ARRAY_LENGTH(g_msg_req_cnf_str_list)) {
-                    type_str = g_msg_req_cnf_str_list[type];
+                if (msg_type < FGR_UTIL_ARRAY_LENGTH(g_msg_req_cnf_str_list)) {
+                    msg_type_str = g_msg_req_cnf_str_list[msg_type];
                 }
             } else if ((variety == FGR_MSG_TYPE_IND) || (variety == FGR_MSG_TYPE_RSP)) {
-                if (type < FGR_UTIL_ARRAY_LENGTH(g_msg_ind_rsp_str_list)) {
-                    type_str = g_msg_ind_rsp_str_list[type];
+                if (msg_type < FGR_UTIL_ARRAY_LENGTH(g_msg_ind_rsp_str_list)) {
+                    msg_type_str = g_msg_ind_rsp_str_list[msg_type];
                 }
             }
         }
 
-        if (variety_str && type_str) {
-            err = snprintf(buffer, length, "FGR_%s_%s", variety_str, type_str);
+        if (variety_str && msg_type_str) {
+            err = snprintf(buffer, length, "FGR_%s_%s", variety_str, msg_type_str);
         } else {
             err = snprintf(buffer, length, "%s", MSG_UNKNOWN_STR);
         }
@@ -655,10 +682,91 @@ int32_t fgr_msg_name(uint16_t type, char *buffer, size_t length)
     return err;
 }
 
-// Deinitialise the messaging interface.
-void fgr_msg_deinit()
+// Populate a buffer with a string that is the name of the given error.
+int32_t fgr_msg_error_name(fgr_error_t error, char *buffer, size_t length)
 {
-    clean_up();
+    int32_t err = -ESP_ERR_INVALID_ARG;
+
+    if (buffer && (length > 0)) {
+        const char *error_str = NULL;
+        err = -ESP_ERR_NOT_FOUND;
+        if (error < FGR_UTIL_ARRAY_LENGTH(g_msg_error_str_list)) {
+            error_str = g_msg_error_str_list[error];
+        }
+
+        if (error_str) {
+            err = snprintf(buffer, length, "FGR_ERROR_%s", error_str);
+        } else {
+            err = snprintf(buffer, length, "%s", MSG_UNKNOWN_STR);
+        }
+
+        // Ensure a null terminator and no overrun
+        if (err >= (int32_t) length) {
+            err = length - 1;
+            buffer[length - 1] = 0;
+        }
+    }
+
+    return err;
+}
+
+// Populate a buffer with a string that is the name of the given state.
+int32_t fgr_msg_state_name(fgr_state_t state, char *buffer, size_t length)
+{
+    int32_t err = -ESP_ERR_INVALID_ARG;
+
+    if (buffer && (length > 0)) {
+        const char *state_str = NULL;
+        err = -ESP_ERR_NOT_FOUND;
+        if (state < FGR_UTIL_ARRAY_LENGTH(g_msg_state_str_list)) {
+            state_str = g_msg_state_str_list[state];
+        }
+
+        if (state_str) {
+            err = snprintf(buffer, length, "FGR_STATE_%s", state_str);
+        } else {
+            err = snprintf(buffer, length, "%s", MSG_UNKNOWN_STR);
+        }
+
+        // Ensure a null terminator and no overrun
+        if (err >= (int32_t) length) {
+            err = length - 1;
+            buffer[length - 1] = 0;
+        }
+    }
+
+    return err;
+}
+
+// Print a summary of a message for debug purposes.
+void fgr_msg_print_summary(uint16_t msg_type, uint8_t error_state,
+                           uint8_t reference, uint32_t length)
+{
+    char buffer_msg_name[64];
+    char buffer_error_state[32];
+    const char *msg_direction = "Sent";
+
+    fgr_msg_name(msg_type, buffer_msg_name, sizeof(buffer_msg_name));
+    if (((msg_type >> 12) == FGR_MSG_TYPE_REQ) ||
+        ((msg_type >> 12) == FGR_MSG_TYPE_RSP)) {
+        msg_direction = "Received";
+        ESP_LOGI(TAG, "%s %s [0x%04x], reference %d, length %d.",
+                msg_direction, buffer_msg_name, msg_type, reference, length);
+    } else {
+        if ((msg_type >> 12) == FGR_MSG_TYPE_CNF) {
+            fgr_msg_error_name(error_state, buffer_error_state, sizeof(buffer_error_state));
+            ESP_LOGI(TAG, "%s %s [0x%04x], error %s [%d], reference %d, length %d.",
+                     msg_direction, buffer_msg_name, msg_type,
+                     buffer_error_state, error_state, reference, length);
+        } else if ((msg_type >> 12) == FGR_MSG_TYPE_IND) {
+            fgr_msg_state_name(error_state, buffer_error_state, sizeof(buffer_error_state));
+            ESP_LOGI(TAG, "%s %s [0x%04x], state %s [%d], reference %d, length %d.",
+                     msg_direction, buffer_msg_name, msg_type,
+                     buffer_error_state, error_state, reference, length);
+        } else {
+            ESP_LOGI(TAG, "Unknown message type (0x%04x).", msg_type);
+        }
+    }
 }
 
 // End of file

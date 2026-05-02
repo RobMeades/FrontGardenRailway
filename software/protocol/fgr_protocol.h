@@ -110,7 +110,7 @@ typedef enum {
     FGR_ERROR_NONE              = 0,
     FGR_ERROR_GENERIC           = 1,
     FGR_ERROR_INVALID_REQUEST   = 2,
-    FGR_ERROR_UNHANDLED_REQEST  = 3,
+    FGR_ERROR_UNHANDLED_REQUEST = 3,
     FGR_ERROR_INVALID_PARAM     = 4,
     FGR_ERROR_MSG_TOO_LONG      = 5,
     FGR_ERROR_ABORTED           = 6,

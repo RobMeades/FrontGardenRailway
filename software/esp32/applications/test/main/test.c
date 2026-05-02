@@ -121,11 +121,8 @@ static bool msg_receive_default_cb(fgr_msg_t *msg, void *param)
 {
     (void) param;
 
-    char buffer_str[64] = {0};
-    fgr_msg_name(msg->header.req.type, buffer_str, sizeof(buffer_str));
-    ESP_LOGI(TAG, "Received %s [0x%04x], reference %d, body length %d.",
-             buffer_str, msg->header.req.type, msg->header.req.reference,
-             msg->body.length);
+    fgr_msg_print_summary(msg->header.req.type, 0,
+                          msg->header.req.reference, msg->body.length);
 
     return true;
 }
@@ -138,7 +135,6 @@ static bool msg_receive_default_cb(fgr_msg_t *msg, void *param)
 void app_main(void)
 {
     fgr_state_t state = FGR_STATE_NEEDS_CFG;
-    char buffer_str[64] = {0};
 
     ESP_LOGI(TAG, "app_main start.");
 
@@ -155,9 +151,10 @@ void app_main(void)
 
     if (err == ESP_OK) {
         // Request configuration
-        if (fgr_msg_send_ind(FGR_IND_RSP_NEEDS_CFG, state, NULL, 0) == ESP_OK) {
-            fgr_msg_name(MSG_IND(FGR_IND_RSP_NEEDS_CFG), buffer_str, sizeof(buffer_str));
-            ESP_LOGI(TAG, "Sent %s [0x%04x].", buffer_str, MSG_IND(FGR_IND_RSP_NEEDS_CFG));
+        err = fgr_msg_send_ind(FGR_IND_RSP_NEEDS_CFG, state, NULL, 0);
+        if (err >= 0) {
+            fgr_msg_print_summary(MSG_IND(FGR_IND_RSP_NEEDS_CFG), state, err, 0);
+            err = ESP_OK;
         }
 
         // Allow us to feed the watchdog
