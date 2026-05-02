@@ -24,8 +24,8 @@
  * Note: the message elements are encoded big-endian or network
  * order on the wire (this is most readable and most common);
  * since the ESP32 and Raspberry Pi are both little-endian,
- * conversion is required for the type (htons/ntohs) and length
- * (htonl/ntohl) fields.
+ * conversion is required for the 16-bit type (htons/ntohs) and
+ * 32-bit length (htonl/ntohl) fields.
  *
  * Note: the underlying transport is assumed to be perfect and ordered.
  */

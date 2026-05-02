@@ -19,7 +19,7 @@ FGR_MSG_CONTENTS_MAX_LEN = 256
 FGR_LOG_STRING_MAX_LEN = 255
 
 class FGRMsgType(IntEnum):
-    """Message types (top 4 bits of header)"""
+    """Message types (top 4 bits of type field)"""
     FGR_MSG_TYPE_NULL = 0
     FGR_MSG_TYPE_REQ = 1
     FGR_MSG_TYPE_CNF = 2
@@ -81,159 +81,196 @@ class FGRState(IntEnum):
     FGR_STATE_LAST = 31
 
 class FGRMsgHeader:
-    """Message header union - represents all header types"
-    All multi-byte fields are stored in network byte order (big-endian)"""
+    """
+    Message header - 4 bytes in network byte order (big-endian)
+    
+    Layout on wire:
+      - Bytes 0-1: type (top 4 bits = message type, bottom 12 bits = subtype)
+      - Byte 2: reference
+      - Byte 3: for CNF: error, for IND: state, else 0
+    """
 
     def __init__(self):
-        self._header = 0
-
-    @property
-    def raw(self) -> int:
-        """Get raw header value (in host byte order)"""
-        return self._header
-
-    @raw.setter
-    def raw(self, value: int):
-        """Set raw header value (in host byte order)"""
-        self._header = value
+        self._type: int = 0
+        self._reference: int = 0
+        self._error_or_state: int = 0
 
     @classmethod
     def from_network_bytes(cls, data: bytes) -> "FGRMsgHeader":
         """Create header from network bytes (big-endian)"""
+        if len(data) < 4:
+            raise ValueError(f"Header too short: {len(data)} bytes")
         header = cls()
-        # Raw header is stored in host byte order, so convert from network
-        header._header = struct.unpack(">I", data)[0]
+        header._type = struct.unpack(">H", data[:2])[0]
+        header._reference = data[2]
+        header._error_or_state = data[3]
         return header
 
     def to_network_bytes(self) -> bytes:
         """Convert header to network bytes (big-endian)"""
-        return struct.pack(">I", self._header)
+        return struct.pack(">HBB", self._type & 0xFFFF,
+                          self._reference & 0xFF,
+                          self._error_or_state & 0xFF)
 
-    # Request header accessors
+    @property
+    def message_type(self) -> int:
+        """Get the message type from the top 4 bits of the type field"""
+        return (self._type >> 12) & 0x0F
+
+    @message_type.setter
+    def message_type(self, value: int):
+        """Set the message type (top 4 bits)"""
+        self._type = (self._type & 0x0FFF) | ((value & 0x0F) << 12)
+
+    @property
+    def subtype(self) -> int:
+        """Get the message subtype (bottom 12 bits of type field)"""
+        return self._type & 0x0FFF
+
+    @subtype.setter
+    def subtype(self, value: int):
+        """Set the message subtype (bottom 12 bits)"""
+        self._type = (self._type & 0xF000) | (value & 0x0FFF)
+
+    @property
+    def reference(self) -> int:
+        """Get the reference field"""
+        return self._reference
+
+    @reference.setter
+    def reference(self, value: int):
+        self._reference = value & 0xFF
+
+    @property
+    def error_or_state(self) -> int:
+        """Get error (for CNF) or state (for IND) field"""
+        return self._error_or_state
+
+    @error_or_state.setter
+    def error_or_state(self, value: int):
+        self._error_or_state = value & 0xFF
+
+    # Legacy properties for backward compatibility with the union approach
+    @property
+    def raw(self) -> int:
+        """Get raw header value (host order) for compatibility"""
+        return (self._type << 16) | (self._reference << 8) | self._error_or_state
+
+    @raw.setter
+    def raw(self, value: int):
+        """Set raw header value (host order) for compatibility"""
+        self._type = (value >> 16) & 0xFFFF
+        self._reference = (value >> 8) & 0xFF
+        self._error_or_state = value & 0xFF
+
+    # Request header accessors for compatibility
     @property
     def req_type(self) -> int:
-        """Get request type (top 12 bits are type, top 4 bits are message type)"""
-        return self._header & 0x0FFF
+        return self.subtype
 
     @req_type.setter
     def req_type(self, value: int):
-        msg_type = (self._header >> 12) & 0x0F
-        self._header = (msg_type << 12) | (value & 0x0FFF)
+        self.subtype = value
 
     @property
     def req_reference(self) -> int:
-        """Get request reference (bits 8-15 of the raw header)"""
-        return (self._header >> 8) & 0xFF
+        return self.reference
 
     @req_reference.setter
     def req_reference(self, value: int):
-        self._header = (self._header & 0xFFFF00FF) | ((value & 0xFF) << 8)
+        self.reference = value
 
     # Confirmation header accessors
     @property
     def cnf_type(self) -> int:
-        """Get confirmation type"""
-        return self._header & 0x0FFF
+        return self.subtype
 
     @cnf_type.setter
     def cnf_type(self, value: int):
-        msg_type = (self._header >> 12) & 0x0F
-        self._header = (msg_type << 12) | (value & 0x0FFF)
+        self.subtype = value
 
     @property
     def cnf_reference(self) -> int:
-        """Get confirmation reference"""
-        return (self._header >> 8) & 0xFF
+        return self.reference
 
     @cnf_reference.setter
     def cnf_reference(self, value: int):
-        self._header = (self._header & 0xFFFF00FF) | ((value & 0xFF) << 8)
+        self.reference = value
 
     @property
     def cnf_error(self) -> int:
-        """Get confirmation error"""
-        return (self._header >> 16) & 0xFF
+        return self.error_or_state
 
     @cnf_error.setter
     def cnf_error(self, value: int):
-        self._header = (self._header & 0xFF00FFFF) | ((value & 0xFF) << 16)
+        self.error_or_state = value
 
     # Indication header accessors
     @property
     def ind_type(self) -> int:
-        """Get indication type"""
-        return self._header & 0x0FFF
+        return self.subtype
 
     @ind_type.setter
     def ind_type(self, value: int):
-        msg_type = (self._header >> 12) & 0x0F
-        self._header = (msg_type << 12) | (value & 0x0FFF)
+        self.subtype = value
 
     @property
     def ind_reference(self) -> int:
-        """Get indication reference"""
-        return (self._header >> 8) & 0xFF
+        return self.reference
 
     @ind_reference.setter
     def ind_reference(self, value: int):
-        self._header = (self._header & 0xFFFF00FF) | ((value & 0xFF) << 8)
+        self.reference = value
 
     @property
     def ind_state(self) -> int:
-        """Get indication state"""
-        return (self._header >> 16) & 0xFF
+        return self.error_or_state
 
     @ind_state.setter
     def ind_state(self, value: int):
-        self._header = (self._header & 0xFF00FFFF) | ((value & 0xFF) << 16)
+        self.error_or_state = value
 
     # Response header accessors
     @property
     def rsp_type(self) -> int:
-        """Get response type"""
-        return self._header & 0x0FFF
+        return self.subtype
 
     @rsp_type.setter
     def rsp_type(self, value: int):
-        msg_type = (self._header >> 12) & 0x0F
-        self._header = (msg_type << 12) | (value & 0x0FFF)
+        self.subtype = value
 
     @property
     def rsp_reference(self) -> int:
-        """Get response reference"""
-        return (self._header >> 8) & 0xFF
+        return self.reference
 
     @rsp_reference.setter
     def rsp_reference(self, value: int):
-        self._header = (self._header & 0xFFFF00FF) | ((value & 0xFF) << 8)
+        self.reference = value
 
     # Log header accessors
     @property
     def log_level(self) -> int:
-        """Get log level"""
-        return (self._header >> 8) & 0xFF
+        return self.error_or_state
 
     @log_level.setter
     def log_level(self, value: int):
-        self._header = (self._header & 0xFFFF00FF) | ((value & 0xFF) << 8)
+        self.error_or_state = value
 
     def pack(self) -> bytes:
         """Pack header into network bytes (big-endian)"""
-        return struct.pack(">I", self._header)
+        return self.to_network_bytes()
 
     @classmethod
     def unpack(cls, data: bytes) -> "FGRMsgHeader":
         """Unpack network bytes (big-endian) into header"""
-        header = cls()
-        header._header = struct.unpack(">I", data)[0]
-        return header
+        return cls.from_network_bytes(data)
 
     def get_message_type(self) -> int:
-        """Get the message type from the top 4 bits"""
-        return (self._header >> 12) & 0x0F
+        """Get the message type from the top 4 bits of the type field"""
+        return self.message_type
 
     def __repr__(self):
-        return f"<FGRMsgHeader raw=0x{self._header:08X}>"
+        return f"<FGRMsgHeader type=0x{self._type:04X} ref={self._reference} err/state={self._error_or_state}>"
 
 
 class FGRMsg:
@@ -252,11 +289,10 @@ class FGRMsg:
     def _set_header_fields(self, msg_type: int, msg_subtype: int,
                            reference: int, error_or_state: int):
         """Set header fields based on message type"""
-        raw_header = (msg_type << 12) | (msg_subtype & 0x0FFF)
-        raw_header |= (reference & 0xFF) << 8
-        if msg_type in [2, 3]:  # CNF or IND
-            raw_header |= (error_or_state & 0xFF) << 16
-        self.header.raw = raw_header
+        self.header.message_type = msg_type
+        self.header.subtype = msg_subtype
+        self.header.reference = reference
+        self.header.error_or_state = error_or_state
 
     @classmethod
     def create_req(cls, req_type: int, reference: int = 0,
@@ -294,26 +330,26 @@ class FGRMsg:
     @property
     def message_type(self) -> int:
         """Get the message type"""
-        return self.header.get_message_type()
+        return self.header.message_type
 
     @property
     def subtype(self) -> int:
         """Get the message subtype (request/indication type, etc.)"""
-        return self.header.raw & 0x0FFF
+        return self.header.subtype
 
     @property
     def reference(self) -> int:
         """Get the reference field"""
-        return (self.header.raw >> 8) & 0xFF
+        return self.header.reference
 
     @property
     def error_or_state(self) -> int:
         """Get error (for CNF) or state (for IND) field"""
-        return (self.header.raw >> 16) & 0xFF
+        return self.header.error_or_state
 
     def pack(self) -> bytes:
         """Pack message into network bytes (big-endian) for transmission"""
-        # Pack header (converts to big-endian)
+        # Pack header
         header_bytes = self.header.pack()
         # Pack body (length in big-endian + contents)
         content_length = len(self.contents)
@@ -328,7 +364,7 @@ class FGRMsg:
         if len(data) < 4:  # At least header
             raise ValueError(f"Message too short: {len(data)} bytes")
         
-        # Unpack header (converts from big-endian)
+        # Unpack header
         header = FGRMsgHeader.unpack(data[:4])
         
         # Unpack body
@@ -388,6 +424,10 @@ def receive_message(sock: socket.socket, timeout: Optional[float] = None) -> Opt
         if len(length_data) != 4:
             raise ValueError(f"Incomplete length field: got {len(length_data)} bytes")
         content_length = struct.unpack(">I", length_data)[0]
+        
+        # Check for insane lengths (prevent memory issues)
+        if content_length > FGR_MSG_CONTENTS_MAX_LEN:
+            raise ValueError(f"Content length {content_length} exceeds maximum {FGR_MSG_CONTENTS_MAX_LEN}")
         
         # Read contents
         contents = b""
