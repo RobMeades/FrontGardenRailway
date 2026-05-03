@@ -458,10 +458,10 @@ int32_t fgr_msg_init(const char *server_ip, uint16_t port,
                                            &g_context.context_sock);
             if (err == ESP_OK) {
 
-                CONTEXT_UNLOCK(g_context.lock, "fgr_msg_init()");
+                xSemaphoreGive(g_context.lock);
                 // Do initial extra socket configuration
                 socket_reconnect_cb(g_context.sock, &g_context);
-                CONTEXT_LOCK(g_context.lock, "fgr_msg_init()");
+                xSemaphoreTake(g_context.lock, pdMS_TO_TICKS(1000));
 
                 // Maintain the connection
                 err = fgr_socket_channel_maintain(&g_context.context_sock,
@@ -486,7 +486,7 @@ int32_t fgr_msg_init(const char *server_ip, uint16_t port,
         clean_up();
     }
 
-    return (int32_t) err;
+    return err;
 }
 
 // Deinitialise the messaging interface.

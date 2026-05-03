@@ -112,10 +112,15 @@ static int tcp_log_vprintf(const char *fmt, va_list args)
     }
 
     // Format the message
-    int32_t length = vsnprintf((char *) body->contents, FGR_LOG_STRING_MAX_LEN, fmt, args);
+    int32_t length = vsnprintf((char *) (body->contents), FGR_LOG_STRING_MAX_LEN, fmt, args);
 
     if (length > FGR_LOG_STRING_MAX_LEN) {
         length = FGR_LOG_STRING_MAX_LEN;
+    }
+
+    // Strip off any trailing linefeed
+    if ((length > 0) && (body->contents[length - 1] == '\n')) {
+        length--;
     }
 
     // Forward if level meets minimum and we're connected
@@ -128,7 +133,8 @@ static int tcp_log_vprintf(const char *fmt, va_list args)
             body->length = htonl((uint32_t) length);
             body->contents[length] = 0; // Ensure terminator
 
-            if (fgr_socket_send(g_context.sock, (const uint8_t *) &log_msg, sizeof(log_msg), 0) == ESP_OK) {
+            if (fgr_socket_send(g_context.sock, (const uint8_t *) &log_msg,
+                                sizeof(log_msg.header) + sizeof(log_msg.body.length) + length, 0) == ESP_OK) {
                 fgr_socket_channel_activity(&g_context.context_sock);
             } else {
                 fgr_socket_channel_failed(&g_context.context_sock);

@@ -37,6 +37,25 @@ extern "C" {
 #  define FGR_UTIL_WATCHDOG_FEED_TIME_MS 10
 #endif
 
+// IMPORTANT: only use the macros below as "outer" braces, with whole
+// sets of open/close brace pairs between them, don't attempt to
+// us them "unevenly": since the macros contain braces themselves,
+// weird things will happen.
+//
+// For instance, don't do this:
+//
+//     CONTEXT_LOCK()
+//     if (thing) {
+//
+//         CONTEXT_UNLOCK()
+//         do_a_thing_that_needs_unlocking();
+//         CONTEXT_LOCK()
+//
+//     }
+//     CONTEXT_UNLOCK()
+//
+// In those situations, just use xSemaphoreTake() and xSemaphoreGive()
+// directly on the inner lock.
 # if 0
 // Lock a context.
 #  define CONTEXT_LOCK(semaphore, dbg)    {                                               \

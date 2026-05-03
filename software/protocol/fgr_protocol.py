@@ -395,6 +395,25 @@ class FGRMsg:
         msg_type_name = msg_type_names.get(self.message_type, "UNKNOWN")
         return f"<FGRMsg type={msg_type_name} subtype=0x{self.subtype:03X} ref={self.reference} contents_len={len(self.contents)}>"
 
+def _recv_exact(sock: socket.socket, n: int, timeout: Optional[float] = None) -> Optional[bytes]:
+    """Receive exactly n bytes from the socket, or return None on timeout/disconnect."""
+    data = b""
+    remaining = n
+    
+    while remaining > 0:
+        try:
+            chunk = sock.recv(remaining)
+            if not chunk:
+                return None  # Connection closed
+            data += chunk
+            remaining -= len(chunk)
+        except socket.timeout:
+            return None
+        except socket.error:
+            return None
+    
+    return data
+
 def send_message(sock: socket.socket, msg: FGRMsg) -> bool:
     """Send a protocol message over a socket (network byte order)"""
     try:
@@ -406,39 +425,49 @@ def send_message(sock: socket.socket, msg: FGRMsg) -> bool:
         return False
 
 def receive_message(sock: socket.socket, timeout: Optional[float] = None) -> Optional[FGRMsg]:
-    """Receive and unpack a message (reads length from header, network byte order)"""
+    """Receive and unpack a message (handles TCP streaming properly).
+    
+    Reads exactly:
+      1. 4 bytes (header)
+      2. 4 bytes (length)
+      3. length bytes (contents)
+    
+    Returns None on timeout or connection close.
+    """
     original_timeout = sock.gettimeout()
     try:
         if timeout is not None:
             sock.settimeout(timeout)
         
-        # Read header (4 bytes)
-        header_data = sock.recv(4)
-        if len(header_data) == 0:
-            return None  # Connection closed
-        if len(header_data) != 4:
-            raise ValueError(f"Incomplete header: got {len(header_data)} bytes")
+        # Read exactly 4 bytes for header
+        header_data = _recv_exact(sock, 4)
+        if header_data is None:
+            return None
         
-        # Read body length (4 bytes in network/big-endian order)
-        length_data = sock.recv(4)
-        if len(length_data) != 4:
-            raise ValueError(f"Incomplete length field: got {len(length_data)} bytes")
+        # Read exactly 4 bytes for length
+        length_data = _recv_exact(sock, 4)
+        if length_data is None:
+            return None
+        
         content_length = struct.unpack(">I", length_data)[0]
         
-        # Check for insane lengths (prevent memory issues)
+        # Validate length to prevent memory issues
         if content_length > FGR_MSG_CONTENTS_MAX_LEN:
-            raise ValueError(f"Content length {content_length} exceeds maximum {FGR_MSG_CONTENTS_MAX_LEN}")
+            # Protocol error - we may be out of sync
+            print(f"Error: Invalid content length {content_length} > {FGR_MSG_CONTENTS_MAX_LEN}")
+            return None
         
-        # Read contents
+        # Read exactly content_length bytes
         contents = b""
         if content_length > 0:
-            contents = sock.recv(content_length)
-            if len(contents) != content_length:
-                raise ValueError(f"Incomplete contents: expected {content_length}, got {len(contents)}")
+            contents = _recv_exact(sock, content_length)
+            if contents is None:
+                return None
         
-        # Reconstruct full message
+        # Reconstruct full message and unpack
         full_data = header_data + length_data + contents
         return FGRMsg.unpack(full_data)
+        
     except socket.timeout:
         return None
     except Exception as e:

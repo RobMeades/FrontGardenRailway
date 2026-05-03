@@ -2,7 +2,7 @@
 These instructions describe how to set up a Wi-Fi access point on a headless Pi Zero W.  Note that, on the version of Raspbian I was using (Trixie), any attempt to set an access point with security failed, so these instructions set up an open Wi-Fi access point (security is provided later through [MAC address filtering](pi_wifi_dhcp_mac.md)).
 
 # Preparation
-Since the Pi will lose connectivity to your Wi-Fi network (you do _not_ want an open access point on your Wi-Fi network) you must have a serial connection to the headless Pi (e.g. using a 3V3 FTDI cable, black to GND, orange (RX) to GPIO14 (TX), yellow (TX) to GPIO15 (RX)).
+Since the Pi will lose connectivity to your Wi-Fi network (you do _not_ want an open access point on your Wi-Fi network) you must have a serial connection to the headless Pi (e.g. using a 3V3 FTDI cable, black to GND, yellow (RXD) to GPIO14 (TXD), orange (TXD) to GPIO15 (RXD)).
 
 - If you have hardened the Pi, enter `rw` to make the Pi writeable.
 
@@ -157,3 +157,39 @@ The `log_server.py` script can be run on the Raspberry Pi to listen for log mess
 - To make the service run at boot:
 
   `sudo systemctl enable log_server`
+  
+# Controller Setup
+`controller.py` provides all of the main control logic for the nodes of the front garden railway, however it is not run directly, instead `web_controller.py` sub-classes it to provide a web interface.
+
+[TODO] described directory structure
+
+Get `web_controller.py` to run at boot, using port 5000 for the connections to the nodes and port 8080 for the web interface by following the same pattern as above:
+
+- `sudo nano /lib/systemd/system/web_controller.service` with the following contents:
+
+  ```
+  [Unit]
+  Description=Web Controller
+  After=multi-user.target
+
+  [Service]
+  Type=simple
+  WorkingDirectory=/home/<your home directory name>/FrontGardenRailway/software/pi
+  ExecStart=python /home/<your home directory name>/FrontGardenRailway/software/pi/web_controller.py
+  KillSignal=SIGINT
+  Restart=on-failure
+
+  [Install]
+  WantedBy=multi-user.target
+  ```
+
+- Test that the service starts with:
+
+  `sudo systemctl start web_controller`
+
+  ...and make sure that (a) an ESP32 test node running the test application, with a MAC address that gives it the static IP address 10.10.3.2, can connect to the controller script on the Raspberry Pi Wifi AP on port 5000 and (b) a PC that is able to connect to the Raspberry Pi Wifi AP can bring up the web controller interface on port 8080.
+  
+- When all is good, make the service run at boot with:
+
+  `sudo systemctl enable web_controller`
+

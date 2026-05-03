@@ -323,7 +323,7 @@ static void task_rx(void *param)
 // Create a socket.
 int32_t fgr_socket_create(int *sock)
 {
-    esp_err_t err = ESP_ERR_INVALID_ARG;
+    int32_t err = -ESP_ERR_INVALID_ARG;
 
     if (sock) {
         err = ESP_FAIL;
@@ -335,8 +335,7 @@ int32_t fgr_socket_create(int *sock)
         }
     }
 
-    // Returns ESP_OK or negative error code from esp_err_t
-    return (int32_t) -err;
+    return err;
 }
 
 // Destroy a socket.
@@ -351,7 +350,7 @@ void fgr_socket_destroy(int *sock)
 // Set a socket to non-blocking mode.
 int32_t fgr_socket_set_non_blocking(int sock, int32_t timeout_seconds)
 {
-    esp_err_t err = ESP_OK;
+    int32_t err = ESP_OK;
     int flags;
 
     if (sock < 0) {
@@ -406,8 +405,7 @@ int32_t fgr_socket_set_non_blocking(int sock, int32_t timeout_seconds)
         ESP_LOGD(TAG, "Socket %d set to non-blocking mode.", sock);
     }
 
-    // Returns ESP_OK or negative error code from esp_err_t
-    return (int32_t) -err;
+    return err;
 }
 
 // Enable TCP keep-alive: this allows us to detect a failure
@@ -418,7 +416,7 @@ int32_t fgr_socket_enable_tcp_keep_alive(int sock,
                                          int32_t tcp_keep_alive_probe_interval_seconds,
                                          size_t tcp_keep_alive_count)
 {
-    esp_err_t err = ESP_OK;
+    int32_t err = ESP_OK;
 
     // Enable keep-alive
     int x = 1;
@@ -460,8 +458,7 @@ int32_t fgr_socket_enable_tcp_keep_alive(int sock,
                  (tcp_keep_alive_probe_interval_seconds * tcp_keep_alive_count));
     }
 
-    // Returns ESP_OK or negative error code from esp_err_t
-    return (int32_t) -err;
+    return err;
 }
 
 // Connect a socket, blocking version
@@ -476,14 +473,13 @@ int32_t fgr_socket_connect(int sock, const char *server_ip, uint16_t port)
     ESP_LOGI(TAG, "Connecting to %s:%d...",  server_ip, port);
 
     // Connect to the server
-    esp_err_t err = connect(sock, (struct sockaddr *) &server, sizeof(server));
+    int32_t err = connect(sock, (struct sockaddr *) &server, sizeof(server));
     if (err != 0) {
         err = ESP_FAIL;
         ESP_LOGE(TAG, "Failed to connect to server %d (%s)!", errno, strerror(errno));
     }
 
-    // Returns ESP_OK or negative error code from esp_err_t
-    return (int32_t) -err;
+    return err;
 }
 
 /* ----------------------------------------------------------------
@@ -511,7 +507,7 @@ int32_t fgr_socket_connect_start(int sock, const char *server_ip,
             ESP_LOGI(TAG, "Start connecting to %s:%d...",  server_ip, port);
 
             // Start connecting to the server
-            err = -ESP_FAIL;
+            err = ESP_FAIL;
             if (connect(sock, (struct sockaddr *) &context_connect->server,
                         sizeof(context_connect->server)) == 0) {
                 // Connected immediately
@@ -559,11 +555,11 @@ int32_t fgr_socket_connect_is_complete(void **context, int32_t timeout_ms)
                 // Connected
                 err = ESP_OK;
             } else {
-                err = -ESP_FAIL;
+                err = ESP_FAIL;
                 ESP_LOGE(TAG, "Connect failed: %" PRId32 " (%s)", so_error, strerror(so_error));
             }
         } else if (sel_rc < 0) {
-            err = -ESP_FAIL;
+            err = ESP_FAIL;
             ESP_LOGE(TAG, "Select error: %d (%s)", errno, strerror(errno));
         }
 
