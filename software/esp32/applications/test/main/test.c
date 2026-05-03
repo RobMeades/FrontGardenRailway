@@ -121,7 +121,7 @@ static bool msg_receive_default_cb(fgr_msg_t *msg, void *param)
 {
     (void) param;
 
-    fgr_msg_print_summary(msg->header.req.type, 0,
+    fgr_msg_print_summary(NULL, FGR_LOG_LEVEL_INFO, msg->header.req.type, 0,
                           msg->header.req.reference, msg->body.length);
 
     return true;
@@ -135,6 +135,7 @@ static bool msg_receive_default_cb(fgr_msg_t *msg, void *param)
 void app_main(void)
 {
     fgr_state_t state = FGR_STATE_NEEDS_CFG;
+    fgr_ind_rsp_t msg_type_send;
 
     ESP_LOGI(TAG, "app_main start.");
 
@@ -151,9 +152,10 @@ void app_main(void)
 
     if (err == ESP_OK) {
         // Request configuration
-        err = fgr_msg_send_ind(FGR_IND_RSP_NEEDS_CFG, state, NULL, 0);
+        msg_type_send = FGR_IND_RSP_NEEDS_CFG;
+        err = fgr_msg_send_ind(msg_type_send, state, NULL, 0);
         if (err >= 0) {
-            fgr_msg_print_summary(MSG_IND(FGR_IND_RSP_NEEDS_CFG), state, err, 0);
+            fgr_msg_print_summary(NULL, FGR_LOG_LEVEL_INFO, MSG_IND(msg_type_send), state, err, 0);
             err = ESP_OK;
         }
 

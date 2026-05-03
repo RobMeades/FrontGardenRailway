@@ -132,6 +132,10 @@ class FGRLogServer:
                           device_info: Dict[str, str]) -> None:
         """Write a log message to the systemd journal"""
         priority = self._get_priority_from_level(level)
+        
+        # Prepend the IP address to the message for easier reading
+        ip = device_info.get('addr', 'unknown')
+        enhanced_message = f"[{ip}] {message}"
 
         if HAS_SYSTEMD:
             # Send to systemd journal with metadata
@@ -145,7 +149,7 @@ class FGRLogServer:
                 'SOURCE_IP': device_info.get('addr', 'unknown'),
             }
 
-            journal.send(message, priority=priority, **extra_fields)
+            journal.send(enhanced_message, priority=priority, **extra_fields)
         else:
             # Fallback to console output
             timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
@@ -189,7 +193,7 @@ class FGRLogServer:
                             # In the header, error_or_state contains the log level for LOG messages
                             log_level = msg.error_or_state
 
-                            # Write to journal
+                            # Write to journal with IP prepended
                             self._write_to_journal(log_text, log_level, device_info)
 
                 except socket.timeout:

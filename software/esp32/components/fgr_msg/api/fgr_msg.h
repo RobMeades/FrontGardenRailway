@@ -258,6 +258,11 @@ int32_t fgr_msg_state_name(fgr_state_t error, char *buffer, size_t length);
 
 /** Print a summary of a message for debug purposes.
  *
+ * @param prefix_str  pointer to a null-terminated prefix
+ *                    string to add before the printed
+ *                    summary.  If NULL the printed summary
+ *                    is prefixed with "Sent" or "Received".
+ * @param level       the log level to print the summary at.
  * @param msg_type    the message type i.e. one of
  *                    fgr_req_cnf_t or fgr_ind_rsp_t, with
  *                    the top 4 bits OR'ed with FGR_MSG_TYPE_REQ
@@ -270,7 +275,8 @@ int32_t fgr_msg_state_name(fgr_state_t error, char *buffer, size_t length);
  * @param length      the amount of data included in the body
  *                    of the message.
  */
-void fgr_msg_print_summary(uint16_t msg_type, uint8_t error_state,
+void fgr_msg_print_summary(const char *prefix_str, fgr_log_level_t level,
+                           uint16_t msg_type, uint8_t error_state,
                            uint8_t reference, uint32_t length);
 
 #ifdef __cplusplus

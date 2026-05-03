@@ -120,6 +120,17 @@ esp_err_t init(fgr_state_t *state)
     return err;
 }
 
+// Message receive callback.
+static bool msg_receive_cb(fgr_msg_t *msg, void *param)
+{
+    (void) param;
+
+    fgr_msg_print_summary(NULL, FGR_LOG_LEVEL_INFO, msg->header.req.type, 0,
+                          msg->header.req.reference, msg->body.length);
+
+    return true;
+}
+
 /* ----------------------------------------------------------------
  * PUBLIC FUNCTIONS
  * -------------------------------------------------------------- */
@@ -128,11 +139,29 @@ esp_err_t init(fgr_state_t *state)
 void app_main(void)
 {
     fgr_state_t state = FGR_STATE_STARTED;
+    fgr_ind_rsp_t msg_type_send;
+
     ESP_LOGI(TAG, "app_main start.");
 
     int32_t err = init(&state);
     if (err == ESP_OK) {
         ESP_LOGI(TAG, "Initialization complete.");
+        // Start receiving messages
+        err = fgr_msg_receive_start();
+    }
+    if (err == ESP_OK) {
+        // Add a received message handler
+        err = fgr_msg_receive_handler_add(0, msg_receive_cb, NULL);
+    }
+
+    if (err == ESP_OK) {
+        // Indicate that we have started
+        msg_type_send = FGR_IND_RSP_START;
+        err = fgr_msg_send_ind(msg_type_send, state, NULL, 0);
+        if (err >= 0) {
+            fgr_msg_print_summary(NULL, FGR_LOG_LEVEL_INFO, MSG_IND(msg_type_send), state, err, 0);
+            err = ESP_OK;
+        }
 
         // Allow us to feed the watchdog
         esp_task_wdt_add(NULL);

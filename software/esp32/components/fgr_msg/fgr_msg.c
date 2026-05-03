@@ -331,14 +331,23 @@ static void receive_cb(void *buffer, size_t length, void *param)
 
             // Got a complete message, pass it to all who want it
             struct msg_rx_cb_t *iter;
+            bool handled = false;
             SLIST_FOREACH(iter, &context->msg_rx_cb_list, next) {
                 if ((iter->msg_type == 0) ||
                     (iter->msg_type == msg->header.req.type)) {
-                    if (iter->cb(msg, iter->cb_param)) {
+                    handled = iter->cb(msg, iter->cb_param);
+                    if (handled) {
                         // Stop if the callback returns true
                         break;
                     }
                 }
+            }
+            if (!handled) {
+                fgr_msg_print_summary("Unhandled message",
+                                      FGR_LOG_LEVEL_WARN,
+                                      msg->header.req.type, 0,
+                                      msg->header.req.reference,
+                                      msg->body.length);
             }
             free(msg);
         }
@@ -739,33 +748,55 @@ int32_t fgr_msg_state_name(fgr_state_t state, char *buffer, size_t length)
 }
 
 // Print a summary of a message for debug purposes.
-void fgr_msg_print_summary(uint16_t msg_type, uint8_t error_state,
+void fgr_msg_print_summary(const char *prefix_str, fgr_log_level_t level,
+                           uint16_t msg_type, uint8_t error_state,
                            uint8_t reference, uint32_t length)
 {
     char buffer_msg_name[64];
     char buffer_error_state[32];
-    const char *msg_direction = "Sent";
+    char buffer[256];
 
     fgr_msg_name(msg_type, buffer_msg_name, sizeof(buffer_msg_name));
     if (((msg_type >> 12) == FGR_MSG_TYPE_REQ) ||
         ((msg_type >> 12) == FGR_MSG_TYPE_RSP)) {
-        msg_direction = "Received";
-        ESP_LOGI(TAG, "%s %s [0x%04x], reference %d, length %d.",
-                msg_direction, buffer_msg_name, msg_type, reference, length);
+        if (prefix_str == NULL) {
+            prefix_str = "Received";
+        }
+        snprintf(buffer, sizeof(buffer), "%s %s [0x%04x], reference %d, length %lu.",
+                 prefix_str, buffer_msg_name, msg_type, reference, length);
     } else {
+        if (prefix_str == NULL) {
+            prefix_str = "Sent";
+        }
         if ((msg_type >> 12) == FGR_MSG_TYPE_CNF) {
             fgr_msg_error_name(error_state, buffer_error_state, sizeof(buffer_error_state));
-            ESP_LOGI(TAG, "%s %s [0x%04x], error %s [%d], reference %d, length %d.",
-                     msg_direction, buffer_msg_name, msg_type,
+            snprintf(buffer, sizeof(buffer), "%s %s [0x%04x], error %s [%d], reference %d,"
+                     " length %lu.", prefix_str, buffer_msg_name, msg_type,
                      buffer_error_state, error_state, reference, length);
         } else if ((msg_type >> 12) == FGR_MSG_TYPE_IND) {
             fgr_msg_state_name(error_state, buffer_error_state, sizeof(buffer_error_state));
-            ESP_LOGI(TAG, "%s %s [0x%04x], state %s [%d], reference %d, length %d.",
-                     msg_direction, buffer_msg_name, msg_type,
+            snprintf(buffer, sizeof(buffer), "%s %s [0x%04x], state %s [%d], reference %d,"
+                     " length %lu.", prefix_str, buffer_msg_name, msg_type,
                      buffer_error_state, error_state, reference, length);
         } else {
-            ESP_LOGI(TAG, "Unknown message type (0x%04x).", msg_type);
+            snprintf(buffer, sizeof(buffer), "Unknown message type (0x%04x).", msg_type);
         }
+    }
+
+    switch (level) {
+        case FGR_LOG_LEVEL_DEBUG:
+            ESP_LOGD(TAG, "%s", buffer);
+        break;
+        case FGR_LOG_LEVEL_WARN:
+            ESP_LOGW(TAG, "%s", buffer);
+        break;
+        case FGR_LOG_LEVEL_ERROR:
+            ESP_LOGE(TAG, "%s", buffer);
+        break;
+        case FGR_LOG_LEVEL_INFO:
+        default:
+            ESP_LOGI(TAG, "%s", buffer);
+        break;
     }
 }
 
