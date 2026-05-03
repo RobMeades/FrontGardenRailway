@@ -90,7 +90,7 @@ DEFAULT_PRIORITY = journal.LOG_INFO if HAS_SYSTEMD else 6
 
 class FGRLogServer:
     """FGR Protocol Log Server"""
-    
+
     def __init__(self, bind_address: str = '0.0.0.0', port: int = 5001):
         self.bind_address = bind_address
         self.port = port
@@ -104,16 +104,16 @@ class FGRLogServer:
             'errors': 0
         }
         self.lock = threading.Lock()
-        
+
         # Set up signal handlers for graceful shutdown
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
-    
+
     def _signal_handler(self, signum: int, frame) -> None:
         """Handle shutdown signals"""
         print(f"\nReceived signal {signum}, shutting down...")
         self.running = False
-    
+
     def _get_level_name(self, level: int) -> str:
         """Get human-readable log level name"""
         level_names = {
@@ -123,16 +123,16 @@ class FGRLogServer:
             FGRLogLevel.FGR_LOG_LEVEL_ERROR: 'ERROR',
         }
         return level_names.get(level, f'LEVEL_{level}')
-    
+
     def _get_priority_from_level(self, level: int) -> int:
         """Convert FGR log level to systemd priority"""
         return LOG_LEVEL_TO_PRIORITY.get(level, DEFAULT_PRIORITY)
-    
-    def _write_to_journal(self, message: str, level: int, 
+
+    def _write_to_journal(self, message: str, level: int,
                           device_info: Dict[str, str]) -> None:
         """Write a log message to the systemd journal"""
         priority = self._get_priority_from_level(level)
-        
+
         if HAS_SYSTEMD:
             # Send to systemd journal with metadata
             extra_fields = {
@@ -144,54 +144,54 @@ class FGRLogServer:
                 'FGR_LOG_LEVEL_NAME': self._get_level_name(level),
                 'SOURCE_IP': device_info.get('addr', 'unknown'),
             }
-            
+
             journal.send(message, priority=priority, **extra_fields)
         else:
             # Fallback to console output
             timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
             level_name = self._get_level_name(level)
-            
+
             print(f"[{timestamp}] [{device_info['addr']}:{device_info['port']}] "
                   f"[{level_name}] {message}")
-    
-    def _handle_client(self, client_socket: socket.socket, 
+
+    def _handle_client(self, client_socket: socket.socket,
                        client_address: tuple) -> None:
         """Handle a connected client - runs in its own thread"""
         device_info = {
             'addr': client_address[0],
             'port': client_address[1]
         }
-        
+
         # Set socket to blocking mode with a timeout to allow checking running flag
         client_socket.settimeout(1.0)
-        
+
         print(f"New connection from {client_address[0]}:{client_address[1]}")
-        
+
         try:
             while self.running:
                 try:
                     # Receive and parse FGR message
                     msg = receive_message(client_socket, timeout=1.0)
-                    
+
                     if msg is None:
                         # Timeout or connection issue, continue loop to check running flag
                         continue
-                    
+
                     with self.lock:
                         self.stats['bytes_received'] += len(msg.pack())
-                        
+
                         # Check if this is a log message
                         if msg.message_type == FGRMsgType.FGR_MSG_TYPE_LOG:
                             self.stats['log_messages'] += 1
-                            
+
                             # Extract log message and level
                             log_text = msg.get_log_message()
                             # In the header, error_or_state contains the log level for LOG messages
                             log_level = msg.error_or_state
-                            
+
                             # Write to journal
                             self._write_to_journal(log_text, log_level, device_info)
-                            
+
                 except socket.timeout:
                     # Expected timeout, just continue to check running flag
                     continue
@@ -208,42 +208,42 @@ class FGRLogServer:
                     # Don't break on transient errors, continue trying
                     time.sleep(0.1)
                     continue
-                    
+
         finally:
             try:
                 client_socket.close()
             except:
                 pass
-            
+
             with self.lock:
                 # Remove thread from tracking
                 if client_socket in self.client_threads:
                     del self.client_threads[client_socket]
-            
+
             print(f"Connection closed from {client_address[0]}:{client_address[1]}")
-    
+
     def start(self) -> None:
         """Start the log server"""
         # Create server socket
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        
+
         try:
             self.server_socket.bind((self.bind_address, self.port))
             self.server_socket.listen(5)
             self.server_socket.settimeout(1.0)  # Allow checking running flag
-            
+
             print(f"FGR Log Server listening on {self.bind_address}:{self.port}")
             print(f"Systemd journal support: {'Enabled' if HAS_SYSTEMD else 'Disabled'}")
             print(f"Protocol module loaded from: {protocol_dir}")
             print("Press Ctrl+C to stop")
             print()
-            
+
             # Main accept loop
             while self.running:
                 try:
                     client_socket, client_address = self.server_socket.accept()
-                    
+
                     with self.lock:
                         self.stats['connections'] += 1
                         # Start a new thread for each client
@@ -254,7 +254,7 @@ class FGRLogServer:
                         )
                         self.client_threads[client_socket] = client_thread
                         client_thread.start()
-                    
+
                 except socket.timeout:
                     # Timeout occurred, just loop again to check running flag
                     continue
@@ -262,35 +262,35 @@ class FGRLogServer:
                     if self.running:
                         print(f"Socket error: {e}")
                     break
-                    
+
         except Exception as e:
             print(f"Failed to start server: {e}")
             sys.exit(1)
         finally:
             self.stop()
-    
+
     def stop(self) -> None:
         """Stop the log server and clean up"""
         print("\nShutting down...")
-        
+
         # Wait for all client threads to finish
         print("Waiting for client threads to finish...")
         with self.lock:
             threads = list(self.client_threads.values())
-        
+
         for thread in threads:
             try:
                 thread.join(timeout=2.0)
             except:
                 pass
-        
+
         # Close server socket
         if self.server_socket:
             try:
                 self.server_socket.close()
             except:
                 pass
-        
+
         # Print statistics
         print("\n=== Server Statistics ===")
         print(f"Total connections: {self.stats['connections']}")
@@ -318,20 +318,20 @@ def main():
         default='0.0.0.0',
         help='Address to bind to (default: 0.0.0.0)'
     )
-    
+
     args = parser.parse_args()
-    
+
     # Validate port range
     if args.port < 1 or args.port > 65535:
         print(f"Error: Invalid port number {args.port}")
         sys.exit(1)
-    
+
     # Create and start server
     server = FGRLogServer(
         bind_address=args.bind_address,
         port=args.port
     )
-    
+
     try:
         server.start()
     except KeyboardInterrupt:

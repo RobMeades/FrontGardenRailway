@@ -59,7 +59,7 @@ logger = logging.getLogger(__name__)
 
 class RobustFileSender:
     """Helper class to handle file sending with error recovery"""
-    
+
     def __init__(self, request, response, filepath, file_size):
         self.request = request
         self.response = response
@@ -67,7 +67,7 @@ class RobustFileSender:
         self.file_size = file_size
         self.bytes_sent = 0
         self.start_time = time.time()
-        
+
     async def send_file(self):
         try:
             with open(self.filepath, 'rb') as f:
@@ -75,16 +75,16 @@ class RobustFileSender:
                 first_chunk = f.read(65536)
                 if first_chunk and not await self.safe_write(first_chunk):
                     return False
-                
+
                 # Send remaining chunks
                 while True:
                     chunk = f.read(16384)
                     if not chunk:
                         break
-                    
+
                     if not await self.safe_write(chunk):
                         return False
-                    
+
                     # Check transfer speed occasionally
                     if self.bytes_sent % (1024 * 1024) < 16384:  # Every ~1MB
                         elapsed = time.time() - self.start_time
@@ -93,11 +93,11 @@ class RobustFileSender:
                             logger.debug(f"Transfer to {self.request.remote}: "
                                        f"{self.bytes_sent}/{self.file_size} bytes "
                                        f"({speed:.1f} KB/s)")
-                
+
                 logger.info(f"Complete transfer to {self.request.remote}: "
                           f"{self.bytes_sent} bytes in {time.time()-self.start_time:.1f}s")
                 return True
-                
+
         except FileNotFoundError:
             logger.error(f"File disappeared: {self.filepath}")
             return False
@@ -107,7 +107,7 @@ class RobustFileSender:
         except Exception as e:
             logger.error(f"Unexpected error in file send: {e}")
             return False
-    
+
     async def safe_write(self, chunk):
         """Write chunk with error handling"""
         try:
@@ -134,7 +134,7 @@ class HandleFirmware:
     def __init__(self, base_path, differentiated_mode):
         self.base_path = base_path
         self.differentiated_mode = differentiated_mode
-    
+
     def map_filename(self, requested_file, client_ip):
         file = requested_file
         if self.differentiated_mode:
@@ -163,15 +163,15 @@ class HandleFirmware:
     async def handle(self, request):
         # Get the filename from the URL path
         filename = request.match_info.get('filename', '')
-        
+
         if not filename:
             return web.Response(status=400, text="No filename specified")
-        
+
         # Security check
         if '..' in filename or filename.startswith('/'):
             logger.warning(f"Blocked directory traversal attempt: {filename} from {request.remote}")
             return web.Response(status=403, text="Invalid filename")
-        
+
         #  Set the full file path
         filename_mapped = self.map_filename(filename, request.remote)
         filepath = os.path.join(self.base_path, filename_mapped)
@@ -190,16 +190,16 @@ class HandleFirmware:
             if available_files:
                 error_msg += f". Available files: {', '.join(available_files)}"
             return web.Response(status=404, text=error_msg)
-        
+
         file_size = os.path.getsize(filepath)
         logger.info(f"Serving {filepath} ({file_size} bytes) to {request.remote} (requested: {filename})")
-        
+
         # Create streaming response
         response = web.StreamResponse()
         response.headers['Content-Type'] = 'application/octet-stream'
         response.headers['Content-Length'] = str(file_size)
         response.headers['Cache-Control'] = 'no-cache'
-        
+
         try:
             await response.prepare(request)
         except ConnectionResetError:
@@ -208,15 +208,15 @@ class HandleFirmware:
         except Exception as e:
             logger.error(f"Error preparing response for {request.remote}: {e}")
             return web.Response(status=500)
-        
+
         # Use robust sender
         sender = RobustFileSender(request, response, filepath, file_size)
         success = await sender.send_file()
-        
+
         if not success and sender.bytes_sent == 0:
             # Nothing was sent, return error
             return web.Response(status=500, text="Transfer failed")
-        
+
         # Return the response (even if partial, aiohttp handles it)
         return response
 
@@ -225,32 +225,32 @@ async def main(base_dir, port, differentiated_mode):
 
     handle_firmware = HandleFirmware(base_dir, differentiated_mode)
     app.router.add_get('/{filename:.*}', handle_firmware.handle)
-    
+
     # Create SSL context
     ssl_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
     if not (os.path.exists(CERTIFICATE_FILE) and os.path.exists(CERTIFICATE_KEY_FILE)):
         logger.error(f"SSL certificates not found. Please ensure {CERTIFICATE_FILE} and {CERTIFICATE_KEY_FILE} exist.")
         return
     ssl_context.load_cert_chain(CERTIFICATE_FILE, CERTIFICATE_KEY_FILE)
-    
+
     # Configure server with timeouts
     runner = web.AppRunner(app, keepalive_timeout=75, shutdown_timeout=60)
     await runner.setup()
-    
+
     site = web.TCPSite(
-        runner, 
-        '0.0.0.0', 
-        port, 
+        runner,
+        '0.0.0.0',
+        port,
         ssl_context=ssl_context,
         reuse_address=True,
         reuse_port=True,
         backlog=128  # Connection queue size
     )
     await site.start()
-    
+
     logger.info(f"Server running on https://localhost:{port}")
     logger.info(f"Serving files from '{base_dir}'")
-    
+
     # List available .bin files in base directory
     try:
         bin_files = []
@@ -258,14 +258,14 @@ async def main(base_dir, port, differentiated_mode):
             file_path = os.path.join(base_dir, file)
             if os.path.isfile(file_path) and file.endswith('.bin'):
                 bin_files.append((file, os.path.getsize(file_path)))
-        
+
         if bin_files:
             logger.info(f"Available firmware files in '{base_dir}':")
             for file, size in sorted(bin_files):
                 logger.info(f"  {file:30} {size:8} bytes")
         else:
             logger.warning(f"No .bin files found in '{base_dir}'")
-        
+
         # Show IP to filename mappings if in differentiated mode
         if differentiated_mode and IP_TO_FILE_MAP:
             logger.info("Mappings:")
@@ -277,10 +277,10 @@ async def main(base_dir, port, differentiated_mode):
                     if actual_file not in file_to_ips:
                         file_to_ips[actual_file] = []
                     file_to_ips[actual_file].append(ip)
-                
+
                 for mapped_file, ips in sorted(file_to_ips.items()):
                     logger.info(f"     served file will be '{mapped_file}' for requesting IP address(es) {', '.join(sorted(ips))}")
-    
+
     except FileNotFoundError:
         logger.error(f"Base directory {base_dir} not found!")
     except PermissionError:
@@ -296,7 +296,7 @@ async def main(base_dir, port, differentiated_mode):
 
 def run(base_dir, port, differentiated_mode):
     if differentiated_mode:
-        logger.warning("DIFFERENTIATED MODE: known IP addresses will be served specific binaries.")        
+        logger.warning("DIFFERENTIATED MODE: known IP addresses will be served specific binaries.")
     try:
         asyncio.run(main(base_dir, port, differentiated_mode))
     except KeyboardInterrupt:
