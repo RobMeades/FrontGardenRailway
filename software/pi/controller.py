@@ -545,22 +545,34 @@ class Controller:
                 ip = addr[0]
                 if ip in self.nodes_by_ip:
                     node = self.nodes_by_ip[ip]
+                    self.logger.info(f"Found node {node.name} for IP {ip}, current state={node.state}")
 
                     if node.sock:
+                        self.logger.debug(f"Node {node.name} already has socket, disconnecting old connection")
                         self._disconnect_node(node)
 
+                    # Reset stop_event for the new connection
                     node.stop_event.clear()
+
                     node.sock = client_sock
                     node.state = NodeState.CONNECTED
-                    node.connection_time = time.time()
                     node.last_heartbeat = time.time()
                     node.reference_counter = 0
                     node.pending_requests.clear()
                     node.message_count = 0
                     node.heartbeat_count = 0
 
+                    # Set connection time if not already set (first connection or reconnection)
+                    if not hasattr(node, 'connection_time') or node.connection_time == 0:
+                        node.connection_time = time.time()
+                        self.logger.info(f"Node {node.name} first connection at {node.connection_time}")
+                    else:
+                        self.logger.info(f"Node {node.name} reconnected, connection_time preserved as {node.connection_time}")
+
+                    # Create handler
                     node.handler = self._get_handler_for_node(node)
 
+                    # Start receive thread
                     node.rx_thread = threading.Thread(
                         target=self._receive_loop,
                         args=(node,),
@@ -572,7 +584,7 @@ class Controller:
                     node.handler.on_connected()
                     self.logger.info(f"Node {node.name} connected (type={node.node_type})")
                 else:
-                    self.logger.warning(f"Unknown node from {ip}, closing")
+                    self.logger.warning(f"Unknown node from {ip}, closing connection")
                     client_sock.close()
 
             except socket.timeout:
@@ -584,6 +596,8 @@ class Controller:
     def _receive_loop(self, node: Node) -> None:
         """Receive messages from a node"""
         msg_type_names = {1: "REQ", 2: "CNF", 3: "IND", 4: "RSP", 5: "LOG"}
+
+        self.logger.info(f"Starting receive loop for {node.name}")
 
         while self.running and node.sock and not node.stop_event.is_set():
             try:
@@ -614,6 +628,8 @@ class Controller:
             except Exception as e:
                 if not node.stop_event.is_set():
                     self.logger.error(f"Receive error from {node.name}: {e}")
+                    import traceback
+                    traceback.print_exc()
                 break
 
         if node.state != NodeState.DISCONNECTED:
@@ -622,36 +638,45 @@ class Controller:
 
     def _dispatch_message(self, node: Node, msg: fgr.FGRMsg) -> None:
         """Dispatch a message to the appropriate handler"""
-        msg_type = msg.message_type
+        try:
+            msg_type = msg.message_type
 
-        if msg_type == fgr.FGRMsgType.FGR_MSG_TYPE_CNF:
-            ref = msg.reference
-            if ref in node.pending_requests:
-                q = node.pending_requests.pop(ref)
-                try:
-                    q.put_nowait(msg)
-                except queue.Full:
-                    pass
+            self.logger.debug(f"[{node.name}] Dispatching message type {msg_type}")
 
-            if node.handler:
-                node.handler.on_confirmation(msg)
+            if msg_type == fgr.FGRMsgType.FGR_MSG_TYPE_CNF:
+                ref = msg.reference
+                if ref in node.pending_requests:
+                    q = node.pending_requests.pop(ref)
+                    try:
+                        q.put_nowait(msg)
+                    except queue.Full:
+                        pass
 
-        elif msg_type == fgr.FGRMsgType.FGR_MSG_TYPE_IND:
-            handled = False
-            if node.handler:
-                handled = node.handler.on_indication(msg)
+                if node.handler:
+                    node.handler.on_confirmation(msg)
 
-            if not handled:
-                self._handle_generic_indication(node, msg)
+            elif msg_type == fgr.FGRMsgType.FGR_MSG_TYPE_IND:
+                handled = False
+                if node.handler:
+                    handled = node.handler.on_indication(msg)
 
-        elif msg_type == fgr.FGRMsgType.FGR_MSG_TYPE_RSP:
-            if node.handler:
-                node.handler.on_response(msg)
+                if not handled:
+                    self._handle_generic_indication(node, msg)
 
-        elif msg_type == fgr.FGRMsgType.FGR_MSG_TYPE_REQ:
-            self.logger.warning(f"Unexpected REQ from {node.name}")
+            elif msg_type == fgr.FGRMsgType.FGR_MSG_TYPE_RSP:
+                if node.handler:
+                    node.handler.on_response(msg)
 
-        # LOG messages (type 5) are ignored - they go to a different endpoint
+            elif msg_type == fgr.FGRMsgType.FGR_MSG_TYPE_REQ:
+                self.logger.warning(f"Unexpected REQ from {node.name}")
+
+            # LOG messages (type 5) are ignored - they go to a different endpoint
+
+        except Exception as e:
+            self.logger.error(f"Exception in dispatch for {node.name}: {e}")
+            import traceback
+            traceback.print_exc()
+            # Don't close the connection on exception
 
     def _handle_generic_indication(self, node: Node, msg: fgr.FGRMsg) -> None:
         """Handle indications not handled by node-specific code"""
@@ -669,10 +694,12 @@ class Controller:
             self.send_response_to_node(node.name, ind_type, msg.reference, b"")
 
         elif ind_type == fgr.FGRIndRsp.FGR_IND_RSP_START:
-            self.logger.info(f"Node {node.name}: started")
+            self.logger.info(f"Node {node.name}: started (no response needed)")
+            # No response needed for START indication
 
         elif ind_type == fgr.FGRIndRsp.FGR_IND_RSP_STOP:
-            self.logger.info(f"Node {node.name}: stopped")
+            self.logger.info(f"Node {node.name}: stopped (no response needed)")
+            # No response needed for STOP indication
 
         elif ind_type == fgr.FGRIndRsp.FGR_IND_RSP_HEARTBEAT:
             node.heartbeat_count += 1
