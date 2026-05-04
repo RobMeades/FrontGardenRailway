@@ -172,6 +172,8 @@ static void task_maintain(void *param)
                                 int32_t timeout_ms = 100;
                                 err = fgr_socket_connect_is_complete(&context_connect, timeout_ms);
                                 elapsed_ms += timeout_ms;
+                                vTaskDelay(pdMS_TO_TICKS(FGR_UTIL_WATCHDOG_FEED_TIME_MS));
+                                esp_task_wdt_reset();
                             }
 
                             CONTEXT_LOCK(context_channel->lock, "task_maintain() 2");

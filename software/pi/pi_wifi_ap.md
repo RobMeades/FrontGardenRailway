@@ -16,6 +16,8 @@ Since the Pi will lose connectivity to your Wi-Fi network (you do _not_ want an 
 
   - `sudo apt install python3-systemd`: which will be needed by `log_server.py`,
 
+  - `sudo apt install ntpsec-ntpdate`: useful if you get into a tangle with NTP time offsets later,
+
   - `sudo apt install minicom`: serial communications program,
 
   - `sudo apt install lrzsz`: this allows the `minicom` and `picocom` serial communications programs to perform file transfer,
@@ -161,8 +163,6 @@ The `log_server.py` script can be run on the Raspberry Pi to listen for log mess
 # Controller Setup
 `controller.py` provides all of the main control logic for the nodes of the front garden railway, however it is not run directly, instead `web_controller.py` sub-classes it to provide a web interface.
 
-[TODO] described directory structure
-
 Get `web_controller.py` to run at boot, using port 5000 for the connections to the nodes and port 8080 for the web interface by following the same pattern as above:
 
 - `sudo nano /lib/systemd/system/web_controller.service` with the following contents:
@@ -192,4 +192,3 @@ Get `web_controller.py` to run at boot, using port 5000 for the connections to t
 - When all is good, make the service run at boot with:
 
   `sudo systemctl enable web_controller`
-

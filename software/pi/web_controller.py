@@ -26,7 +26,7 @@ Controller socket binds to specified IP (for node communication).
 Web server binds to all interfaces (for admin access).
 
 Usage:
-    python web_controller.py [--ip LISTEN_IP] [--port PORT] [--cfg CFG_FILE] 
+    python web_controller.py [--ip LISTEN_IP] [--port PORT] [--cfg CFG_FILE]
                              [--http-port HTTP_PORT] [--log-level LEVEL]
 """
 
@@ -75,71 +75,71 @@ JOURNAL_IDENTIFIER = 'fgr-log-server'
 
 class WebController(Controller):
     """Web-enabled FGR Controller with journal log reading"""
-    
-    def __init__(self, listen_ip: str = CONTROLLER_IP_DEFAULT, 
+
+    def __init__(self, listen_ip: str = CONTROLLER_IP_DEFAULT,
                  port: int = CONTROLLER_PORT_DEFAULT,
                  nodes_dir: str = None, cfg_file: str = None,
                  http_port: int = HTTP_PORT_DEFAULT):
         super().__init__(listen_ip, port, nodes_dir, cfg_file)
-        
+
         self.http_port = http_port
         self.web_app = None
         self.web_runner = None
         self.web_running = False
-        
+
         # Log storage for web interface - store as list with version tracking
         self.log_entries: List[Tuple[int, str]] = []  # (version, message)
         self.max_log_entries = MAX_LOG_ENTRIES
         self._log_counter = 0
-        
+
         # SSE clients
         self.sse_clients = set()
-        
+
         # Store node-specific data for web display
         self.node_measurements: Dict[str, Dict[str, Any]] = {}
-        
+
         # Journal reader thread
         self.journal_running = False
         self.journal_thread = None
-        
+
         # Start journal reader if available
         if HAS_SYSTEMD:
             self._start_journal_reader()
         else:
             self._log_message("Journal reading disabled - node logs will not appear")
-        
+
         # Override the logger to capture controller logs
         self._setup_log_capture()
-        
+
         # Record start time
         self._start_time = time.time()
-    
+
     def _add_log(self, prefix: str, message: str):
         """Add a log message to the buffer with automatic trimming"""
         timestamp = datetime.now().strftime('%H:%M:%S')
         version = self._log_counter
         self._log_counter += 1
         self.log_entries.append((version, f"[{timestamp}] {prefix} {message}"))
-        
+
         # Trim if needed
         while len(self.log_entries) > self.max_log_entries:
             self.log_entries.pop(0)
-    
+
     def _setup_log_capture(self):
         """Capture controller logs for web interface display"""
         class WebLogHandler(logging.Handler):
             def __init__(self, callback):
                 super().__init__()
                 self.callback = callback
-            
+
             def emit(self, record):
                 msg = self.format(record)
                 self.callback(msg)
-        
+
         handler = WebLogHandler(self._capture_controller_log)
         handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
         logging.getLogger().addHandler(handler)
-    
+
     def _capture_controller_log(self, message: str):
         """Capture a controller log message for web display"""
         # Extract just the message part
@@ -149,35 +149,35 @@ class WebController(Controller):
         else:
             msg_text = message
         self._add_log("[CTRL]", msg_text)
-    
+
     def _add_node_log(self, message: str):
         """Add a node log message to the buffer"""
         self._add_log("[NODE]", message)
-    
+
     def _log_message(self, message: str):
         """Add a message to the log buffer"""
         self._add_log("[CTRL]", message)
-    
+
     def _start_journal_reader(self):
         """Start background thread to read logs from journal"""
         self.journal_running = True
         self.journal_thread = threading.Thread(target=self._journal_reader_loop, daemon=True)
         self.journal_thread.start()
         self._log_message(f"Journal reader started, monitoring '{JOURNAL_IDENTIFIER}'")
-    
+
     def _stop_journal_reader(self):
         """Stop the journal reader thread"""
         self.journal_running = False
         if self.journal_thread:
             self.journal_thread.join(timeout=2)
-    
+
     def _journal_reader_loop(self):
         """Background thread to read logs from systemd journal"""
         try:
             # Open journal reader
             j = journal.Reader()
             j.add_match(SYSLOG_IDENTIFIER=JOURNAL_IDENTIFIER)
-            
+
             # Get the cursor of the last entry
             j.seek_tail()
             j.get_previous(1)
@@ -185,58 +185,58 @@ class WebController(Controller):
             for entry in j:
                 last_cursor = entry.get('__CURSOR', None)
                 break
-            
+
             # Now seek to tail and read backwards to get recent logs
             j.seek_tail()
             j.get_previous(100)
-            
+
             existing_logs = []
             for entry in j:
                 message = entry.get('MESSAGE', '')
                 if message:
                     message = message.rstrip()
                     existing_logs.append(message)
-            
+
             # Add existing logs (newest first, reverse to oldest first)
             for msg in reversed(existing_logs):
                 self._add_node_log(msg)
-            
+
             if existing_logs:
                 self._log_message(f"Loaded {len(existing_logs)} existing node logs")
-            
+
             # Now follow new entries using the cursor
             if last_cursor:
                 j.seek_cursor(last_cursor)
                 j.get_next(1)
-            
+
             while self.journal_running:
                 # Wait for new entries (1 second timeout)
                 ret = j.wait(1000000)
-                
+
                 if ret > 0:  # New entries available
                     for entry in j:
                         message = entry.get('MESSAGE', '')
                         if message:
                             message = message.rstrip()
                             self._add_node_log(message)
-                
+
         except Exception as e:
             self._log_message(f"Journal reader error: {e}")
-    
+
     def update_node_measurement(self, node_name: str, measurement: Dict[str, Any]):
         """Store a measurement from a node for web display"""
         self.node_measurements[node_name] = {
             **measurement,
             'last_update': datetime.now().isoformat()
         }
-    
+
     def _get_system_status(self) -> Dict[str, Any]:
         """Get current system status for API"""
         nodes_status = []
-        
+
         for name, node in self.nodes.items():
             measurement = self.node_measurements.get(name, {})
-            
+
             # Calculate connection duration
             connection_duration = None
             if node.sock and hasattr(node, 'connection_time') and node.connection_time:
@@ -245,7 +245,7 @@ class WebController(Controller):
                 hours = int((duration % 86400) // 3600)
                 minutes = int((duration % 3600) // 60)
                 seconds = int(duration % 60)
-                
+
                 if days > 0:
                     connection_duration = f"{days}d {hours}h {minutes}m"
                 elif hours > 0:
@@ -261,7 +261,7 @@ class WebController(Controller):
                     connection_duration = f"disconnected {int(duration // 60)}m ago"
                 else:
                     connection_duration = f"disconnected {int(duration // 3600)}h ago"
-            
+
             # Determine display state
             if node.sock:
                 if node.state == NodeState.STARTED:
@@ -274,7 +274,7 @@ class WebController(Controller):
                     display_state = node.state.name if isinstance(node.state, NodeState) else str(node.state)
             else:
                 display_state = "DISCONNECTED"
-            
+
             nodes_status.append({
                 'name': name,
                 'ip': node.ip,
@@ -286,7 +286,7 @@ class WebController(Controller):
                 'heartbeat_count': node.heartbeat_count,
                 'measurement': measurement
             })
-        
+
         return {
             'nodes': nodes_status,
             'total_nodes': len(self.nodes),
@@ -295,7 +295,7 @@ class WebController(Controller):
             'server_uptime': time.time() - self._start_time,
             'journal_enabled': HAS_SYSTEMD
         }
-    
+
     async def _broadcast_status(self):
         """Broadcast status updates to SSE clients"""
         last_status = None
@@ -309,15 +309,15 @@ class WebController(Controller):
                     except Exception:
                         self.sse_clients.discard(client)
             await asyncio.sleep(1)
-    
+
     async def handle_index(self, request):
         """Serve the main HTML page"""
         return web.Response(text=self._get_html_template(), content_type='text/html')
-    
+
     async def handle_api_status(self, request):
         """Return current system status as JSON"""
         return web.json_response(self._get_system_status())
-    
+
     async def handle_api_status_stream(self, request):
         """SSE stream for status updates"""
         response = web.StreamResponse(
@@ -330,7 +330,7 @@ class WebController(Controller):
         )
         await response.prepare(request)
         self.sse_clients.add(response)
-        
+
         try:
             while self.web_running:
                 status = self._get_system_status()
@@ -340,13 +340,13 @@ class WebController(Controller):
             pass
         finally:
             self.sse_clients.discard(response)
-        
+
         return response
-    
+
     async def handle_api_logs(self, request):
         """Return recent logs"""
         return web.json_response({'logs': [msg for _, msg in self.log_entries]})
-    
+
     async def handle_api_logs_stream(self, request):
         """SSE stream for log updates using version tracking"""
         response = web.StreamResponse(
@@ -358,17 +358,17 @@ class WebController(Controller):
             }
         )
         await response.prepare(request)
-        
+
         # Track the last version sent to this client
         last_version = -1
-        
+
         try:
             # Send all existing logs first
             if self.log_entries:
                 all_logs = [msg for _, msg in self.log_entries]
                 await response.write(f"data: {json.dumps(all_logs)}\n\n".encode())
                 last_version = self.log_entries[-1][0] if self.log_entries else -1
-            
+
             while self.web_running:
                 # Find any new logs since last_version
                 new_logs = []
@@ -376,31 +376,31 @@ class WebController(Controller):
                     if version > last_version:
                         new_logs.append(msg)
                         last_version = version
-                
+
                 if new_logs:
                     await response.write(f"data: {json.dumps(new_logs)}\n\n".encode())
-                
+
                 await asyncio.sleep(0.5)
         except Exception:
             pass
-        
+
         return response
-    
+
     async def handle_api_logs_clear(self, request):
         """Clear the log buffer"""
         self.log_entries.clear()
         self._log_counter = 0
         return web.json_response({'status': 'ok'})
-    
+
     async def handle_api_command(self, request):
         """Handle command requests to nodes"""
         data = await request.json()
         node_name = data.get('node')
         command = data.get('command')
         params = data.get('params', {})
-        
+
         result = {'status': 'ok', 'message': ''}
-        
+
         try:
             if command == 'query_state':
                 state = self.query_node_state(node_name)
@@ -409,28 +409,28 @@ class WebController(Controller):
                 else:
                     result['status'] = 'error'
                     result['message'] = f"Failed to query {node_name} state"
-            
+
             elif command == 'start':
                 if self.start_node(node_name):
                     result['message'] = f"Node {node_name} started"
                 else:
                     result['status'] = 'error'
                     result['message'] = f"Failed to start {node_name}"
-            
+
             elif command == 'stop':
                 if self.stop_node(node_name):
                     result['message'] = f"Node {node_name} stopped"
                 else:
                     result['status'] = 'error'
                     result['message'] = f"Failed to stop {node_name}"
-            
+
             elif command == 'reboot':
                 if self.reboot_node(node_name):
                     result['message'] = f"Node {node_name} rebooting"
                 else:
                     result['status'] = 'error'
                     result['message'] = f"Failed to reboot {node_name}"
-            
+
             elif command == 'log_start':
                 cnf = self.send_request_to_node(node_name, fgr.FGRReqCnf.FGR_REQ_CNF_LOG_START, b"", timeout=3.0)
                 if cnf and cnf.error_or_state == fgr.FGRError.FGR_ERROR_NONE:
@@ -438,7 +438,7 @@ class WebController(Controller):
                 else:
                     result['status'] = 'error'
                     result['message'] = f"Failed to start logging on {node_name}"
-            
+
             elif command == 'log_stop':
                 cnf = self.send_request_to_node(node_name, fgr.FGRReqCnf.FGR_REQ_CNF_LOG_STOP, b"", timeout=3.0)
                 if cnf and cnf.error_or_state == fgr.FGRError.FGR_ERROR_NONE:
@@ -446,7 +446,7 @@ class WebController(Controller):
                 else:
                     result['status'] = 'error'
                     result['message'] = f"Failed to stop logging on {node_name}"
-            
+
             elif command == 'log_level':
                 level = params.get('level', 1)  # Default INFO
                 if level < 0 or level > 3:
@@ -470,13 +470,13 @@ class WebController(Controller):
             else:
                 result['status'] = 'error'
                 result['message'] = f"Unknown command: {command}"
-        
+
         except Exception as e:
             result['status'] = 'error'
             result['message'] = str(e)
-        
+
         return web.json_response(result)
-    
+
     def start_web(self):
         """Start the web server"""
         self.web_app = web.Application()
@@ -487,7 +487,7 @@ class WebController(Controller):
         self.web_app.router.add_get('/api/logs/stream', self.handle_api_logs_stream)
         self.web_app.router.add_post('/api/logs/clear', self.handle_api_logs_clear)
         self.web_app.router.add_post('/api/command', self.handle_api_command)
-        
+
         async def start_server():
             self.web_runner = web.AppRunner(self.web_app)
             await self.web_runner.setup()
@@ -497,16 +497,16 @@ class WebController(Controller):
             print(f"Web interface running at http://0.0.0.0:{self.http_port}")
             while self.web_running:
                 await asyncio.sleep(1)
-        
+
         def run_loop():
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             loop.run_until_complete(start_server())
             loop.run_forever()
-        
+
         self.web_thread = threading.Thread(target=run_loop, daemon=True)
         self.web_thread.start()
-    
+
     def stop_web(self):
         """Stop the web server"""
         self.web_running = False
@@ -515,7 +515,7 @@ class WebController(Controller):
                 loop = asyncio.new_event_loop()
                 loop.run_until_complete(self.web_runner.cleanup())
             threading.Thread(target=cleanup, daemon=True).start()
-    
+
     def start(self) -> bool:
         """Start the controller and web server"""
         # Make sure connection_time is tracked
@@ -523,18 +523,18 @@ class WebController(Controller):
             Node.connection_time = 0.0
         if not hasattr(Node, 'last_seen'):
             Node.last_seen = 0.0
-        
+
         if not super().start():
             return False
         self.start_web()
         return True
-    
+
     def stop(self) -> None:
         """Stop the controller and web server"""
         self._stop_journal_reader()
         self.stop_web()
         super().stop()
-    
+
     def _get_html_template(self) -> str:
         """Return the HTML template"""
         return '''<!DOCTYPE html>
@@ -553,7 +553,7 @@ class WebController(Controller):
         }
         h1 { color: #333; margin-bottom: 5px; }
         .subtitle { color: #666; margin-top: 0; margin-bottom: 20px; }
-        
+
         .status-banner {
             background: #fff3e0;
             border-left: 4px solid #ffc107;
@@ -570,7 +570,7 @@ class WebController(Controller):
         .status-icon { font-size: 24px; }
         .status-text { flex: 1; }
         .status-details { font-size: 12px; color: #666; margin-top: 4px; }
-        
+
         .node-grid {
             display: grid;
             grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
@@ -653,7 +653,7 @@ class WebController(Controller):
             border-radius: 4px;
             border: 1px solid #ccc;
         }
-        
+
         .debug-panel {
             background: white;
             border-radius: 8px;
@@ -696,7 +696,7 @@ class WebController(Controller):
 <body>
     <h1>🚂 FGR Controller</h1>
     <div class="subtitle">Front Garden Railway - Node Monitoring & Control</div>
-    
+
     <div id="statusBanner" class="status-banner waiting">
         <div class="status-icon">⏳</div>
         <div class="status-text">
@@ -704,11 +704,11 @@ class WebController(Controller):
             <div class="status-details">Waiting for nodes to connect</div>
         </div>
     </div>
-    
+
     <div id="nodeGrid" class="node-grid">
         <div style="text-align: center; grid-column: 1/-1; padding: 40px;">Loading nodes...</div>
     </div>
-    
+
     <div class="debug-panel">
         <div class="debug-header">
             <h2>🐛 Debug Output <span id="journalBadge" class="badge-warning">loading...</span></h2>
@@ -720,19 +720,19 @@ class WebController(Controller):
         </div>
         <div id="debugWindow" class="debug-window">Waiting for logs...</div>
     </div>
-    
+
     <div class="footer">FGR Controller</div>
-    
+
     <script>
         let statusSource = null;
         let logsSource = null;
         let autoScrollEnabled = true;
         let scrollTimeout = null;
         let logBuffer = [];
-        
+
         // Log level names
         const logLevelNames = ['DEBUG', 'INFO', 'WARN', 'ERROR'];
-        
+
         function setupDebugWindow() {
             const debugWindow = document.getElementById('debugWindow');
             if (!debugWindow) return;
@@ -747,7 +747,7 @@ class WebController(Controller):
                 }
             });
         }
-        
+
         function selectAllLogs() {
             const debugWindow = document.getElementById('debugWindow');
             if (!debugWindow) return;
@@ -757,7 +757,7 @@ class WebController(Controller):
             selection.removeAllRanges();
             selection.addRange(range);
         }
-        
+
         function copyLogsToClipboard(event) {
             const debugWindow = document.getElementById('debugWindow');
             const text = debugWindow.innerText;
@@ -772,7 +772,7 @@ class WebController(Controller):
                 fallbackCopy(text);
             }
         }
-        
+
         function fallbackCopy(text) {
             const textarea = document.createElement('textarea');
             textarea.value = text;
@@ -782,19 +782,19 @@ class WebController(Controller):
             document.body.removeChild(textarea);
             alert('Copied to clipboard');
         }
-        
+
         function clearLogs() {
             fetch('/api/logs/clear', {method: 'POST'})
                 .then(() => { document.getElementById('debugWindow').innerHTML = 'Logs cleared...'; logBuffer = []; })
                 .catch(e => console.error('Error clearing logs:', e));
         }
-        
+
         function escapeHtml(text) {
             const div = document.createElement('div');
             div.textContent = text;
             return div.innerHTML;
         }
-        
+
         function appendLogs(newLogs) {
             const debugWindow = document.getElementById('debugWindow');
             if (!debugWindow) return;
@@ -817,14 +817,14 @@ class WebController(Controller):
             logBuffer = logBuffer.concat(newLogs);
             if (wasAtBottom) debugWindow.scrollTop = debugWindow.scrollHeight;
         }
-        
+
         function updateUI(status) {
             const badge = document.getElementById('journalBadge');
             if (badge) {
                 badge.textContent = status.journal_enabled ? '✓ Journal Active' : '⚠️ Journal Disabled';
                 badge.className = status.journal_enabled ? 'badge-success' : 'badge-warning';
             }
-            
+
             const banner = document.getElementById('statusBanner');
             const total = status.total_nodes;
             const connected = status.connected_nodes;
@@ -845,9 +845,9 @@ class WebController(Controller):
                 banner.querySelector('.status-text > div:first-child').textContent = 'System Status: Waiting for nodes';
                 banner.querySelector('.status-details').textContent = 'No nodes connected yet.';
             }
-            
+
             const grid = document.getElementById('nodeGrid');
-            
+
             // First time or node count changed: rebuild entire grid
             const existingCards = grid.querySelectorAll('.node-card');
             if (existingCards.length !== status.nodes.length) {
@@ -857,7 +857,7 @@ class WebController(Controller):
                     const isOnline = node.connected;
                     const measurement = node.measurement || {};
                     const waterHeight = measurement.water_height;
-                    
+
                     html += `
                         <div class="node-card ${isOnline ? 'online' : 'offline'}" data-node-name="${node.name}">
                             <div class="node-header">
@@ -901,7 +901,7 @@ class WebController(Controller):
                     const card = document.querySelector(`.node-card[data-node-name="${node.name}"]`);
                     if (card) {
                         const isOnline = node.connected;
-                        
+
                         // Update online/offline class
                         if (isOnline) {
                             card.classList.add('online');
@@ -910,13 +910,13 @@ class WebController(Controller):
                             card.classList.add('offline');
                             card.classList.remove('online');
                         }
-                        
+
                         // Update state text
                         const stateSpan = card.querySelector('.node-state');
                         if (stateSpan) {
                             stateSpan.innerHTML = `${isOnline ? '🟢 Online' : '🔴 Offline'} - <span class="node-state-value">${escapeHtml(node.state)}</span>`;
                         }
-                        
+
                         // Update metrics
                         const durationSpan = card.querySelector('.node-connection-duration');
                         if (durationSpan) {
@@ -926,7 +926,7 @@ class WebController(Controller):
                         if (msgCountSpan) msgCountSpan.textContent = node.message_count;
                         const hbCountSpan = card.querySelector('.node-heartbeat-count');
                         if (hbCountSpan) hbCountSpan.textContent = node.heartbeat_count;
-                        
+
                         // Update measurement display
                         const measurement = node.measurement || {};
                         const waterHeight = measurement.water_height;
@@ -952,7 +952,7 @@ class WebController(Controller):
                 }
             }
         }
-        
+
         async function sendCommand(nodeName, command) {
             try {
                 const response = await fetch('/api/command', {
@@ -966,7 +966,7 @@ class WebController(Controller):
                 }
             } catch (e) { console.error(`[ERROR] ${e.message}`); }
         }
-        
+
         async function setLogLevel(nodeName, level) {
             try {
                 const response = await fetch('/api/command', {
@@ -980,7 +980,7 @@ class WebController(Controller):
                 }
             } catch (e) { console.error(`[ERROR] ${e.message}`); }
         }
-        
+
         function setupStatusStream() {
             if (statusSource) statusSource.close();
             const source = new EventSource('/api/status/stream');
@@ -995,7 +995,7 @@ class WebController(Controller):
             };
             statusSource = source;
         }
-        
+
         function setupLogsStream() {
             if (logsSource) logsSource.close();
             const source = new EventSource('/api/logs/stream');
@@ -1012,7 +1012,7 @@ class WebController(Controller):
             };
             logsSource = source;
         }
-        
+
         setupDebugWindow();
         setupStatusStream();
         setupLogsStream();
@@ -1023,7 +1023,7 @@ class WebController(Controller):
 
 class LevelGaugeHandler(NodeHandler):
     """Handler for level gauge nodes"""
-    
+
     def on_indication(self, msg: fgr.FGRMsg) -> bool:
         ind_type = msg.subtype
         if ind_type == 0x100:  # Level reading
@@ -1042,7 +1042,7 @@ class LevelGaugeHandler(NodeHandler):
 
 class TestHandler(NodeHandler):
     """Handler for test nodes"""
-    
+
     def on_indication(self, msg: fgr.FGRMsg) -> bool:
         ind_type = msg.subtype
         if ind_type > fgr.FGRIndRsp.FGR_IND_RSP_LAST:
@@ -1069,14 +1069,14 @@ def main():
     parser.add_argument("--log-level", type=str, default="INFO",
                         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
                         help="Logging level (default: INFO)")
-    
+
     args = parser.parse_args()
-    
+
     logging.basicConfig(
         level=getattr(logging, args.log_level),
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
-    
+
     # Resolve config file
     cfg_file = args.cfg
     if not cfg_file:
@@ -1084,7 +1084,7 @@ def main():
         if default_cfg.exists():
             cfg_file = default_cfg
             print(f"Using default config: {cfg_file}")
-    
+
     controller = WebController(
         listen_ip=args.ip,
         port=args.port,
@@ -1092,13 +1092,13 @@ def main():
         cfg_file=cfg_file,
         http_port=args.http_port
     )
-    
+
     # Register handlers if not loaded from files
     if 'level_gauge' not in controller.node_handlers:
         controller.node_handlers['level_gauge'] = LevelGaugeHandler
     if 'test' not in controller.node_handlers:
         controller.node_handlers['test'] = TestHandler
-    
+
     print(f"\n{'='*60}")
     print("FGR Controller with Web Interface")
     print(f"{'='*60}")
@@ -1108,19 +1108,19 @@ def main():
     print(f"Configured nodes: {controller.get_node_names()}")
     print(f"{'='*60}")
     print("Press Ctrl+C to stop\n")
-    
+
     def signal_handler(signum, frame):
         print("\nShutting down...")
         controller.stop()
         sys.exit(0)
-    
+
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
-    
+
     if not controller.start():
         print("Failed to start controller")
         sys.exit(1)
-    
+
     try:
         while True:
             time.sleep(1)

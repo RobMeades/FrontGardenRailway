@@ -217,7 +217,10 @@ static int32_t init(context_t *context)
 
     // Initialize networking
     if (err == ESP_OK) {
-        err = fgr_network_init(CONFIG_FGR_NETWORK_WIFI_SSID, CONFIG_FGR_NETWORK_WIFI_PASSWORD, WIFI_AUTH_OPEN);
+        err = fgr_network_init(CONFIG_FGR_NETWORK_WIFI_SSID,
+                               CONFIG_FGR_NETWORK_WIFI_PASSWORD,
+                               WIFI_AUTH_OPEN,
+                               CONFIG_FGR_NETWORK_WIFI_REDUCED_TX_POWER);
     }
 
     // Check for an OTA update, which may restart the system
@@ -229,13 +232,16 @@ static int32_t init(context_t *context)
 
     // Forward logging to the server
     if (err == ESP_OK) {
-        err = fgr_log_init(CONFIG_FGR_NETWORK_CONTROLLER_IP_ADDRESS, CONFIG_FGR_LOG_PORT, FGR_LOG_LEVEL_INFO);
+        err = fgr_log_init(CONFIG_FGR_NETWORK_CONTROLLER_IP_ADDRESS,
+                           CONFIG_FGR_LOG_PORT, FGR_LOG_LEVEL_INFO);
     }
 
     // Initialise messaging
     if (err == ESP_OK) {
-        err = fgr_msg_init(CONFIG_FGR_NETWORK_CONTROLLER_IP_ADDRESS, CONFIG_FGR_MSG_PORT,
-                          CONFIG_FGR_MSG_HEARTBEAT_SECONDS, state_cb, context);
+        err = fgr_msg_init(CONFIG_FGR_NETWORK_CONTROLLER_IP_ADDRESS,
+                           CONFIG_FGR_MSG_PORT,
+                           CONFIG_FGR_MSG_HEARTBEAT_SECONDS,
+                           state_cb, context);
     }
 
     // Create a message send queue

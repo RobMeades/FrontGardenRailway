@@ -35,8 +35,13 @@
  * COMPILE-TIME MACROS
  * -------------------------------------------------------------- */
 
- // Logging prefix
- #define TAG "network"
+// Logging prefix
+#define TAG "network"
+
+#ifndef FGR_NETWORK_IP_ADDRESS_ASSIGNMENT_WAIT_SECONDS
+// How long to wait for an IP address to be assigned, in seconds
+#define FGR_NETWORK_IP_ADDRESS_ASSIGNMENT_WAIT_SECONDS 60
+#endif
 
 /* ----------------------------------------------------------------
  * TYPES
@@ -104,7 +109,8 @@ static void ip_event_handler(void *arg, esp_event_base_t event_base,
 
 // Initialise networking.
 int32_t fgr_network_init(const char *ssid, const char *password,
-                         wifi_auth_mode_t auth_mode)
+                         wifi_auth_mode_t auth_mode,
+                         bool reduced_tx_power)
 {
     esp_err_t err = ESP_ERR_INVALID_ARG;
     wifi_config_t wifi_config = {0};
@@ -209,19 +215,24 @@ int32_t fgr_network_init(const char *ssid, const char *password,
             }
         }
 
-        // Set max TX power to 8 dBm as some ESP32 boards don't work reliably higher than that
-        if (err == ESP_OK) {
-            // The parameter to esp_wifi_set_max_tx_power() is in quarters of a dB
-            esp_err_t ps_err = esp_wifi_set_max_tx_power(34);
-            if (ps_err != ESP_OK) {
-                ESP_LOGW(TAG, "Unable to set TX max power to 8 dBm: %s.", esp_err_to_name(ps_err));
-                // Continue anyway, this is not fatal
+        if (reduced_tx_power) {
+            // Set max TX power to 8 dBm
+            if (err == ESP_OK) {
+                // The parameter to esp_wifi_set_max_tx_power() is in quarters of a dB
+                esp_err_t ps_err = esp_wifi_set_max_tx_power(34);
+                if (ps_err != ESP_OK) {
+                    ESP_LOGW(TAG, "Unable to set TX max power to 8 dBm: %s.", esp_err_to_name(ps_err));
+                    // Continue anyway, this is not fatal
+                }
             }
         }
 
         // Wait for IP address (with timeout)
         if (err == ESP_OK) {
-            if (xSemaphoreTake(g_wifi_semaphore, pdMS_TO_TICKS(60000)) == pdTRUE) {
+            ESP_LOGI(TAG, "Waiting %d second(s) to be assigned IP address.",
+                     FGR_NETWORK_IP_ADDRESS_ASSIGNMENT_WAIT_SECONDS);
+            if (xSemaphoreTake(g_wifi_semaphore,
+                               pdMS_TO_TICKS(FGR_NETWORK_IP_ADDRESS_ASSIGNMENT_WAIT_SECONDS * 1000)) == pdTRUE) {
                 ESP_LOGI(TAG, "WiFi connected, IP obtained.");
             } else {
                 ESP_LOGE(TAG, "Failed to obtain IP address within timeout.");
@@ -251,6 +262,15 @@ void fgr_network_deinit()
         g_sta_netif = NULL;
     }
 }
+
+/** Use reduced TX power: in case where the ESP32 board
+ * and the AP are in close proximit (e.g. less than a metre
+ * apart), the connection can be more reliable if the
+ * ESP32 uses a reduced TX power.
+ *
+ * @return ESP_OK on success, else a negative value from esp_err_t.
+ */
+int32_t fgr_network_tx_power_8_dBm_max();
 
 // Return the hostname part of a URL.
 size_t fgr_network_hostname_from_url(const char *url, char *buffer, size_t length)

@@ -1,5 +1,8 @@
 {
     "default.bin": {
         "10.10.3.2": "test.bin"
+    },
+    "default.bin": {
+        "10.10.3.3": "level_gauge.bin"
     }
 }

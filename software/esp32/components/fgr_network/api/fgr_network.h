@@ -44,18 +44,24 @@ extern "C" {
  * have been created.  Note that this function will create a semaphore
  * that is never destroyed.
  *
- * @param ssid      the SSID of the Wi-Fi access point to connect to,
- *                  e.g. MusicalBox.
- * @param password  the password to apply when connecting to the access
- *                  point, must be NULL or an empty string ("") if
-  *                 auth_mode is WIFI_AUTH_OPEN.
- * @param auth_mode the Wi-Fi authetication mode to use when connecting
- *                  to the access point.
+ * @param ssid             the SSID of the Wi-Fi access point to
+ *                         connect to e.g. FGR.
+ * @param password         the password to apply when connecting to
+ *                         the access point, must be NULL or an empty
+ *                         string ("") if auth_mode is WIFI_AUTH_OPEN.
+ * @param auth_mode        the Wi-Fi authetication mode to use when
+ *                         connecting to the access point.
+ * @param reduced_tx_power in cases where the ESP32 board and the AP
+ *                         are in close proximit y(e.g. less than a metre
+ *                         apart), the connection can be more reliable
+ *                         if the ESP32 uses a reduced TX power (max
+ *                         8 dBm).
  * @return          ESP_OK on success, else a negative value from
  *                  esp_err_t.
  */
 int32_t fgr_network_init(const char *ssid, const char *password,
-                         wifi_auth_mode_t auth_mode);
+                         wifi_auth_mode_t auth_mode,
+                         bool reduced_tx_power);
 
 /** Deinitialise networking.
  */
@@ -66,6 +72,7 @@ void fgr_network_deinit();
  * (i.e. what strlen() would return) is the return value.
  * The value is guaranteed to be a string if the return
  * value is non-negative.
+
  *
  * IMPORTANT the return value may be larger than
  * buffer_len if buffer is not big enough to hold the

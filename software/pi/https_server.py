@@ -212,12 +212,12 @@ def load_ip_to_file_map(config_file):
     try:
         with open(config_file, 'r') as f:
             ip_to_file_map = json.load(f)
-        
+
         # Validate the structure
         if not isinstance(ip_to_file_map, dict):
             logger.error(f"Invalid configuration: root must be a dictionary, got {type(ip_to_file_map)}")
             return None
-        
+
         for requested_file, ip_map in ip_to_file_map.items():
             if not isinstance(ip_map, dict):
                 logger.error(f"Invalid configuration: mapping for '{requested_file}' must be a dictionary, got {type(ip_map)}")
@@ -226,7 +226,7 @@ def load_ip_to_file_map(config_file):
                 if not isinstance(ip, str) or not isinstance(actual_file, str):
                     logger.error(f"Invalid configuration: IP and filename must be strings in mapping for '{requested_file}'")
                     return None
-        
+
         logger.info(f"Loaded IP mapping configuration from '{config_file}'")
         return ip_to_file_map
     except FileNotFoundError:

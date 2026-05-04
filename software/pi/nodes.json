@@ -3,5 +3,10 @@
         "ip": "10.10.3.2",
         "type": "test",
         "heartbeat_timeout": 60
+    },
+    "level_gauge_1": {
+        "ip": "10.10.3.3",
+        "type": "level_gauge",
+        "heartbeat_timeout": 60
     }
 }

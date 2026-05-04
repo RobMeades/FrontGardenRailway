@@ -13,6 +13,13 @@ menu "FGR Network Configuration"
             WiFi password (WPA or WPA2) to use.
             Can be left blank if the network has no security set.
 
+    config FGR_NETWORK_WIFI_REDUCED_TX_POWER
+        int "WiFi reduced TX power"
+        default 0
+        help
+            Limit max TX power to 8 dBm.
+            can improve reliability when within 1 metre of AP.
+
     config FGR_NETWORK_CONTROLLER_IP_ADDRESS
         string "IP address of the controller"
         default "10.10.3.1"
