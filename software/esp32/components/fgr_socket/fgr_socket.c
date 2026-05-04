@@ -312,6 +312,7 @@ static void task_rx(void *param)
         }
     }
 
+    ESP_LOGI(TAG, "Socket receive task exiting.");
     esp_task_wdt_delete(NULL);
     vTaskDelete(NULL);
 }

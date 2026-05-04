@@ -331,6 +331,7 @@ static void task_send_queue(void *param)
         vTaskDelay(pdMS_TO_TICKS(FGR_UTIL_WATCHDOG_FEED_TIME_MS));
     }
 
+    ESP_LOGI(TAG, "Message send task exiting.");
     esp_task_wdt_delete(NULL);
     vTaskDelete(NULL);
 }
