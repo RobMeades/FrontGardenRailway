@@ -112,10 +112,11 @@ class Node:
     custom_data: Dict[str, Any] = field(default_factory=dict)
     stop_event: threading.Event = field(default_factory=threading.Event)
     heartbeat_timeout: int = 60
+    connection_time: float = 0
+    last_seen: float = 0
     # Debug counters
     message_count: int = 0
     heartbeat_count: int = 0
-
 
 # ============================================================================
 # Node Handler Base Class
@@ -444,6 +445,9 @@ class Controller:
         if node.state == NodeState.DISCONNECTED:
             return
 
+        # Record last seen time
+        node.last_seen = time.time()
+
         self.logger.debug(f"[{node.name}] Disconnecting node (msgs_rcvd={node.message_count}, heartbeats={node.heartbeat_count})")
         node.stop_event.set()
         node.state = NodeState.DISCONNECTED
@@ -562,12 +566,9 @@ class Controller:
                     node.message_count = 0
                     node.heartbeat_count = 0
 
-                    # Set connection time if not already set (first connection or reconnection)
-                    if not hasattr(node, 'connection_time') or node.connection_time == 0:
-                        node.connection_time = time.time()
-                        self.logger.info(f"Node {node.name} first connection at {node.connection_time}")
-                    else:
-                        self.logger.info(f"Node {node.name} reconnected, connection_time preserved as {node.connection_time}")
+                    # Set connection time to now for every connection
+                    node.connection_time = time.time()
+                    self.logger.info(f"Node {node.name} connected at {node.connection_time}")
 
                     # Create handler
                     node.handler = self._get_handler_for_node(node)
@@ -814,6 +815,48 @@ class Controller:
                 node.state = NodeState.STOPPED
             return True
         return False
+
+    def reboot_node(self, node_name: str, timeout: float = 5.0) -> bool:
+        """Reboot a node"""
+        self.logger.info(f"Sending reboot request to {node_name}")
+        cnf = self.send_request_to_node(node_name, fgr.FGRReqCnf.FGR_REQ_CNF_REBOOT, b"", timeout)
+        success = cnf is not None and cnf.error_or_state == fgr.FGRError.FGR_ERROR_NONE
+        if success:
+            self.logger.info(f"Node {node_name} reboot confirmed")
+        else:
+            self.logger.warning(f"Node {node_name} reboot failed or no response")
+        return success
+
+    def ping_node(self, node_name: str, timeout: float = 3.0) -> Optional[int]:
+        """Send a PING request to a node and return its state"""
+        self.logger.info(f"Sending PING to {node_name}")
+        cnf = self.send_request_to_node(node_name, fgr.FGRReqCnf.FGR_REQ_CNF_PING, b"", timeout)
+        if cnf and cnf.error_or_state == fgr.FGRError.FGR_ERROR_NONE:
+            if len(cnf.contents) >= 1:
+                state_value = cnf.contents[0]
+                # Update the node's state
+                node = self.nodes.get(node_name)
+                if node:
+                    node.fgr_state = state_value
+                    # Also update NodeState if needed
+                    if state_value == fgr.FGRState.FGR_STATE_STARTED:
+                        node.state = NodeState.STARTED
+                    elif state_value == fgr.FGRState.FGR_STATE_STOPPED:
+                        node.state = NodeState.STOPPED
+                    elif state_value == fgr.FGRState.FGR_STATE_NEEDS_CFG:
+                        node.state = NodeState.NEEDS_CFG
+                self.logger.info(f"Node {node_name} state: {state_value}")
+                return state_value
+
+    def query_node_state(self, node_name: str, timeout: float = 3.0) -> Optional[fgr.FGRState]:
+        """Query a node's current state using PING"""
+        state_value = self.ping_node(node_name, timeout)
+        if state_value is not None:
+            try:
+                return fgr.FGRState(state_value)
+            except ValueError:
+                self.logger.warning(f"Unknown state value {state_value} from {node_name}")
+        return None
 
     def get_node(self, name: str) -> Optional[Node]:
         return self.nodes.get(name)

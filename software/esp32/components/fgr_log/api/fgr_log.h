@@ -26,7 +26,7 @@
 extern "C" {
 #endif
 
-// Required for fgr_log_level_t.
+// Required for fgr_log_level_t and fgr_msg_t.
 #include "../../../../../protocol/fgr_protocol.h"
 
 /* ----------------------------------------------------------------
@@ -69,6 +69,33 @@ void fgr_log_deinit();
  *              esp_err_t.
  */
 int32_t fgr_log_set_min_level(fgr_log_level_t level);
+
+/** Stop logging.
+ *
+ * @return  ESP_OK on success, else a negative value from esp_err_t.
+ */
+int32_t fgr_log_off();
+
+/** Turn logging back on.
+ *
+ * @return  ESP_OK on success, else a negative value from esp_err_t.
+ */
+int32_t fgr_log_on();
+
+/**  A message receive callback that will handle
+ * the FGR_REQ_CNF_LOG_* messages: add this to your
+ * application's message receive chain (before
+ * your own handlers so that it is below them) with:
+ *
+ * fgr_msg_receive_handler_add(0, fgr_log_msg_receive_cb, NULL);
+ *
+ * ...and this code will deal with them for you.
+ *
+ * IMPORTANT: for this to work your application must
+ * set up a message send queue (i.e. must have called
+ * fgr_msg_send_queue_init()).
+ */
+bool fgr_log_msg_receive_cb(fgr_msg_t *msg, void *param);
 
 #ifdef __cplusplus
 }

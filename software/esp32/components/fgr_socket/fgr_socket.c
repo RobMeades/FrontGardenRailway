@@ -113,9 +113,9 @@ typedef struct {
 // This is _extremely_ complex because the socket is non-blocking
 // and because the reconnect process can take a while, causing the
 // task watchdog to go off.
-static void task_maintain(void *arg)
+static void task_maintain(void *param)
 {
-    context_channel_t *context_channel = (context_channel_t *) arg;
+    context_channel_t *context_channel = (context_channel_t *) param;
     void *context_connect = NULL;
 
     esp_task_wdt_add(NULL);
@@ -237,7 +237,7 @@ static void task_rx(void *param)
     // Allow us to feed the watchdog
     esp_task_wdt_add(NULL);
 
-    // Main command processing loop
+    // Receive processing loop
     while (context->running) {
 
         // Use select() to check socket state before recv()
@@ -815,6 +815,7 @@ void fgr_socket_receive_stop(void **context)
     if (context) {
         context_rx_t *context_rx = (context_rx_t *) *context;
         if (context_rx && context_rx->running) {
+            context_rx->running = false;
             // Wait for existing rx task to exit
             vTaskDelay(pdMS_TO_TICKS(1000));
             free(*context);

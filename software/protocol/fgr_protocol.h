@@ -76,10 +76,11 @@ typedef enum {
     FGR_REQ_CNF_CFG                    = 0x0001, // Configure a node; the message contents are node specific
     FGR_REQ_CNF_START                  = 0x0002, // The node should start
     FGR_REQ_CNF_STOP                   = 0x0003, // The node should stop
-    FGR_REQ_CNF_LOG_LEVEL              = 0x0004, // Set the log level; the message contents will contain the log level
+    FGR_REQ_CNF_LOG_LEVEL              = 0x0004, // Set the log level; the REQ message contents will contain the fgr_log_level_t, encoded as a uint8_t
     FGR_REQ_CNF_LOG_START              = 0x0005, // The node should start logging
     FGR_REQ_CNF_LOG_STOP               = 0x0006, // The node should stop logging
     FGR_REQ_CNF_REBOOT                 = 0x0007, // The node should reboot
+    FGR_REQ_CNF_PING                   = 0x0008, // Ping the node; the CNF message contents shall contain the node's fgr_state_t, encoded as a uint8_t
     FGR_REQ_CNF_LAST                   = 0x001f
     // Request/confirmation messages beyond FGR_REQ_CNF_LAST are node specific
 } fgr_req_cnf_t;

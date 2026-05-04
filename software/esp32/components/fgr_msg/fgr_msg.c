@@ -22,6 +22,8 @@
 #include <string.h>
 #include <inttypes.h>
 #include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/queue.h"
 #include "esp_system.h"
 #include "esp_task_wdt.h"
 #include "esp_log.h"
@@ -41,6 +43,10 @@
 
 // String to use to describe an unknown message, error value or state.
 #define MSG_UNKNOWN_STR "UNKNOWN"
+
+#ifndef FGR_MSG_TASK_SEND_QUEUE_STACK_SIZE
+#  define FGR_MSG_TASK_SEND_QUEUE_STACK_SIZE (1024 * 4)
+#endif
 
 /* ----------------------------------------------------------------
  * TYPES
@@ -63,6 +69,16 @@ typedef struct {
     fgr_msg_t *msg;  // Will be allocated when length is known
 } context_decoder_t;
 
+// Structure to contain a message that is to be sent.
+typedef struct {
+    fgr_msg_type_t type;
+    uint16_t msg_sub_type;
+    uint8_t error;   // error for CNF messages, ignored for IND messages (which retrieve state via callback)
+    uint8_t reference;   // only for CNF messages, ignored for IND messages (which just use the next reference)
+    size_t body_length;
+    void *body_contents;
+} msg_send_t;
+
 // Structure to store a message receive callback and its parameter
 // as part of a linked list
 typedef struct msg_rx_cb_t {
@@ -75,14 +91,26 @@ typedef struct msg_rx_cb_t {
 // Message receive callback list head.
 SLIST_HEAD(msg_rx_cb_list_t, msg_rx_cb_t);
 
+// Context for message send queue.
+typedef struct {
+    SemaphoreHandle_t lock;
+    TaskHandle_t task_send;
+    QueueHandle_t queue_send;
+    bool running;
+} context_send_t;
+
 // Context.
 typedef struct {
     int sock;
     void *context_sock;
     bool connected;
     SemaphoreHandle_t lock;
-    uint8_t reference;
-    fgr_state_t *heartbeat_state;
+    TaskHandle_t task_send;
+    QueueHandle_t queue_send;
+    bool running;
+    uint8_t ind_reference;
+    fgr_msg_state_cb_t state_cb;
+    void *state_cb_param;
     void *context_rx;
     struct msg_rx_cb_list_t msg_rx_cb_list;
     context_decoder_t context_decoder;
@@ -98,7 +126,7 @@ static const char *g_msg_variety_str_list[] = {"NULL", "REQ", "CNF", "IND", "RSP
 // List of known message REQ/CNF names, in order.
 static const char *g_msg_req_cnf_str_list[] = {"NULL", "CFG", "START", "STOP",
                                                "LOG_LEVEL", "LOG_START", "LOG_STOP",
-                                               "REBOOT"};
+                                               "REBOOT", "PING"};
 
 // List of known message IND/RSP names, in order.
 static const char *g_msg_ind_rsp_str_list[] = {"NULL", "NEEDS_CFG", "START", "STOP",
@@ -114,7 +142,10 @@ static const char *g_msg_state_str_list[] = {"NOT_POPULATED", "NEEDS_CFG", "STAR
                                              "STOPPED", "BUSY", "GENERIC_FAILED",
                                              "HARDWARE_FAILURE"};
 
-// Context.
+// Send queue context.
+static context_send_t g_context_send = {0};
+
+// Main context.
 static context_t g_context = {
     .sock = -1
 };
@@ -269,26 +300,50 @@ static int32_t decode_msg(context_decoder_t *decoder, const uint8_t *buffer,
 }
 
 /* ----------------------------------------------------------------
+ * STATIC FUNCTIONS: TASKS
+ * -------------------------------------------------------------- */
+
+// Send messages that were put on the send queue.
+static void task_send_queue(void *param)
+{
+    context_send_t *context = (context_send_t *) param;
+
+    // Allow us to feed the watchdog
+    esp_task_wdt_add(NULL);
+
+    // Message send-from-queue loop
+    while (context->running) {
+        msg_send_t msg;
+        if (xQueueReceive(context->queue_send, &msg, pdMS_TO_TICKS(100)) == pdPASS) {
+            if (msg.type == FGR_MSG_TYPE_CNF) {
+                fgr_msg_send_cnf(msg.msg_sub_type, msg.error, msg.reference,
+                                 msg.body_contents, msg.body_length);
+                free(msg.body_contents);
+            } else if (msg.type == FGR_MSG_TYPE_IND) {
+                fgr_msg_send_ind(msg.msg_sub_type, msg.body_contents, msg.body_length);
+                free(msg.body_contents);
+            } else {
+                ESP_LOGE(TAG, "Unknown message type on send queue (%d)!", msg.type);
+            }
+        }
+        esp_task_wdt_reset();
+        // Short delay to make sure the idle task gets in
+        vTaskDelay(pdMS_TO_TICKS(FGR_UTIL_WATCHDOG_FEED_TIME_MS));
+    }
+
+    esp_task_wdt_delete(NULL);
+    vTaskDelete(NULL);
+}
+
+/* ----------------------------------------------------------------
  * STATIC FUNCTIONS: CALLBACKS
  * -------------------------------------------------------------- */
 
 // Callback to send a heartbeat message.
 static void socket_heartbeat_cb(int sock, void *param)
 {
-    context_t *context = (context_t *) param;
-
-    if (context->lock) {
-
-        fgr_state_t state = FGR_STATE_NOT_POPULATED;
-
-        CONTEXT_LOCK(context->lock, "socket_heartbeat_cb() msg");
-        if (context->heartbeat_state) {
-            state = *context->heartbeat_state;
-        }
-        CONTEXT_UNLOCK(context->lock, "socket_heartbeat_cb() msg");
-
-        fgr_msg_send_ind(FGR_IND_RSP_HEARTBEAT, state, NULL, 0);
-    }
+    (void) param;
+    fgr_msg_send_ind(FGR_IND_RSP_HEARTBEAT, NULL, 0);
 }
 
 // Callback called by fgr_socket_channel_maintain().
@@ -362,7 +417,8 @@ static void receive_cb(void *buffer, size_t length, void *param)
 
 // Send a CNF or IND message.
 static int32_t send_msg(uint16_t type, uint8_t error_state,
-                        const uint8_t *buffer, size_t length)
+                        uint8_t reference, const uint8_t *buffer,
+                        size_t length)
 {
     int32_t err = -ESP_ERR_INVALID_STATE;
 
@@ -379,8 +435,7 @@ static int32_t send_msg(uint16_t type, uint8_t error_state,
             // IND part follows the same pattern
             _header->cnf.type = htons(type);
             _header->cnf.error = error_state;
-            _header->cnf.reference = g_context.reference;
-            g_context.reference++;
+            _header->cnf.reference = reference;
             if (buffer != NULL) {
                 *_length = htonl(length);
             }
@@ -393,11 +448,7 @@ static int32_t send_msg(uint16_t type, uint8_t error_state,
                 err = fgr_socket_send(g_context.sock, buffer, length, FGR_SOCKET_TX_RETRY_COUNT);
             }
             if (err == ESP_OK) {
-                err = _header->cnf.reference;
-                char buffer_str[64] = {0};
-                fgr_msg_name(type, buffer_str, sizeof(buffer_str));
-                ESP_LOGD(TAG, "Sent %s [0x%04x], reference %d, body length %d.",
-                         buffer_str, type, _header->cnf.reference, *_length);
+                fgr_msg_print_summary(NULL, FGR_LOG_LEVEL_INFO, type, error_state, reference, length);
                 fgr_socket_channel_activity(&g_context.context_sock);
             } else {
                 fgr_socket_channel_failed(&g_context.context_sock);
@@ -419,6 +470,9 @@ static void clean_up()
     // Stop receiving
     fgr_msg_receive_stop();
 
+    // Stop sending from a queue
+    fgr_msg_send_queue_deinit();
+
     if (g_context.lock) {
 
         CONTEXT_LOCK(g_context.lock, "clean_up() msg");
@@ -426,6 +480,8 @@ static void clean_up()
         // Lose the socket
         fgr_socket_channel_stop(&g_context.context_sock);
         g_context.sock = -1;
+        g_context.state_cb = NULL;
+        g_context.state_cb_param = NULL;
 
         // In case we were in the middle of a decode
         decoder_free(&g_context.context_decoder);
@@ -441,7 +497,8 @@ static void clean_up()
 
 // Initialise the messaging interface.
 int32_t fgr_msg_init(const char *server_ip, uint16_t port,
-                     size_t hearbeat_seconds, fgr_state_t *state)
+                     size_t heartbeat_seconds, fgr_msg_state_cb_t cb,
+                     void *cb_param)
 {
     int32_t err = ESP_OK;
 
@@ -457,9 +514,8 @@ int32_t fgr_msg_init(const char *server_ip, uint16_t port,
 
             CONTEXT_LOCK(g_context.lock, "fgr_msg_init()");
 
-            if (hearbeat_seconds > 0) {
-                g_context.heartbeat_state = state;
-            }
+            g_context.state_cb = cb;
+            g_context.state_cb_param = cb_param;
 
             // Create connection to server
             err = fgr_socket_channel_start(server_ip, port,
@@ -474,14 +530,15 @@ int32_t fgr_msg_init(const char *server_ip, uint16_t port,
 
                 // Maintain the connection
                 err = fgr_socket_channel_maintain(&g_context.context_sock,
-                                                  hearbeat_seconds,
+                                                  heartbeat_seconds,
                                                   socket_heartbeat_cb,
                                                   socket_reconnect_cb,
                                                   &g_context);
                 if (err != ESP_OK) {
                     fgr_socket_channel_stop(&g_context.context_sock);
                     g_context.sock = -1;
-                    g_context.heartbeat_state = NULL;
+                    g_context.state_cb = NULL;
+                    g_context.state_cb_param = NULL;
                 }
             }
 
@@ -510,18 +567,206 @@ void fgr_msg_deinit()
 
 // Send a CNF message.
 int32_t fgr_msg_send_cnf(fgr_req_cnf_t cnf, fgr_error_t error,
-                         const void *buffer, size_t length)
+                         uint8_t reference, const void *buffer,
+                         size_t length)
 {
     cnf = (cnf & (0x0fff)) | (FGR_MSG_TYPE_CNF << 12);
-    return send_msg((uint16_t) cnf, (uint8_t) error, buffer, length);
+    return send_msg((uint16_t) cnf, (uint8_t) error, reference, buffer, length);
 }
 
 // Send an IND message.
-int32_t fgr_msg_send_ind(fgr_ind_rsp_t ind, fgr_state_t state,
-                         const void *buffer, size_t length)
+int32_t fgr_msg_send_ind(fgr_ind_rsp_t ind, const void *buffer,
+                         size_t length)
 {
-    ind = (ind & (0x0fff)) | (FGR_MSG_TYPE_IND << 12);
-    return send_msg((uint16_t) ind, (uint8_t) state, (const uint8_t *) buffer, length);
+    int32_t err = -ESP_ERR_INVALID_STATE;
+
+    if (g_context.lock) {
+
+        fgr_state_t state = FGR_STATE_NOT_POPULATED;
+        uint8_t reference;
+        ind = (ind & (0x0fff)) | (FGR_MSG_TYPE_IND << 12);
+
+        CONTEXT_LOCK(g_context.lock, "fgr_msg_send_ind()");
+        if (g_context.state_cb) {
+            state = g_context.state_cb(g_context.state_cb_param);
+        }
+        reference = g_context.ind_reference;
+        g_context.ind_reference++;
+        CONTEXT_UNLOCK(g_context.lock, "fgr_msg_send_ind()");
+
+        err = send_msg((uint16_t) ind, (uint8_t) state, reference,
+                       (const uint8_t *) buffer, length);
+    }
+
+    return err;
+}
+
+// Initialise a send message task and queue.
+int32_t fgr_msg_send_queue_init(size_t length)
+{
+    int32_t err = -ESP_ERR_INVALID_STATE;
+
+    if (!g_context_send.lock) {
+        // Create mutex
+        err = -ESP_ERR_NO_MEM;
+        g_context_send.lock = xSemaphoreCreateMutex();
+    }
+    if (g_context_send.lock) {
+
+        err = -ESP_ERR_NO_MEM;
+        CONTEXT_LOCK(g_context_send.lock, "fgr_msg_send_queue_init()");
+        if (!g_context_send.queue_send) {
+            g_context_send.queue_send = xQueueCreate(length, sizeof(msg_send_t));
+            if (g_context_send.queue_send) {
+                g_context_send.running = true;
+                if (xTaskCreate(&task_send_queue, "send_queue", FGR_MSG_TASK_SEND_QUEUE_STACK_SIZE,
+                                &g_context_send, 5, &g_context_send.task_send) == pdPASS) {
+                    err = ESP_OK;
+                } else {
+                    g_context_send.running = false;
+                    vQueueDelete(g_context_send.queue_send);
+                    g_context.queue_send = NULL;
+                }
+            }
+        }
+        CONTEXT_UNLOCK(g_context_send.lock, "fgr_msg_send_queue_init()");
+    }
+
+    return err;
+}
+
+// Queue a CNF message.
+int32_t fgr_msg_send_queue_cnf(fgr_req_cnf_t cnf, fgr_error_t error,
+                               uint8_t reference, const void *buffer,
+                               size_t length)
+{
+    int32_t err = -ESP_ERR_INVALID_STATE;
+
+    if (g_context_send.lock) {
+
+        CONTEXT_LOCK(g_context_send.lock, "fgr_msg_send_queue_cnf()");
+        if (g_context_send.queue_send) {
+            err = -ESP_ERR_NO_MEM;
+            msg_send_t msg_send = {0};
+            msg_send.type = FGR_MSG_TYPE_CNF;
+            msg_send.msg_sub_type = cnf;
+            msg_send.error = error;
+            msg_send.reference = reference;
+            msg_send.body_length = length;
+            if (length > 0) {
+                msg_send.body_contents = malloc(length);
+                if (msg_send.body_contents) {
+                    memcpy(msg_send.body_contents, buffer, length);
+                }
+            }
+            if ((length == 0) || msg_send.body_contents) {
+                if (xQueueSend(g_context_send.queue_send, &msg_send, 0) == pdTRUE) {
+                    err = ESP_OK;
+                } else {
+                    free(msg_send.body_contents);
+                }
+            }
+        }
+        CONTEXT_UNLOCK(g_context_send.lock, "fgr_msg_send_queue_cnf()");
+    }
+
+    if (err != ESP_OK) {
+        char buffer[64];
+        cnf = MSG_CNF(cnf);
+        fgr_msg_name(cnf, buffer, sizeof(buffer));
+        ESP_LOGE(TAG, "Unable to queue CNF message %s [0x%04x], body length %d: %s.",
+                 buffer, esp_err_to_name(err));
+    }
+
+    return err;
+}
+
+// Queue an IND message.
+int32_t fgr_msg_send_queue_ind(fgr_ind_rsp_t ind, const void *buffer,
+                               size_t length)
+{
+    int32_t err = -ESP_ERR_INVALID_STATE;
+
+    if (g_context_send.lock) {
+
+        CONTEXT_LOCK(g_context_send.lock, "fgr_msg_send_queue_ind()");
+        if (g_context_send.queue_send) {
+            err = -ESP_ERR_NO_MEM;
+            msg_send_t msg_send = {0};
+            msg_send.type = FGR_MSG_TYPE_IND;
+            msg_send.msg_sub_type = ind;
+            msg_send.body_length = length;
+            if (length > 0) {
+                msg_send.body_contents = malloc(length);
+                if (msg_send.body_contents) {
+                    memcpy(msg_send.body_contents, buffer, length);
+                }
+            }
+            if ((length == 0) || msg_send.body_contents) {
+                if (xQueueSend(g_context_send.queue_send, &msg_send, 0) == pdTRUE) {
+                    err = ESP_OK;
+                } else {
+                    free(msg_send.body_contents);
+                }
+            }
+        }
+        CONTEXT_UNLOCK(g_context_send.lock, "fgr_msg_send_queue_ind()");
+    }
+
+    if (err != ESP_OK) {
+        char buffer[64];
+        ind = MSG_IND(ind);
+        fgr_msg_name(ind, buffer, sizeof(buffer));
+        ESP_LOGE(TAG, "Unable to queue CNF message %s [0x%04x], body length %d: %s.",
+                 buffer, esp_err_to_name(err));
+    }
+
+    return err;
+}
+
+// Get how many messages are currently on the send queue.
+int32_t fgr_msg_send_queue_size()
+{
+    int32_t err = -ESP_ERR_INVALID_STATE;
+
+    if (g_context_send.lock) {
+
+        err = ESP_OK;
+        CONTEXT_LOCK(g_context_send.lock, "fgr_msg_send_queue_size()");
+        if (g_context_send.queue_send) {
+            err = uxQueueMessagesWaiting(g_context_send.queue_send);
+        }
+        CONTEXT_UNLOCK(g_context_send.lock, "fgr_msg_send_queue_size()");
+    }
+
+    return err;
+}
+
+// Destroy a send message queue.
+void fgr_msg_send_queue_deinit()
+{
+    if (g_context_send.lock) {
+
+        CONTEXT_LOCK(g_context_send.lock, "fgr_msg_send_queue_deinit()");
+        if (g_context_send.running) {
+            g_context_send.running = false;
+            // Wait for the send task to exit
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            g_context_send.task_send = NULL;
+            if (g_context_send.queue_send) {
+                msg_send_t msg;
+                while (xQueueReceive(g_context_send.queue_send, &msg, 0) == pdTRUE) {
+                    free(msg.body_contents);
+                    vTaskDelay(pdMS_TO_TICKS(FGR_UTIL_WATCHDOG_FEED_TIME_MS));
+                    esp_task_wdt_reset();
+                }
+                vQueueDelete(g_context_send.queue_send);
+                g_context.queue_send = NULL;
+            }
+        }
+        CONTEXT_UNLOCK(g_context_send.lock, "fgr_msg_send_queue_deinit()");
+        // Don't delete the semaphore, someone might have it still
+    }
 }
 
 /* ----------------------------------------------------------------

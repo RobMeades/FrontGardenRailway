@@ -37,6 +37,7 @@ class FGRReqCnf(IntEnum):
     FGR_REQ_CNF_LOG_START = 5
     FGR_REQ_CNF_LOG_STOP = 6
     FGR_REQ_CNF_REBOOT = 7
+    FGR_REQ_CNF_PING = 8
     FGR_REQ_CNF_LAST = 31
 
 class FGRIndRsp(IntEnum):

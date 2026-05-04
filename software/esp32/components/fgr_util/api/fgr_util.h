@@ -37,9 +37,9 @@ extern "C" {
 #  define FGR_UTIL_WATCHDOG_FEED_TIME_MS 10
 #endif
 
-// IMPORTANT: only use the macros below as "outer" braces, with whole
+// IMPORTANT: only use the macros below as "outer" braces once, with whole
 // sets of open/close brace pairs between them, don't attempt to
-// us them "unevenly": since the macros contain braces themselves,
+// us them nested: since the macros contain braces themselves,
 // weird things will happen.
 //
 // For instance, don't do this:
