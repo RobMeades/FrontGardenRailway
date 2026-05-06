@@ -227,9 +227,9 @@ int32_t fgr_network_init(const char *ssid, const char *password,
             }
         }
 
-        // Wait for IP address (with timeout)
+        // Wait to connect and obtain IP address (with timeout)
         if (err == ESP_OK) {
-            ESP_LOGI(TAG, "Waiting %d second(s) to be assigned IP address.",
+            ESP_LOGI(TAG, "Waiting %d second(s) to connect and be assigned IP address.",
                      FGR_NETWORK_IP_ADDRESS_ASSIGNMENT_WAIT_SECONDS);
             if (xSemaphoreTake(g_wifi_semaphore,
                                pdMS_TO_TICKS(FGR_NETWORK_IP_ADDRESS_ASSIGNMENT_WAIT_SECONDS * 1000)) == pdTRUE) {

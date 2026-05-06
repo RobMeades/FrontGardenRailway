@@ -6,7 +6,7 @@ For isolation, the Raspberry Pi should be installed on a VLAN of the home networ
 # VLAN Setup
 - Set up a VLAN on the home router: on mine this was in the address range `10.10.2.x` with the Pi given a static IP address of `10.10.2.10`.
 
-- Configure a firewall for the VLAN that prevents outgoing connections with the exception of NTP service, which the Pi will need to establish time.  For instance, as of 18th March 2025 the IP address of `0.uk.pool.ntp.org` was `178.62.68.79`, so if your external network were named `br1` then the firewall configuration for it on your router might look like this:
+- Configure a firewall for the VLAN that prevents outgoing connections with the exception of NTP service, which the Pi will need to establish time.  For instance, as of 18th March 2025 the IP address of `0.uk.pool.ntp.org` was `178.62.68.79`, so if your external network were named `br1` , internal network `br0` and WLAN interface `ppp0` then the firewall configuration for the VLAN on your router might look like this:
 
   ```
   # Allow established/related connections (MUST BE FIRST OF VLAN RULES)

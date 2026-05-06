@@ -16,58 +16,55 @@
 
 """
 Test node handler.
+
+This handler inherits from NodeHandler (injected by controller).
+All notification logic is handled by the WebController.
 """
 
 # NodeHandler and FGR protocol are injected by the controller
 
 class TestHandler(NodeHandler):
     """
-    A test node handler that logs all messages and responds to configuration.
+    A test node handler for prototyping new features.
     """
-    
+
     def on_connected(self):
-        """Called when the node first connects to the controller"""
+        """Called when the node first connects"""
         self.logger.info(f"Test node {self.node.name} is online")
-    
+
     def on_disconnected(self):
         """Called when the node disconnects"""
         self.logger.info(f"Test node {self.node.name} went offline")
-    
+
     def on_needs_cfg(self, msg: fgr.FGRMsg):
-        """Called when node reports it needs configuration"""
-        self.logger.info(f"Node {self.node.name} needs configuration, sending empty CFG response")
-        # Send back the same message (FGR_IND_RSP_NEEDS_CFG) as a response with the same reference
-        self.send_response(msg.subtype, msg.reference, b"")
-    
-    def on_start(self, msg: fgr.FGRMsg):
-        """Called when node reports it has started"""
-        self.logger.info(f"Node {self.node.name} has started")
-    
-    def on_stop(self, msg: fgr.FGRMsg):
-        """Called when node reports it has stopped"""
-        self.logger.info(f"Node {self.node.name} has stopped")
-    
+        """Called when node needs configuration - send custom config data"""
+        self.logger.info(f"Node {self.node.name} needs configuration, sending test config")
+
+        # Build custom configuration data for test node
+        # This could be anything specific to your test node
+        config_data = b'\x01'  # Example: set test mode to 1
+
+        # Send response with custom config
+        self.send_response(msg.subtype, msg.reference, config_data)
+
     def on_indication(self, msg: fgr.FGRMsg) -> bool:
-        """
-        Handle device-specific indications.
-        Return True if handled, False otherwise.
-        """
+        """Handle device-specific indications"""
         ind_type = msg.subtype
-        
-        # Check if this is a device-specific indication (> FGR_IND_RSP_LAST)
+
+        # Let base class handle standard protocol (NEEDS_CFG, START, STOP)
+        # This updates node state and triggers on_needs_cfg above
+        super().on_indication(msg)
+
+        # Handle device-specific test data (from contents)
         if ind_type > fgr.FGRIndRsp.FGR_IND_RSP_LAST:
-            self.logger.info(f"Node {self.node.name} sent device indication: 0x{ind_type:03X}, value={msg.error_or_state}")
-            return True
-        
-        # Not handled - let base class handle standard indications
-        return super().on_indication(msg)
-    
-    def on_confirmation(self, msg: fgr.FGRMsg) -> bool:
-        """Handle confirmation messages"""
-        self.logger.info(f"Node {self.node.name} confirmed: type=0x{msg.subtype:03X}, error={msg.error_or_state}")
-        return True
-    
-    def on_response(self, msg: fgr.FGRMsg) -> bool:
-        """Handle response messages (responses to indications we sent)"""
-        self.logger.info(f"Node {self.node.name} responded: type=0x{msg.subtype:03X}")
+            if len(msg.contents) > 0:
+                value = msg.contents[0]
+                self.logger.info(f"Test node {self.node.name} sent test value: {value}")
+
+                if hasattr(self.controller, 'update_node_measurement'):
+                    self.controller.update_node_measurement(self.node.name, {
+                        'value': value,
+                        'type': 'test'
+                    })
+
         return True

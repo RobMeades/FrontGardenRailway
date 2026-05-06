@@ -16,58 +16,56 @@
 
 """
 Level gauge node handler.
+
+This handler inherits from NodeHandler (injected by controller).
+All notification logic is handled by the WebController.
 """
 
 # NodeHandler and FGR protocol are injected by the controller
 
+# Reservoir depth constant (mm from top to full)
+RESERVOIR_DEPTH = 1000
+
 class LevelGaugeHandler(NodeHandler):
     """
-    A level gauge node handler that reports a level measurement.
+    A level gauge node handler.
     """
-    
+
     def on_connected(self):
-        """Called when the node first connects to the controller"""
         self.logger.info(f"Level gauge node {self.node.name} is online")
-    
+
     def on_disconnected(self):
-        """Called when the node disconnects"""
         self.logger.info(f"Level gauge {self.node.name} went offline")
-    
+
     def on_needs_cfg(self, msg: fgr.FGRMsg):
-        """Called when node reports it needs configuration"""
-        self.logger.info(f"Node {self.node.name} needs configuration, sending empty CFG response")
-        # Send back the same message (FGR_IND_RSP_NEEDS_CFG) as a response with the same reference
-        self.send_response(msg.subtype, msg.reference, b"")
-    
-    def on_start(self, msg: fgr.FGRMsg):
-        """Called when node reports it has started"""
-        self.logger.info(f"Node {self.node.name} has started")
-    
-    def on_stop(self, msg: fgr.FGRMsg):
-        """Called when node reports it has stopped"""
-        self.logger.info(f"Node {self.node.name} has stopped")
-    
+        """Send level-gauge-specific configuration"""
+        self.logger.info(f"Node {self.node.name} needs configuration, sending level gauge config")
+
+        # Example: configure reporting interval and calibration
+        config_data = b'\x3C'  # 60 seconds reporting interval
+        self.send_response(msg.subtype, msg.reference, config_data)
+
     def on_indication(self, msg: fgr.FGRMsg) -> bool:
-        """
-        Handle device-specific indications.
-        Return True if handled, False otherwise.
-        """
+        """Handle device-specific indications"""
         ind_type = msg.subtype
-        
-        # Check if this is a device-specific indication (> FGR_IND_RSP_LAST)
-        if ind_type > fgr.FGRIndRsp.FGR_IND_RSP_LAST:
-            self.logger.info(f"Node {self.node.name} sent device indication: 0x{ind_type:03X}, value={msg.error_or_state}")
-            return True
-        
-        # Not handled - let base class handle standard indications
-        return super().on_indication(msg)
-    
-    def on_confirmation(self, msg: fgr.FGRMsg) -> bool:
-        """Handle confirmation messages"""
-        self.logger.info(f"Node {self.node.name} confirmed: type=0x{msg.subtype:03X}, error={msg.error_or_state}")
-        return True
-    
-    def on_response(self, msg: fgr.FGRMsg) -> bool:
-        """Handle response messages (responses to indications we sent)"""
-        self.logger.info(f"Node {self.node.name} responded: type=0x{msg.subtype:03X}")
+
+        # Let base class handle state updates
+        super().on_indication(msg)
+
+        # Handle custom level reading
+        if ind_type == 0x100:
+            if len(msg.contents) >= 2:
+                # Level reading in contents (e.g., 2 bytes)
+                level_mm = int.from_bytes(msg.contents[:2], 'big')
+                water_height = RESERVOIR_DEPTH - level_mm
+
+                self.logger.info(f"Level gauge reading: {level_mm} mm from top -> {water_height} mm water")
+
+                if hasattr(self.controller, 'update_node_measurement'):
+                    self.controller.update_node_measurement(self.node.name, {
+                        'level': level_mm,
+                        'water_height': max(0, water_height),
+                        'type': 'level_gauge'
+                    })
+
         return True

@@ -2,6 +2,7 @@
     "test_1": {
         "ip": "10.10.3.2",
         "type": "test",
+        "essential": false,
         "heartbeat_timeout": 45
     }
 }

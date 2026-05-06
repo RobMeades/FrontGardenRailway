@@ -100,6 +100,7 @@ class Node:
     ip: str
     name: str
     node_type: str = ""
+    essential: bool = True
     sock: Optional[socket.socket] = None
     state: NodeState = NodeState.DISCONNECTED
     fgr_state: int = fgr.FGRState.FGR_STATE_NOT_POPULATED
@@ -154,27 +155,35 @@ class NodeHandler:
         """
         ind_type = msg.subtype
 
+        # ALWAYS update the node's FGR state from the message
+        self.node.fgr_state = msg.error_or_state
+
+        # Try to map to a known NodeState, but don't fail if unknown
+        try:
+            self.node.state = NodeState(msg.error_or_state)
+        except ValueError:
+            # Unknown state value - keep existing state but log debug
+            if self.logger.isEnabledFor(logging.DEBUG):
+                self.logger.debug(f"Unknown state value {msg.error_or_state} from {self.node.name}")
+
+        # Now handle specific indication types
         if ind_type == fgr.FGRIndRsp.FGR_IND_RSP_NEEDS_CFG:
             self.logger.info(f"Node needs configuration (state={msg.error_or_state})")
-            self.node.fgr_state = msg.error_or_state
-            self.node.state = NodeState.NEEDS_CFG
             self.on_needs_cfg(msg)
             return True
 
         elif ind_type == fgr.FGRIndRsp.FGR_IND_RSP_START:
             self.logger.info(f"Node started operating (state={msg.error_or_state})")
-            self.node.fgr_state = msg.error_or_state
-            self.node.state = NodeState.STARTED
             self.on_start(msg)
             return True
 
         elif ind_type == fgr.FGRIndRsp.FGR_IND_RSP_STOP:
             self.logger.info(f"Node stopped operating (state={msg.error_or_state})")
-            self.node.fgr_state = msg.error_or_state
-            self.node.state = NodeState.STOPPED
             self.on_stop(msg)
             return True
 
+        # For device-specific indications, we've already updated the state
+        # Return False to allow generic handling or further processing
         return False
 
     def on_needs_cfg(self, msg: fgr.FGRMsg):
@@ -375,9 +384,9 @@ class Controller:
                     importlib.util.spec_from_file_location(module_name, py_file)
                 )
 
-                # Inject NodeHandler into the module's globals
+                # Inject NodeHandler and fgr into the module's globals
                 module.NodeHandler = NodeHandler
-                module.fgr = fgr  # Also inject fgr for convenience
+                module.fgr = fgr
                 module.__dict__['NodeHandler'] = NodeHandler
                 module.__dict__['fgr'] = fgr
 
@@ -413,10 +422,11 @@ class Controller:
                 continue
 
             node_type = node_cfg.get("type", "")
+            essential = node_cfg.get("essential", True)  # Add this line
             merged_cfg = self.config_mgr.get_node_config(name, node_type)
             heartbeat_timeout = merged_cfg.get("heartbeat_timeout", 60)
 
-            self.add_node(name, ip, node_type, heartbeat_timeout)
+            self.add_node(name, ip, node_type, heartbeat_timeout, essential)
 
     def _get_handler_for_node(self, node: Node) -> NodeHandler:
         """Create appropriate handler instance for a node"""
@@ -429,16 +439,18 @@ class Controller:
 
         return NodeHandler(node, self)
 
-    def add_node(self, name: str, ip: str, node_type: str = "", heartbeat_timeout: int = 60) -> None:
+    def add_node(self, name: str, ip: str, node_type: str = "",
+                 heartbeat_timeout: int = 60, essential: bool = True) -> None:
         """Add a node definition"""
         if name in self.nodes:
             self.logger.warning(f"Node {name} already exists")
             return
 
-        node = Node(ip=ip, name=name, node_type=node_type, heartbeat_timeout=heartbeat_timeout)
+        node = Node(ip=ip, name=name, node_type=node_type,
+                   heartbeat_timeout=heartbeat_timeout, essential=essential)
         self.nodes[name] = node
         self.nodes_by_ip[ip] = node
-        self.logger.info(f"Added node: {name} ({ip}) type='{node_type}', timeout={heartbeat_timeout}s")
+        self.logger.info(f"Added node: {name} ({ip}) type='{node_type}', timeout={heartbeat_timeout}s, essential={essential}")
 
     def _disconnect_node(self, node: Node) -> None:
         """Internal: disconnect a node"""
@@ -448,12 +460,15 @@ class Controller:
         # Record last seen time
         node.last_seen = time.time()
 
-        self.logger.debug(f"[{node.name}] Disconnecting node (msgs_rcvd={node.message_count}, heartbeats={node.heartbeat_count})")
-        node.stop_event.set()
-        node.state = NodeState.DISCONNECTED
+        self.logger.debug(f"[{node.name}] Disconnecting node (msgs_rcvd={node.message_count}, heartbeats={node.heartbeat_count}, state={node.state})")
 
+        # Set stop event first to signal receive thread
+        node.stop_event.set()
+
+        # Close socket properly
         if node.sock:
             try:
+                # Try to shutdown gracefully first
                 node.sock.shutdown(socket.SHUT_RDWR)
             except Exception:
                 pass
@@ -463,6 +478,7 @@ class Controller:
                 pass
             node.sock = None
 
+        # Clear all pending requests
         for ref, q in node.pending_requests.items():
             try:
                 q.put_nowait(None)
@@ -470,8 +486,14 @@ class Controller:
                 pass
         node.pending_requests.clear()
 
+        # Update state
+        node.state = NodeState.DISCONNECTED
+
+        # Notify handler
         if node.handler:
             node.handler.on_disconnected()
+
+        self.logger.info(f"Node {node.name} disconnected (last_seen={node.last_seen})")
 
     def start(self) -> bool:
         """Start the controller server"""
@@ -551,27 +573,56 @@ class Controller:
                     node = self.nodes_by_ip[ip]
                     self.logger.info(f"Found node {node.name} for IP {ip}, current state={node.state}")
 
+                    # If node already has a connection, clean it up properly
                     if node.sock:
-                        self.logger.debug(f"Node {node.name} already has socket, disconnecting old connection")
-                        self._disconnect_node(node)
+                        self.logger.info(f"Node {node.name} already has socket, cleaning up old connection")
+                        # Set stop event first
+                        node.stop_event.set()
 
-                    # Reset stop_event for the new connection
-                    node.stop_event.clear()
+                        # Wait a moment for the receive thread to notice
+                        time.sleep(0.1)
 
+                        # Close the old socket
+                        old_sock = node.sock
+                        node.sock = None
+                        try:
+                            old_sock.shutdown(socket.SHUT_RDWR)
+                        except Exception:
+                            pass
+                        try:
+                            old_sock.close()
+                        except Exception:
+                            pass
+
+                        # Wait for receive thread to finish
+                        if node.rx_thread and node.rx_thread.is_alive():
+                            node.rx_thread.join(timeout=1.0)
+
+                        # Clear pending requests
+                        for ref, q in node.pending_requests.items():
+                            try:
+                                q.put_nowait(None)
+                            except queue.Full:
+                                pass
+                        node.pending_requests.clear()
+
+                        # Reset stop_event for new connection
+                        node.stop_event.clear()
+
+                    # Reset node state for reconnection
                     node.sock = client_sock
                     node.state = NodeState.CONNECTED
                     node.last_heartbeat = time.time()
                     node.reference_counter = 0
-                    node.pending_requests.clear()
                     node.message_count = 0
                     node.heartbeat_count = 0
-
-                    # Set connection time to now for every connection
                     node.connection_time = time.time()
+
                     self.logger.info(f"Node {node.name} connected at {node.connection_time}")
 
-                    # Create handler
-                    node.handler = self._get_handler_for_node(node)
+                    # Create handler if needed
+                    if not node.handler:
+                        node.handler = self._get_handler_for_node(node)
 
                     # Start receive thread
                     node.rx_thread = threading.Thread(
@@ -624,7 +675,11 @@ class Controller:
                 continue
             except socket.error as e:
                 if not node.stop_event.is_set():
-                    self.logger.error(f"Socket error from {node.name}: {e}")
+                    # Don't log "Connection reset by peer" as an error during normal operation
+                    if hasattr(e, 'errno') and e.errno == 104:  # Connection reset by peer
+                        self.logger.debug(f"Connection reset by peer from {node.name} (normal during reboot)")
+                    else:
+                        self.logger.error(f"Socket error from {node.name}: {e}")
                 break
             except Exception as e:
                 if not node.stop_event.is_set():
@@ -657,11 +712,11 @@ class Controller:
                     node.handler.on_confirmation(msg)
 
             elif msg_type == fgr.FGRMsgType.FGR_MSG_TYPE_IND:
-                handled = False
+                # ALWAYS go through the handler for ALL indications
                 if node.handler:
-                    handled = node.handler.on_indication(msg)
-
-                if not handled:
+                    node.handler.on_indication(msg)
+                else:
+                    self.logger.info(f"No handler for {node.name}, using generic")
                     self._handle_generic_indication(node, msg)
 
             elif msg_type == fgr.FGRMsgType.FGR_MSG_TYPE_RSP:
@@ -692,20 +747,27 @@ class Controller:
 
         if ind_type == fgr.FGRIndRsp.FGR_IND_RSP_NEEDS_CFG:
             self.logger.info(f"Node {node.name}: needs configuration")
+            # Send response but DON'T change state or close connection
             self.send_response_to_node(node.name, ind_type, msg.reference, b"")
+            # Update node state
+            node.fgr_state = msg.error_or_state
+            node.state = NodeState.NEEDS_CFG
 
         elif ind_type == fgr.FGRIndRsp.FGR_IND_RSP_START:
-            self.logger.info(f"Node {node.name}: started (no response needed)")
-            # No response needed for START indication
+            self.logger.info(f"Node {node.name}: started")
+            node.fgr_state = msg.error_or_state
+            node.state = NodeState.STARTED
 
         elif ind_type == fgr.FGRIndRsp.FGR_IND_RSP_STOP:
-            self.logger.info(f"Node {node.name}: stopped (no response needed)")
-            # No response needed for STOP indication
+            self.logger.info(f"Node {node.name}: stopped")
+            node.fgr_state = msg.error_or_state
+            node.state = NodeState.STOPPED
 
         elif ind_type == fgr.FGRIndRsp.FGR_IND_RSP_HEARTBEAT:
             node.heartbeat_count += 1
+            node.last_heartbeat = time.time()
             if self.logger.isEnabledFor(logging.DEBUG):
-                self.logger.debug(f"[{node.name}] HEARTBEAT #{node.heartbeat_count} (type=0x{ind_type:03X}, state={msg.error_or_state})")
+                self.logger.debug(f"[{node.name}] HEARTBEAT #{node.heartbeat_count}")
 
         elif ind_type > fgr.FGRIndRsp.FGR_IND_RSP_LAST:
             if self.logger.isEnabledFor(logging.DEBUG):

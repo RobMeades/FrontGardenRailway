@@ -38,6 +38,7 @@ import time
 import signal
 import sys
 import logging
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
@@ -58,6 +59,13 @@ except ImportError:
     print("Warning: python-systemd not installed, journal reading disabled")
     print("Install with: pip install systemd-python")
 
+# States that indicate a node is working/operational
+WORKING_FGR_STATES = {
+    fgr.FGRState.FGR_STATE_STARTED,   # 2 - Running normally
+    fgr.FGRState.FGR_STATE_STOPPED,   # 3 - Stopped but operational/configured
+    fgr.FGRState.FGR_STATE_BUSY,      # 4 - Busy but operational
+}
+
 # Default ports
 HTTP_PORT_DEFAULT = 8080
 CONTROLLER_PORT_DEFAULT = 5000
@@ -72,6 +80,49 @@ RESERVOIR_DEPTH = 1000
 # Journal identifier for log_server.py
 JOURNAL_IDENTIFIER = 'fgr-log-server'
 
+# Node grid layout configuration file
+NODE_GRID_CONFIG = Path(__file__).parent / "node_grid_layout.json"
+
+
+def format_fgr_state(state):
+    """Format fgr_state_t value for display"""
+    if not state:
+        return "UNKNOWN"
+    name = state.name if hasattr(state, 'name') else str(state)
+    # Remove FGR_STATE_ prefix
+    if name.startswith('FGR_STATE_'):
+        name = name[10:]
+    # Replace underscores with spaces
+    return name.replace('_', ' ')
+
+
+def format_fgr_error(error):
+    """Format fgr_error_t value for display"""
+    if not error:
+        return "NONE"
+    name = error.name if hasattr(error, 'name') else str(error)
+    # Remove FGR_ERROR_ prefix
+    if name.startswith('FGR_ERROR_'):
+        name = name[10:]
+    # Replace underscores with spaces
+    return name.replace('_', ' ')
+
+
+def format_fgr_message(msg_type, is_response=True):
+    """Format FGR message type for display"""
+    if not msg_type:
+        return "UNKNOWN"
+    name = msg_type.name if hasattr(msg_type, 'name') else str(msg_type)
+    # Remove FGR_ prefix
+    if name.startswith('FGR_'):
+        name = name[4:]
+    # Replace REQ_CNF with CNF or IND_RSP with IND
+    if 'REQ_CNF' in name:
+        name = name.replace('REQ_CNF', 'CNF')
+    elif 'IND_RSP' in name:
+        name = name.replace('IND_RSP', 'IND')
+    # Replace underscores with spaces
+    return name.replace('_', ' ')
 
 class WebController(Controller):
     """Web-enabled FGR Controller with journal log reading"""
@@ -98,9 +149,15 @@ class WebController(Controller):
         # Store node-specific data for web display
         self.node_measurements: Dict[str, Dict[str, Any]] = {}
 
+        # Store recent message notifications
+        self.node_notifications: Dict[str, Dict[str, Any]] = {}
+
         # Journal reader thread
         self.journal_running = False
         self.journal_thread = None
+
+        # Node grid layout
+        self.node_grid_layout = self._load_node_grid_layout()
 
         # Start journal reader if available
         if HAS_SYSTEMD:
@@ -113,6 +170,24 @@ class WebController(Controller):
 
         # Record start time
         self._start_time = time.time()
+
+    def _load_node_grid_layout(self) -> Dict[str, Any]:
+        """Load node grid layout from config file"""
+        if NODE_GRID_CONFIG.exists():
+            try:
+                with open(NODE_GRID_CONFIG, 'r') as f:
+                    return json.load(f)
+            except Exception as e:
+                self._log_message(f"Error loading node grid layout: {e}")
+        return {'order': [], 'columns': 4, 'rows': 2}
+
+    def _save_node_grid_layout(self):
+        """Save node grid layout to config file"""
+        try:
+            with open(NODE_GRID_CONFIG, 'w') as f:
+                json.dump(self.node_grid_layout, f, indent=2)
+        except Exception as e:
+            self._log_message(f"Error saving node grid layout: {e}")
 
     def _add_log(self, prefix: str, message: str):
         """Add a log message to the buffer with automatic trimming"""
@@ -230,12 +305,98 @@ class WebController(Controller):
             'last_update': datetime.now().isoformat()
         }
 
+    def set_node_notification(self, node_name: str, message: str, is_sent: bool = True, is_success: bool = True):
+        """Set a notification for a node (sent/received message)
+
+        Args:
+            node_name: Name of the node
+            message: Notification message text
+            is_sent: True for sent messages, False for received
+            is_success: True for success, False for failure
+        """
+        # Add emoji indicators - play/reverse for sent/received, X for failure
+        if not is_success:
+            prefix = "❌"
+        elif is_sent:
+            prefix = "▶️"  # Play arrow for sent (command going out)
+        else:
+            prefix = "◀️"  # Reverse arrow for received (response coming in)
+
+        self.node_notifications[node_name] = {
+            'message': f"{prefix} {message}",
+            'is_sent': is_sent,
+            'is_success': is_success,
+            'timestamp': time.time()
+        }
+
+    def _dispatch_message(self, node: Node, msg: fgr.FGRMsg) -> None:
+        """Override to capture messages for toasts before dispatching to node handler"""
+        msg_type = msg.message_type
+
+        # Show toasts for relevant messages (independent of node handler)
+        if msg_type == fgr.FGRMsgType.FGR_MSG_TYPE_IND:
+            ind_type = msg.subtype
+            # Convert integer to enum member for proper formatting
+            try:
+                ind_enum = fgr.FGRIndRsp(ind_type)
+                msg_name = format_fgr_message(ind_enum, is_response=False)
+            except ValueError:
+                # Device-specific indication (not in standard enum)
+                msg_name = f"0x{ind_type:03X}"
+            # msg_name already includes "IND" prefix from format_fgr_message
+            notification_msg = msg_name
+            self.set_node_notification(node.name, notification_msg, False, True)
+
+        elif msg_type == fgr.FGRMsgType.FGR_MSG_TYPE_CNF:
+            req_type = msg.subtype
+            error = msg.error_or_state
+            # Convert integer to enum member for proper formatting
+            try:
+                req_enum = fgr.FGRReqCnf(req_type)
+                msg_name = format_fgr_message(req_enum, is_response=True)
+            except ValueError:
+                msg_name = f"0x{req_type:03X}"
+            if error == fgr.FGRError.FGR_ERROR_NONE:
+                notification_msg = msg_name
+                self.set_node_notification(node.name, notification_msg, False, True)
+            else:
+                error_name = format_fgr_error(error)
+                notification_msg = f"{msg_name} failed: {error_name}"
+                self.set_node_notification(node.name, notification_msg, False, False)
+
+        # Call the parent's dispatch to let the node handler do its job
+        super()._dispatch_message(node, msg)
+
     def _get_system_status(self) -> Dict[str, Any]:
         """Get current system status for API"""
         nodes_status = []
 
-        for name, node in self.nodes.items():
+        # Get ordered node list based on layout
+        ordered_nodes = []
+        layout_order = self.node_grid_layout.get('order', [])
+        remaining_nodes = list(self.nodes.keys())
+
+        # Count essential nodes that are in a working state
+        working_nodes = len([n for n in self.nodes.values()
+                                if n.sock and n.essential and
+                                n.fgr_state in WORKING_FGR_STATES])
+
+        # Add nodes in layout order first
+        for node_name in layout_order:
+            if node_name in self.nodes:
+                ordered_nodes.append(node_name)
+                remaining_nodes.remove(node_name)
+
+        # Add remaining nodes at the end
+        ordered_nodes.extend(remaining_nodes)
+
+        for name in ordered_nodes:
+            node = self.nodes.get(name)
+            if not node:
+                continue
+
             measurement = self.node_measurements.get(name, {})
+            notification = self.node_notifications.get(name)
 
             # Calculate connection duration
             connection_duration = None
@@ -262,44 +423,65 @@ class WebController(Controller):
                 else:
                     connection_duration = f"disconnected {int(duration // 3600)}h ago"
 
-            # Determine display state
+            # Determine display state with formatted name
             if node.sock:
                 if node.state == NodeState.STARTED:
-                    display_state = "RUNNING"
+                    display_state = "STARTED"
                 elif node.state == NodeState.READY:
                     display_state = "READY"
                 elif node.state == NodeState.NEEDS_CFG:
                     display_state = "NEEDS CONFIG"
                 else:
                     display_state = node.state.name if isinstance(node.state, NodeState) else str(node.state)
+                display_state = format_fgr_state(display_state).lower()
             else:
-                display_state = "DISCONNECTED"
+                display_state = "disconnected"
 
             nodes_status.append({
                 'name': name,
                 'ip': node.ip,
                 'type': node.node_type,
+                'essential': node.essential,
                 'state': display_state,
                 'connected': node.sock is not None,
                 'connection_duration': connection_duration,
                 'message_count': node.message_count,
                 'heartbeat_count': node.heartbeat_count,
-                'measurement': measurement
+                'measurement': measurement,
+                'notification': notification
             })
 
         return {
             'nodes': nodes_status,
             'total_nodes': len(self.nodes),
             'connected_nodes': len([n for n in self.nodes.values() if n.sock]),
+            'essential_nodes': len([n for n in self.nodes.values() if n.essential]),
+            'connected_essential_nodes': len([n for n in self.nodes.values() if n.sock and n.essential]),
+            'working_essential_nodes': working_nodes,
             'initialised_nodes': len([n for n in self.nodes.values() if n.sock and n.state not in [NodeState.DISCONNECTED, NodeState.CONNECTED]]),
             'server_uptime': time.time() - self._start_time,
-            'journal_enabled': HAS_SYSTEMD
+            'journal_enabled': HAS_SYSTEMD,
+            'grid_columns': self.node_grid_layout.get('columns', 4),
+            'grid_rows': self.node_grid_layout.get('rows', 2)
         }
 
     async def _broadcast_status(self):
         """Broadcast status updates to SSE clients"""
         last_status = None
+        # Clear old notifications periodically
+        last_cleanup = time.time()
         while self.web_running:
+            # Clean up old notifications (older than 3 seconds)
+            now = time.time()
+            if now - last_cleanup > 1:
+                expired = []
+                for name, notif in self.node_notifications.items():
+                    if now - notif['timestamp'] > 3:
+                        expired.append(name)
+                for name in expired:
+                    del self.node_notifications[name]
+                last_cleanup = now
+
             current_status = self._get_system_status()
             if current_status != last_status:
                 last_status = current_status
@@ -308,7 +490,7 @@ class WebController(Controller):
                         await client.write(f"data: {json.dumps(current_status)}\n\n".encode())
                     except Exception:
                         self.sse_clients.discard(client)
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.5)
 
     async def handle_index(self, request):
         """Serve the main HTML page"""
@@ -347,8 +529,16 @@ class WebController(Controller):
         """Return recent logs"""
         return web.json_response({'logs': [msg for _, msg in self.log_entries]})
 
+    async def handle_api_logs_clear(self, request):
+        """Clear the log buffer"""
+        self.log_entries.clear()
+        self._log_counter = 0
+        # No need to broadcast - clients will see that no new logs are available
+        # until new ones arrive, and their last_version will reset when they reconnect
+        return web.json_response({'status': 'ok'})
+
     async def handle_api_logs_stream(self, request):
-        """SSE stream for log updates using version tracking"""
+        """SSE stream for log updates - tracks per-client version"""
         response = web.StreamResponse(
             status=200,
             headers={
@@ -359,38 +549,31 @@ class WebController(Controller):
         )
         await response.prepare(request)
 
-        # Track the last version sent to this client
+        # Track the last version sent to this specific client
         last_version = -1
 
+        # Send a reset signal
+        await response.write(f"event: reset\ndata: reset\n\n".encode())
+
         try:
-            # Send all existing logs first
-            if self.log_entries:
-                all_logs = [msg for _, msg in self.log_entries]
-                await response.write(f"data: {json.dumps(all_logs)}\n\n".encode())
-                last_version = self.log_entries[-1][0] if self.log_entries else -1
-
             while self.web_running:
-                # Find any new logs since last_version
-                new_logs = []
-                for version, msg in self.log_entries:
-                    if version > last_version:
-                        new_logs.append(msg)
-                        last_version = version
+                # Only send if we have new logs since last_version
+                if self.log_entries and self.log_entries[-1][0] > last_version:
+                    # Find all new logs
+                    new_logs = []
+                    for version, msg in self.log_entries:
+                        if version > last_version:
+                            new_logs.append(msg)
+                            last_version = version
 
-                if new_logs:
-                    await response.write(f"data: {json.dumps(new_logs)}\n\n".encode())
+                    if new_logs:
+                        await response.write(f"data: {json.dumps(new_logs)}\n\n".encode())
 
                 await asyncio.sleep(0.5)
-        except Exception:
-            pass
+        except Exception as e:
+            self._log_message(f"Log stream error: {e}")
 
         return response
-
-    async def handle_api_logs_clear(self, request):
-        """Clear the log buffer"""
-        self.log_entries.clear()
-        self._log_counter = 0
-        return web.json_response({'status': 'ok'})
 
     async def handle_api_command(self, request):
         """Handle command requests to nodes"""
@@ -400,72 +583,116 @@ class WebController(Controller):
         params = data.get('params', {})
 
         result = {'status': 'ok', 'message': ''}
+        notification_msg = None
 
         try:
             if command == 'query_state':
-                state = self.query_node_state(node_name)
-                if state is not None:
-                    result['message'] = f"Node {node_name} state: {state.name} ({state.value})"
-                else:
+                if not self.nodes.get(node_name, {}).sock:
                     result['status'] = 'error'
-                    result['message'] = f"Failed to query {node_name} state"
+                    result['message'] = f"Node {node_name} not connected"
+                    self.set_node_notification(node_name, "Node not connected", True, False)
+                else:
+                    state_value = self.ping_node(node_name)
+                    if state_value is not None:
+                        try:
+                            state_enum = fgr.FGRState(state_value)
+                            state_name = format_fgr_state(state_enum)
+                        except ValueError:
+                            state_name = f"unknown ({state_value})"
+                        result['message'] = f"Node {node_name} state: {state_name}"
+                        self.set_node_notification(node_name, f"PONG: {state_name}", False, True)
+                    else:
+                        result['status'] = 'error'
+                        result['message'] = f"Failed to query {node_name} state"
+                        self.set_node_notification(node_name, "PING failed", True, False)
 
             elif command == 'start':
-                if self.start_node(node_name):
+                if not self.nodes.get(node_name, {}).sock:
+                    result['status'] = 'error'
+                    result['message'] = f"Node {node_name} not connected"
+                    self.set_node_notification(node_name, "Node not connected", True, False)
+                elif self.start_node(node_name):
                     result['message'] = f"Node {node_name} started"
+                    self.set_node_notification(node_name, "START", True, True)
                 else:
                     result['status'] = 'error'
                     result['message'] = f"Failed to start {node_name}"
+                    self.set_node_notification(node_name, "START failed", True, False)
 
             elif command == 'stop':
-                if self.stop_node(node_name):
+                if not self.nodes.get(node_name, {}).sock:
+                    result['status'] = 'error'
+                    result['message'] = f"Node {node_name} not connected"
+                    self.set_node_notification(node_name, "Node not connected", True, False)
+                elif self.stop_node(node_name):
                     result['message'] = f"Node {node_name} stopped"
+                    self.set_node_notification(node_name, "STOP", True, True)
                 else:
                     result['status'] = 'error'
                     result['message'] = f"Failed to stop {node_name}"
+                    self.set_node_notification(node_name, "STOP failed", True, False)
 
             elif command == 'reboot':
-                if self.reboot_node(node_name):
+                if not self.nodes.get(node_name, {}).sock:
+                    result['status'] = 'error'
+                    result['message'] = f"Node {node_name} not connected"
+                    self.set_node_notification(node_name, "Node not connected", True, False)
+                elif self.reboot_node(node_name):
                     result['message'] = f"Node {node_name} rebooting"
+                    self.set_node_notification(node_name, "REBOOT", True, True)
                 else:
                     result['status'] = 'error'
                     result['message'] = f"Failed to reboot {node_name}"
+                    self.set_node_notification(node_name, "REBOOT failed", True, False)
 
             elif command == 'log_start':
-                cnf = self.send_request_to_node(node_name, fgr.FGRReqCnf.FGR_REQ_CNF_LOG_START, b"", timeout=3.0)
-                if cnf and cnf.error_or_state == fgr.FGRError.FGR_ERROR_NONE:
-                    result['message'] = f"Logging started on {node_name}"
-                else:
+                if not self.nodes.get(node_name, {}).sock:
                     result['status'] = 'error'
-                    result['message'] = f"Failed to start logging on {node_name}"
+                    result['message'] = f"Node {node_name} not connected"
+                    self.set_node_notification(node_name, "Node not connected", True, False)
+                else:
+                    cnf = self.send_request_to_node(node_name, fgr.FGRReqCnf.FGR_REQ_CNF_LOG_START, b"", timeout=3.0)
+                    if cnf and cnf.error_or_state == fgr.FGRError.FGR_ERROR_NONE:
+                        result['message'] = f"Logging started on {node_name}"
+                        self.set_node_notification(node_name, "LOG START", True, True)
+                    else:
+                        result['status'] = 'error'
+                        result['message'] = f"Failed to start logging on {node_name}"
+                        self.set_node_notification(node_name, "LOG START failed", True, False)
 
             elif command == 'log_stop':
-                cnf = self.send_request_to_node(node_name, fgr.FGRReqCnf.FGR_REQ_CNF_LOG_STOP, b"", timeout=3.0)
-                if cnf and cnf.error_or_state == fgr.FGRError.FGR_ERROR_NONE:
-                    result['message'] = f"Logging stopped on {node_name}"
-                else:
+                if not self.nodes.get(node_name, {}).sock:
                     result['status'] = 'error'
-                    result['message'] = f"Failed to stop logging on {node_name}"
+                    result['message'] = f"Node {node_name} not connected"
+                    self.set_node_notification(node_name, "Node not connected", True, False)
+                else:
+                    cnf = self.send_request_to_node(node_name, fgr.FGRReqCnf.FGR_REQ_CNF_LOG_STOP, b"", timeout=3.0)
+                    if cnf and cnf.error_or_state == fgr.FGRError.FGR_ERROR_NONE:
+                        result['message'] = f"Logging stopped on {node_name}"
+                        self.set_node_notification(node_name, "LOG STOP", True, True)
+                    else:
+                        result['status'] = 'error'
+                        result['message'] = f"Failed to stop logging on {node_name}"
+                        self.set_node_notification(node_name, "LOG STOP failed", True, False)
 
             elif command == 'log_level':
-                level = params.get('level', 1)  # Default INFO
-                if level < 0 or level > 3:
-                    level = 1
-                cnf = self.send_request_to_node(node_name, fgr.FGRReqCnf.FGR_REQ_CNF_LOG_LEVEL, bytes([level]), timeout=3.0)
-                if cnf and cnf.error_or_state == fgr.FGRError.FGR_ERROR_NONE:
-                    level_names = ['DEBUG', 'INFO', 'WARN', 'ERROR']
-                    result['message'] = f"Log level set to {level_names[level]} on {node_name}"
-                else:
+                if not self.nodes.get(node_name, {}).sock:
                     result['status'] = 'error'
-                    result['message'] = f"Failed to set log level on {node_name}"
-
-            elif command == 'reboot':
-                self.logger.info(f"Reboot command received for {node_name}")
-                if self.reboot_node(node_name):
-                    result['message'] = f"Node {node_name} rebooting"
+                    result['message'] = f"Node {node_name} not connected"
+                    self.set_node_notification(node_name, "Node not connected", True, False)
                 else:
-                    result['status'] = 'error'
-                    result['message'] = f"Failed to reboot {node_name}"
+                    level = params.get('level', 1)
+                    if level < 0 or level > 3:
+                        level = 1
+                    cnf = self.send_request_to_node(node_name, fgr.FGRReqCnf.FGR_REQ_CNF_LOG_LEVEL, bytes([level]), timeout=3.0)
+                    if cnf and cnf.error_or_state == fgr.FGRError.FGR_ERROR_NONE:
+                        level_names = ['DEBUG', 'INFO', 'WARN', 'ERROR']
+                        result['message'] = f"Log level set to {level_names[level]} on {node_name}"
+                        self.set_node_notification(node_name, f"LOG LEVEL {level_names[level]}", True, True)
+                    else:
+                        result['status'] = 'error'
+                        result['message'] = f"Failed to set log level on {node_name}"
+                        self.set_node_notification(node_name, "LOG LEVEL failed", True, False)
 
             else:
                 result['status'] = 'error'
@@ -474,8 +701,17 @@ class WebController(Controller):
         except Exception as e:
             result['status'] = 'error'
             result['message'] = str(e)
+            self.set_node_notification(node_name, f"Command failed: {str(e)}", True, False)
 
         return web.json_response(result)
+
+    async def handle_api_layout(self, request):
+        """Save node grid layout"""
+        data = await request.json()
+        order = data.get('order', [])
+        self.node_grid_layout['order'] = order
+        self._save_node_grid_layout()
+        return web.json_response({'status': 'ok'})
 
     def start_web(self):
         """Start the web server"""
@@ -487,6 +723,7 @@ class WebController(Controller):
         self.web_app.router.add_get('/api/logs/stream', self.handle_api_logs_stream)
         self.web_app.router.add_post('/api/logs/clear', self.handle_api_logs_clear)
         self.web_app.router.add_post('/api/command', self.handle_api_command)
+        self.web_app.router.add_post('/api/layout', self.handle_api_layout)
 
         async def start_server():
             self.web_runner = web.AppRunner(self.web_app)
@@ -546,99 +783,202 @@ class WebController(Controller):
         * { box-sizing: border-box; }
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            max-width: 1400px;
+            max-width: 1600px;
             margin: 0 auto;
-            padding: 20px;
+            padding: 15px;
             background: #f5f5f5;
         }
-        h1 { color: #333; margin-bottom: 5px; }
-        .subtitle { color: #666; margin-top: 0; margin-bottom: 20px; }
+        h1 {
+            margin: 0;
+            font-size: 24px;
+            color: #333;
+        }
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+            gap: 15px;
+        }
+        .title-section h1 { margin: 0; }
+        .title-section .subtitle { margin: 0; font-size: 12px; color: #666; }
 
         .status-banner {
             background: #fff3e0;
             border-left: 4px solid #ffc107;
-            padding: 12px 20px;
-            margin-bottom: 20px;
+            padding: 8px 15px;
             border-radius: 8px;
             display: flex;
             align-items: center;
-            gap: 12px;
-            font-weight: 500;
+            gap: 10px;
+            font-size: 13px;
         }
         .status-banner.ready { background: #e8f5e9; border-left-color: #2e7d32; }
         .status-banner.waiting { background: #fff3e0; border-left-color: #ffc107; }
-        .status-icon { font-size: 24px; }
-        .status-text { flex: 1; }
-        .status-details { font-size: 12px; color: #666; margin-top: 4px; }
+        .status-icon { font-size: 18px; }
+        .status-text { flex: 1; white-space: nowrap; }
+        .status-details { font-size: 10px; color: #666; margin-top: 2px; }
 
+        /* Node grid container with horizontal scrolling */
+        .grid-container {
+            position: relative;
+            margin-bottom: 20px;
+        }
         .node-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
-            gap: 20px;
-            margin-bottom: 20px;
+            grid-template-columns: repeat(4, minmax(280px, 1fr));
+            gap: 15px;
+            overflow-x: auto;
+            padding-bottom: 10px;
+        }
+        .node-grid.has-more {
+            grid-template-columns: repeat(auto-fill, minmax(280px, 320px));
         }
         .node-card {
             background: white;
-            border-radius: 12px;
-            padding: 16px;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            border-radius: 10px;
+            padding: 12px;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.1);
+            transition: transform 0.1s, box-shadow 0.2s;
+            user-select: text;
         }
-        .node-card.online { border-left: 4px solid #4caf50; }
-        .node-card.offline { border-left: 4px solid #f44336; opacity: 0.7; }
+        .node-card * {
+            user-select: text;
+        }
+        /* Make drag handle not selectable */
+        .drag-handle {
+            user-select: none;
+        }
+        /* Essential vs Non-essential node styling */
+        .node-card.non-essential {
+            opacity: 0.85;
+            border: 1px dashed #ccc;
+        }
+        .node-card.non-essential .node-name {
+            color: #666;
+        }
+        .node-card.essential {
+            border: 1px solid #e0e0e0;
+            border-left: 4px solid #4caf50;
+        }
+        .node-card.essential .node-name {
+            color: #333;
+            font-weight: bold;
+        }
+        .node-card.online {
+            border-left: 4px solid #4caf50;
+        }
+        .node-card.offline {
+            opacity: 0.7;
+        }
+        /* When essential and online, essential border-left takes precedence */
+        .node-card.essential.online {
+            border-left: 4px solid #4caf50;
+        }
+        /* Drag over highlight */
+        .node-card.drag-over {
+            border: 2px solid #4caf50;
+            background: #f0fff0;
+            transform: scale(1.01);
+            transition: all 0.1s ease;
+        }
+
+        /* Drag handle styling */
+        .drag-handle {
+            cursor: grab;
+            color: #999;
+            font-size: 16px;
+            padding: 4px 8px;
+            margin-right: 4px;
+            display: inline-block;
+            transition: color 0.2s;
+        }
+        .drag-handle:hover {
+            color: #666;
+        }
+        .drag-handle:active {
+            cursor: grabbing;
+        }
         .node-header {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            margin-bottom: 12px;
+            margin-bottom: 8px;
         }
-        .node-name { font-size: 18px; font-weight: bold; color: #333; }
-        .node-type { font-size: 12px; color: #888; background: #f0f0f0; padding: 4px 8px; border-radius: 20px; }
-        .node-ip { font-family: monospace; font-size: 12px; color: #666; margin-bottom: 8px; }
-        .node-state { font-size: 14px; margin-bottom: 8px; }
+        .node-title {
+            display: flex;
+            align-items: center;
+            flex: 1;
+        }
+        .node-name {
+            font-size: 16px;
+            font-weight: bold;
+            color: #333;
+        }
+        .node-type { font-size: 10px; color: #888; background: #f0f0f0; padding: 2px 6px; border-radius: 20px; }
+        .node-ip { font-family: monospace; font-size: 10px; color: #666; margin-bottom: 6px; }
+        .node-state { font-size: 12px; margin-bottom: 6px; display: flex; justify-content: space-between; align-items: center; }
         .node-state.online { color: #4caf50; }
         .node-state.offline { color: #f44336; }
+        .state-text { text-transform: capitalize; }
+        .notification {
+            font-size: 10px;
+            padding: 2px 6px;
+            border-radius: 12px;
+            animation: fadeOut 3s forwards;
+            background: #2196f3;
+            color: white;
+            white-space: nowrap;
+        }
+        .notification.success { background: #4caf50; }
+        .notification.failure { background: #f44336; }
+        @keyframes fadeOut {
+            0% { opacity: 1; }
+            70% { opacity: 1; }
+            100% { opacity: 0; display: none; }
+        }
         .node-metrics {
-            font-size: 12px;
+            font-size: 10px;
             color: #888;
-            margin-bottom: 12px;
+            margin-bottom: 10px;
             border-top: 1px solid #eee;
-            padding-top: 8px;
+            padding-top: 6px;
+            display: flex;
+            justify-content: space-between;
         }
         .node-measurement {
             background: #e3f2fd;
-            border-radius: 8px;
-            padding: 10px;
-            margin-bottom: 12px;
+            border-radius: 6px;
+            padding: 6px;
+            margin-bottom: 10px;
             text-align: center;
         }
-        .measurement-value { font-size: 28px; font-weight: bold; color: #1976d2; }
-        .measurement-unit { font-size: 14px; color: #666; }
+        .measurement-value { font-size: 22px; font-weight: bold; color: #1976d2; }
+        .measurement-unit { font-size: 11px; color: #666; }
+
+        /* Button grid - 2 rows of 4 equal items */
         .node-actions {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 8px;
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 6px;
             margin-top: 8px;
         }
         .node-actions-group {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 4px;
-            border-top: 1px solid #eee;
-            padding-top: 8px;
-            margin-top: 4px;
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 6px;
+            margin-top: 6px;
         }
-        .node-actions-group label {
+        button, .log-level-select {
+            padding: 5px 4px;
             font-size: 10px;
-            color: #888;
-            margin-right: 4px;
-        }
-        button {
-            padding: 6px 12px;
-            font-size: 12px;
             border: none;
-            border-radius: 5px;
+            border-radius: 4px;
             cursor: pointer;
             transition: all 0.2s;
+            text-align: center;
+            width: 100%;
         }
         button:hover { opacity: 0.8; transform: translateY(-1px); }
         .btn-query { background: #2196f3; color: white; }
@@ -647,17 +987,16 @@ class WebController(Controller):
         .btn-reboot { background: #f44336; color: white; }
         .btn-log-start { background: #009688; color: white; }
         .btn-log-stop { background: #607d8b; color: white; }
-        select.log-level-select {
-            font-size: 11px;
-            padding: 4px;
-            border-radius: 4px;
-            border: 1px solid #ccc;
+        .log-level-select {
+            background: #e0e0e0;
+            cursor: pointer;
+            font-size: 9px;
         }
 
         .debug-panel {
             background: white;
             border-radius: 8px;
-            padding: 20px;
+            padding: 15px;
             margin-top: 20px;
             box-shadow: 0 2px 4px rgba(0,0,0,0.1);
         }
@@ -665,20 +1004,20 @@ class WebController(Controller):
             display: flex;
             justify-content: space-between;
             align-items: center;
-            margin-bottom: 10px;
+            margin-bottom: 8px;
             flex-wrap: wrap;
             gap: 8px;
         }
-        .debug-header h2 { margin: 0; color: #555; }
-        .debug-buttons { display: flex; gap: 8px; }
+        .debug-header h2 { margin: 0; font-size: 16px; color: #555; }
+        .debug-buttons { display: flex; gap: 6px; }
         .debug-window {
             background: #1e1e1e;
             color: #d4d4d4;
             font-family: 'Courier New', monospace;
-            font-size: 12px;
+            font-size: 11px;
             padding: 10px;
             border-radius: 5px;
-            height: 300px;
+            height: 200px;
             overflow-y: auto;
         }
         .debug-window .log-ctrl { color: #4ec9b0; }
@@ -686,27 +1025,50 @@ class WebController(Controller):
         .footer {
             text-align: center;
             color: #999;
-            font-size: 12px;
-            margin-top: 20px;
+            font-size: 10px;
+            margin-top: 15px;
         }
         .badge-success { background: #4caf50; color: white; padding: 2px 6px; border-radius: 4px; font-size: 10px; }
         .badge-warning { background: #ff9800; color: white; padding: 2px 6px; border-radius: 4px; font-size: 10px; }
+
+        .scroll-hint {
+            text-align: center;
+            font-size: 11px;
+            color: #999;
+            margin-top: 5px;
+            display: none;
+        }
+        .scroll-hint.show { display: block; }
+
+        @media (max-width: 1200px) {
+            .node-grid { grid-template-columns: repeat(4, minmax(260px, 1fr)); }
+        }
+        @media (max-width: 1000px) {
+            .node-grid { overflow-x: auto; grid-template-columns: repeat(4, 280px); }
+            .scroll-hint.show { display: block; }
+        }
     </style>
 </head>
 <body>
-    <h1>🚂 FGR Controller</h1>
-    <div class="subtitle">Front Garden Railway - Node Monitoring & Control</div>
-
-    <div id="statusBanner" class="status-banner waiting">
-        <div class="status-icon">⏳</div>
-        <div class="status-text">
-            <div>System Status: Initializing...</div>
-            <div class="status-details">Waiting for nodes to connect</div>
+    <div class="header">
+        <div class="title-section">
+            <h1>🚂 FGR Controller</h1>
+            <div class="subtitle">Front Garden Railway - Node Monitoring & Control</div>
+        </div>
+        <div id="statusBanner" class="status-banner waiting">
+            <div class="status-icon">⏳</div>
+            <div class="status-text">
+                <div>Initializing...</div>
+                <div class="status-details">Waiting for nodes</div>
+            </div>
         </div>
     </div>
 
-    <div id="nodeGrid" class="node-grid">
-        <div style="text-align: center; grid-column: 1/-1; padding: 40px;">Loading nodes...</div>
+    <div class="grid-container">
+        <div id="nodeGrid" class="node-grid">
+            <div style="text-align: center; grid-column: 1/-1; padding: 40px;">Loading nodes...</div>
+        </div>
+        <div id="scrollHint" class="scroll-hint">← → Scroll for more nodes → ←</div>
     </div>
 
     <div class="debug-panel">
@@ -721,14 +1083,19 @@ class WebController(Controller):
         <div id="debugWindow" class="debug-window">Waiting for logs...</div>
     </div>
 
-    <div class="footer">FGR Controller</div>
+    <div class="footer">FGR Controller - Drag ⋮⋮ to reorder nodes</div>
 
     <script>
         let statusSource = null;
         let logsSource = null;
         let autoScrollEnabled = true;
-        let scrollTimeout = null;
         let logBuffer = [];
+        let logStreamActive = true;
+        let scrollTimeout = null;
+        let nodeOrder = [];
+        let nodesData = {};  // Store node data for reference
+        let gridBuilt = false;  // Track if grid has been built
+        let lastNotificationTimestamp = {};  // Track last notification timestamp per node
 
         // Log level names
         const logLevelNames = ['DEBUG', 'INFO', 'WARN', 'ERROR'];
@@ -784,8 +1151,19 @@ class WebController(Controller):
         }
 
         function clearLogs() {
+            // Clear locally immediately for responsiveness
+            const debugWindow = document.getElementById('debugWindow');
+            if (debugWindow) {
+                debugWindow.innerHTML = 'Logs cleared...';
+            }
+            logBuffer = [];
+
+            // Tell the server to clear its buffer, then reconnect the stream
             fetch('/api/logs/clear', {method: 'POST'})
-                .then(() => { document.getElementById('debugWindow').innerHTML = 'Logs cleared...'; logBuffer = []; })
+                .then(() => {
+                    // Reconnect the stream to reset version tracking
+                    setupLogsStream();
+                })
                 .catch(e => console.error('Error clearing logs:', e));
         }
 
@@ -798,12 +1176,27 @@ class WebController(Controller):
         function appendLogs(newLogs) {
             const debugWindow = document.getElementById('debugWindow');
             if (!debugWindow) return;
+
             if (newLogs.length === 0) {
-                if (logBuffer.length === 0) {
-                    debugWindow.innerHTML = 'Logs cleared...';
+                if (logBuffer.length === 0 && debugWindow.innerHTML === 'Logs cleared...') {
+                    return;
+                }
+                if (logBuffer.length === 0 && debugWindow.innerHTML === '') {
+                    debugWindow.innerHTML = 'Waiting for logs...';
                 }
                 return;
             }
+
+            // If the window shows "Logs cleared..." and we have new logs, append them
+            if (debugWindow.innerHTML === 'Logs cleared...') {
+                debugWindow.innerHTML = '';
+            }
+
+            // If the window is empty, don't add a waiting message, just add logs
+            if (debugWindow.innerHTML === '' || debugWindow.innerHTML === 'Waiting for logs...') {
+                debugWindow.innerHTML = '';
+            }
+
             const wasAtBottom = debugWindow.scrollHeight - debugWindow.scrollTop - debugWindow.clientHeight < 10;
             newLogs.forEach(log => {
                 let className = 'log-ctrl';
@@ -815,7 +1208,283 @@ class WebController(Controller):
                 debugWindow.appendChild(logDiv);
             });
             logBuffer = logBuffer.concat(newLogs);
-            if (wasAtBottom) debugWindow.scrollTop = debugWindow.scrollHeight;
+            if (wasAtBottom && autoScrollEnabled) {
+                debugWindow.scrollTop = debugWindow.scrollHeight;
+            }
+        }
+
+        // Simple drag and drop - handle is draggable, not the whole card
+        function handleDragStart(e, nodeName) {
+            e.dataTransfer.setData('text/plain', nodeName);
+            e.dataTransfer.effectAllowed = 'move';
+            // Make the drag image transparent
+            const dragIcon = document.createElement('div');
+            dragIcon.textContent = '⋮⋮';
+            dragIcon.style.position = 'absolute';
+            dragIcon.style.top = '-1000px';
+            document.body.appendChild(dragIcon);
+            e.dataTransfer.setDragImage(dragIcon, 0, 0);
+            setTimeout(() => document.body.removeChild(dragIcon), 0);
+        }
+
+        function handleDragEnd(e) {
+            document.querySelectorAll('.node-card').forEach(card => {
+                card.classList.remove('drag-over');
+            });
+        }
+
+        function handleDragOver(e) {
+            e.preventDefault();
+            e.dataTransfer.dropEffect = 'move';
+        }
+
+        function handleDragEnter(e) {
+            e.preventDefault();
+            const card = e.target.closest('.node-card');
+            if (card) {
+                card.classList.add('drag-over');
+            }
+        }
+
+        function handleDragLeave(e) {
+            const card = e.target.closest('.node-card');
+            if (card) {
+                card.classList.remove('drag-over');
+            }
+        }
+
+        function handleDrop(e, targetNodeName) {
+            e.preventDefault();
+            const sourceNode = e.dataTransfer.getData('text/plain');
+            const targetNode = targetNodeName;
+
+            if (sourceNode && targetNode && sourceNode !== targetNode) {
+                const sourceIndex = nodeOrder.indexOf(sourceNode);
+                const targetIndex = nodeOrder.indexOf(targetNode);
+                if (sourceIndex !== -1 && targetIndex !== -1) {
+                    nodeOrder.splice(sourceIndex, 1);
+                    nodeOrder.splice(targetIndex, 0, sourceNode);
+                    saveNodeOrder();
+                    // Refresh the UI
+                    fetch('/api/status')
+                        .then(response => response.json())
+                        .then(status => {
+                            buildFullGrid(status);
+                        })
+                        .catch(e => console.error('Error refreshing UI:', e));
+                }
+            }
+
+            document.querySelectorAll('.node-card').forEach(card => {
+                card.classList.remove('drag-over');
+            });
+        }
+
+        function saveNodeOrder() {
+            fetch('/api/layout', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({order: nodeOrder})
+            }).catch(e => console.error('Error saving layout:', e));
+        }
+
+        function buildFullGrid(status) {
+            const grid = document.getElementById('nodeGrid');
+            let html = '';
+            for (const node of status.nodes) {
+                const isOnline = node.connected;
+                const measurement = node.measurement || {};
+                const waterHeight = measurement.water_height;
+                const essentialClass = node.essential ? 'essential' : 'non-essential';
+
+                html += `
+                    <div class="node-card ${isOnline ? 'online' : 'offline'} ${essentialClass}"
+                         data-node-name="${node.name}"
+                         ondragover="handleDragOver(event)"
+                         ondragenter="handleDragEnter(event)"
+                         ondragleave="handleDragLeave(event)"
+                         ondrop="handleDrop(event, '${node.name}')">
+                        <div class="node-header">
+                            <div class="node-title">
+                                <span class="drag-handle"
+                                      draggable="true"
+                                      ondragstart="handleDragStart(event, '${node.name}')"
+                                      ondragend="handleDragEnd(event)">⋮⋮</span>
+                                <span class="node-name">${escapeHtml(node.name)}</span>
+                            </div>
+                            <span class="node-type">${escapeHtml(node.type || 'unknown')}</span>
+                        </div>
+                        <div class="node-ip">${escapeHtml(node.ip)}</div>
+                        <div class="node-state ${isOnline ? 'online' : 'offline'}">
+                            <span class="state-text">${isOnline ? 'online' : 'offline'} - ${escapeHtml(node.state)}</span>
+                        </div>
+                        <div class="node-metrics">
+                            <span class="connection-duration">${node.connection_duration ? '📡 ' + node.connection_duration : ''}</span>
+                            <span>📨 <span class="message-count">${node.message_count}</span> 💓 <span class="heartbeat-count">${node.heartbeat_count}</span></span>
+                        </div>
+                        <div class="node-measurement-container"></div>
+                        <div class="node-actions">
+                            <button class="btn-query" onclick="sendCommand('${node.name}', 'query_state')">Ping</button>
+                            <button class="btn-start" onclick="sendCommand('${node.name}', 'start')">Start</button>
+                            <button class="btn-stop" onclick="sendCommand('${node.name}', 'stop')">Stop</button>
+                            <button class="btn-reboot" onclick="sendCommand('${node.name}', 'reboot')">Reboot</button>
+                        </div>
+                        <div class="node-actions-group">
+                            <button class="btn-log-start" onclick="sendCommand('${node.name}', 'log_start')">Log On</button>
+                            <button class="btn-log-stop" onclick="sendCommand('${node.name}', 'log_stop')">Log Off</button>
+                            <select class="log-level-select" data-node-name="${node.name}">
+                                <option value="0">DEBUG</option>
+                                <option value="1" selected>INFO</option>
+                                <option value="2">WARN</option>
+                                <option value="3">ERROR</option>
+                            </select>
+                            <button class="btn-query" onclick="setLogLevelFromSelect('${node.name}')">Set</button>
+                        </div>
+                    </div>
+                `;
+            }
+            grid.innerHTML = html;
+
+            // Store node data and add measurement displays
+            for (const node of status.nodes) {
+                nodesData[node.name] = node;
+                updateNodeMeasurements(node);
+            }
+
+            // Add log level change listeners
+            document.querySelectorAll('.log-level-select').forEach(select => {
+                select.addEventListener('change', function(e) {
+                    e.stopPropagation();
+                    const nodeName = this.getAttribute('data-node-name');
+                    const level = parseInt(this.value);
+                    setLogLevel(nodeName, level);
+                });
+            });
+
+            gridBuilt = true;
+        }
+
+        function updateExistingNodes(status) {
+            for (const node of status.nodes) {
+                const oldNodeData = nodesData[node.name];
+                nodesData[node.name] = node;
+
+                const card = document.querySelector(`.node-card[data-node-name="${node.name}"]`);
+                if (!card) continue;
+
+                const isOnline = node.connected;
+
+                // Update classes - set explicitly rather than toggle
+                if (isOnline) {
+                    card.classList.add('online');
+                    card.classList.remove('offline');
+                } else {
+                    card.classList.add('offline');
+                    card.classList.remove('online');
+                }
+                card.classList.toggle('essential', node.essential);
+                card.classList.toggle('non-essential', !node.essential);
+
+                // Update node state text
+                const stateSpan = card.querySelector('.state-text');
+                if (stateSpan) {
+                    stateSpan.textContent = `${isOnline ? 'online' : 'offline'} - ${node.state}`;
+                }
+
+                // Update the node-state div class to match
+                const nodeStateDiv = card.querySelector('.node-state');
+                if (nodeStateDiv) {
+                    if (isOnline) {
+                        nodeStateDiv.classList.add('online');
+                        nodeStateDiv.classList.remove('offline');
+                    } else {
+                        nodeStateDiv.classList.add('offline');
+                        nodeStateDiv.classList.remove('online');
+                    }
+                }
+
+                // Update notification - only show new notifications (based on timestamp)
+                const notificationContainer = card.querySelector('.node-state');
+                const existingNotification = notificationContainer?.querySelector('.notification');
+
+                // Check if this is a new notification (different timestamp)
+                const isNewNotification = node.notification &&
+                    (!lastNotificationTimestamp[node.name] ||
+                     lastNotificationTimestamp[node.name] !== node.notification.timestamp);
+
+                if (node.notification && isNewNotification) {
+                    // Record this notification timestamp
+                    lastNotificationTimestamp[node.name] = node.notification.timestamp;
+
+                    const notificationClass = node.notification.is_success === false ? 'notification failure' :
+                                             (node.notification.message.includes('◀️') ? 'notification success' : 'notification');
+
+                    // Remove old notification if exists
+                    if (existingNotification) {
+                        existingNotification.remove();
+                    }
+
+                    // Add new notification
+                    const newNotification = document.createElement('span');
+                    newNotification.className = notificationClass;
+                    newNotification.textContent = node.notification.message;
+                    notificationContainer.appendChild(newNotification);
+
+                    // Remove after animation
+                    setTimeout(() => {
+                        if (newNotification.parentNode) newNotification.remove();
+                    }, 3000);
+                } else if (!node.notification && existingNotification) {
+                    existingNotification.remove();
+                }
+
+                // Update metrics
+                const durationSpan = card.querySelector('.connection-duration');
+                if (durationSpan) {
+                    durationSpan.textContent = node.connection_duration ? '📡 ' + node.connection_duration : '';
+                }
+                const messageCountSpan = card.querySelector('.message-count');
+                if (messageCountSpan) messageCountSpan.textContent = node.message_count;
+                const heartbeatCountSpan = card.querySelector('.heartbeat-count');
+                if (heartbeatCountSpan) heartbeatCountSpan.textContent = node.heartbeat_count;
+
+                // Update measurements
+                updateNodeMeasurements(node);
+            }
+        }
+
+        function updateNodeMeasurements(node) {
+            const card = document.querySelector(`.node-card[data-node-name="${node.name}"]`);
+            if (!card) return;
+
+            const measurement = node.measurement || {};
+            const waterHeight = measurement.water_height;
+            const measurementContainer = card.querySelector('.node-measurement-container');
+            if (measurementContainer) {
+                if (node.type === 'level_gauge' && waterHeight !== undefined) {
+                    measurementContainer.innerHTML = `
+                        <div class="node-measurement">
+                            <div class="measurement-value">${waterHeight} <span class="measurement-unit">mm</span></div>
+                            <div class="measurement-unit">Water Level</div>
+                        </div>`;
+                } else if (node.type === 'test' && measurement.value !== undefined) {
+                    measurementContainer.innerHTML = `
+                        <div class="node-measurement">
+                            <div class="measurement-value">${measurement.value} <span class="measurement-unit">value</span></div>
+                            <div class="measurement-unit">Last reading</div>
+                        </div>`;
+                } else if (measurementContainer.innerHTML !== '') {
+                    measurementContainer.innerHTML = '';
+                }
+            }
+        }
+
+        function setLogLevelFromSelect(nodeName) {
+            const select = document.querySelector(`.log-level-select[data-node-name="${nodeName}"]`);
+            if (select) {
+                const level = parseInt(select.value);
+                setLogLevel(nodeName, level);
+            }
         }
 
         function updateUI(status) {
@@ -827,129 +1496,75 @@ class WebController(Controller):
 
             const banner = document.getElementById('statusBanner');
             const total = status.total_nodes;
-            const connected = status.connected_nodes;
-            const initialised = status.initialised_nodes;
-            if (initialised === total && total > 0) {
+            const essential = status.essential_nodes;
+            const connected_essential = status.connected_essential_nodes;
+            const working_essential = status.working_essential_nodes;
+
+            // Handle case with no essential nodes
+            if (essential === 0) {
                 banner.className = 'status-banner ready';
                 banner.querySelector('.status-icon').textContent = '✅';
-                banner.querySelector('.status-text > div:first-child').textContent = 'System Status: ALL NODES READY';
-                banner.querySelector('.status-details').textContent = `${connected}/${total} connected, ${initialised} initialised`;
-            } else if (connected > 0) {
+                banner.querySelector('.status-text > div:first-child').textContent = 'NO ESSENTIAL NODES CONFIGURED';
+                banner.querySelector('.status-details').textContent = `${status.total_nodes} total nodes (all optional)`;
+            }
+            // Check if all essential nodes are connected AND working
+            else if (connected_essential === essential && working_essential === essential) {
+                banner.className = 'status-banner ready';
+                banner.querySelector('.status-icon').textContent = '✅';
+                banner.querySelector('.status-text > div:first-child').textContent = 'ALL ESSENTIAL NODES WORKING';
+                banner.querySelector('.status-details').textContent = `${connected_essential}/${essential} essential connected, ${working_essential} working`;
+            }
+            // Check if at least some essential nodes are working
+            else if (working_essential > 0) {
                 banner.className = 'status-banner waiting';
                 banner.querySelector('.status-icon').textContent = '⏳';
-                banner.querySelector('.status-text > div:first-child').textContent = 'System Status: Initializing...';
-                banner.querySelector('.status-details').textContent = `${connected}/${total} connected, ${initialised} initialised`;
-            } else {
+                banner.querySelector('.status-text > div:first-child').textContent = 'ESSENTIAL NODES INITIALIZING';
+                banner.querySelector('.status-details').textContent = `${connected_essential}/${essential} essential connected, ${working_essential} working`;
+            }
+            // Check if essential nodes are connected but none working yet
+            else if (connected_essential > 0) {
+                banner.className = 'status-banner waiting';
+                banner.querySelector('.status-icon').textContent = '⏳';
+                banner.querySelector('.status-text > div:first-child').textContent = 'ESSENTIAL NODES CONNECTING';
+                banner.querySelector('.status-details').textContent = `${connected_essential}/${essential} essential connected, waiting for working state`;
+            }
+            else {
                 banner.className = 'status-banner waiting';
                 banner.querySelector('.status-icon').textContent = '⚠️';
-                banner.querySelector('.status-text > div:first-child').textContent = 'System Status: Waiting for nodes';
-                banner.querySelector('.status-details').textContent = 'No nodes connected yet.';
+                banner.querySelector('.status-text > div:first-child').textContent = 'WAITING FOR ESSENTIAL NODES';
+                banner.querySelector('.status-details').textContent = `0/${essential} essential connected`;
             }
 
+            // Add optional nodes info if any exist
+            if (status.total_nodes > essential) {
+                const optional_count = status.total_nodes - essential;
+                const optional_connected = status.connected_nodes - connected_essential;
+                banner.querySelector('.status-details').textContent += ` (${optional_connected}/${optional_count} optional online)`;
+            }
+
+            // Update node order from server
+            if (status.nodes.length > 0 && nodeOrder.length === 0) {
+                nodeOrder = status.nodes.map(n => n.name);
+            }
+
+            // Check if grid exists, if not build it
             const grid = document.getElementById('nodeGrid');
-
-            // First time or node count changed: rebuild entire grid
-            const existingCards = grid.querySelectorAll('.node-card');
-            if (existingCards.length !== status.nodes.length) {
-                // Full rebuild
-                let html = '';
-                for (const node of status.nodes) {
-                    const isOnline = node.connected;
-                    const measurement = node.measurement || {};
-                    const waterHeight = measurement.water_height;
-
-                    html += `
-                        <div class="node-card ${isOnline ? 'online' : 'offline'}" data-node-name="${node.name}">
-                            <div class="node-header">
-                                <span class="node-name">${escapeHtml(node.name)}</span>
-                                <span class="node-type">${escapeHtml(node.type || 'unknown')}</span>
-                            </div>
-                            <div class="node-ip">${escapeHtml(node.ip)}</div>
-                            <div class="node-state ${isOnline ? 'online' : 'offline'}">
-                                ${isOnline ? '🟢 Online' : '🔴 Offline'} - <span class="node-state-value">${node.state}</span>
-                            </div>
-                            <div class="node-metrics">
-                                <span class="node-connection-duration">${node.connection_duration ? 'Connected: ' + node.connection_duration : ''}</span>
-                                Messages: <span class="node-message-count">${node.message_count}</span> | Heartbeats: <span class="node-heartbeat-count">${node.heartbeat_count}</span>
-                            </div>
-                            <div class="node-measurement-container"></div>
-                            <div class="node-actions">
-                                <button class="btn-query" onclick="sendCommand('${node.name}', 'query_state')">❓ Query State</button>
-                                <button class="btn-start" onclick="sendCommand('${node.name}', 'start')">▶️ Start</button>
-                                <button class="btn-stop" onclick="sendCommand('${node.name}', 'stop')">⏹️ Stop</button>
-                                <button class="btn-reboot" onclick="sendCommand('${node.name}', 'reboot')">🔄 Reboot</button>
-                            </div>
-                            <div class="node-actions-group">
-                                <label>Logging:</label>
-                                <button class="btn-log-start" onclick="sendCommand('${node.name}', 'log_start')">Start</button>
-                                <button class="btn-log-stop" onclick="sendCommand('${node.name}', 'log_stop')">Stop</button>
-                                <select class="log-level-select" id="log-level-${node.name}">
-                                    <option value="0">DEBUG</option>
-                                    <option value="1" selected>INFO</option>
-                                    <option value="2">WARN</option>
-                                    <option value="3">ERROR</option>
-                                </select>
-                                <button class="btn-query" onclick="setLogLevel('${node.name}', document.getElementById('log-level-${node.name}').value)">Set</button>
-                            </div>
-                        </div>
-                    `;
-                }
-                grid.innerHTML = html;
+            if (!gridBuilt || grid.children.length === 0) {
+                buildFullGrid(status);
+            } else if (grid.children[0] && grid.children[0].tagName === 'DIV' && grid.children[0].innerText === 'Loading nodes...') {
+                buildFullGrid(status);
             } else {
-                // Update existing nodes in place - only update changing values
-                for (const node of status.nodes) {
-                    const card = document.querySelector(`.node-card[data-node-name="${node.name}"]`);
-                    if (card) {
-                        const isOnline = node.connected;
+                // Update existing nodes
+                updateExistingNodes(status);
+            }
 
-                        // Update online/offline class
-                        if (isOnline) {
-                            card.classList.add('online');
-                            card.classList.remove('offline');
-                        } else {
-                            card.classList.add('offline');
-                            card.classList.remove('online');
-                        }
-
-                        // Update state text
-                        const stateSpan = card.querySelector('.node-state');
-                        if (stateSpan) {
-                            stateSpan.innerHTML = `${isOnline ? '🟢 Online' : '🔴 Offline'} - <span class="node-state-value">${escapeHtml(node.state)}</span>`;
-                        }
-
-                        // Update metrics
-                        const durationSpan = card.querySelector('.node-connection-duration');
-                        if (durationSpan) {
-                            durationSpan.textContent = node.connection_duration ? 'Connected: ' + node.connection_duration : '';
-                        }
-                        const msgCountSpan = card.querySelector('.node-message-count');
-                        if (msgCountSpan) msgCountSpan.textContent = node.message_count;
-                        const hbCountSpan = card.querySelector('.node-heartbeat-count');
-                        if (hbCountSpan) hbCountSpan.textContent = node.heartbeat_count;
-
-                        // Update measurement display
-                        const measurement = node.measurement || {};
-                        const waterHeight = measurement.water_height;
-                        const measurementContainer = card.querySelector('.node-measurement-container');
-                        if (measurementContainer) {
-                            if (node.type === 'level_gauge' && waterHeight !== undefined) {
-                                measurementContainer.innerHTML = `
-                                    <div class="node-measurement">
-                                        <div class="measurement-value">${waterHeight} <span class="measurement-unit">mm</span></div>
-                                        <div class="measurement-unit">Water Level</div>
-                                    </div>`;
-                            } else if (node.type === 'test' && measurement.value !== undefined) {
-                                measurementContainer.innerHTML = `
-                                    <div class="node-measurement">
-                                        <div class="measurement-value">${measurement.value} <span class="measurement-unit">value</span></div>
-                                        <div class="measurement-unit">Last reading</div>
-                                    </div>`;
-                            } else if (measurementContainer.innerHTML !== '') {
-                                measurementContainer.innerHTML = '';
-                            }
-                        }
-                    }
-                }
+            // Check if scrolling is needed
+            const gridRect = grid.getBoundingClientRect();
+            const scrollHint = document.getElementById('scrollHint');
+            if (grid.scrollWidth > grid.clientWidth) {
+                scrollHint.classList.add('show');
+            } else {
+                scrollHint.classList.remove('show');
             }
         }
 
@@ -999,12 +1614,35 @@ class WebController(Controller):
         function setupLogsStream() {
             if (logsSource) logsSource.close();
             const source = new EventSource('/api/logs/stream');
+
+            // Handle normal data messages (new logs)
             source.onmessage = (event) => {
                 try {
                     const newLogs = JSON.parse(event.data);
                     if (newLogs.length > 0) appendLogs(newLogs);
                 } catch (e) { console.error("Error parsing logs:", e); }
             };
+
+            // Handle clear event
+            source.addEventListener('clear', (event) => {
+                console.log('Logs cleared remotely');
+                const debugWindow = document.getElementById('debugWindow');
+                if (debugWindow) {
+                    debugWindow.innerHTML = 'Logs cleared...';
+                }
+                logBuffer = [];
+                autoScrollEnabled = true;
+            });
+
+            // Handle reset event
+            source.addEventListener('reset', (event) => {
+                console.log('Log stream reset');
+                const debugWindow = document.getElementById('debugWindow');
+                if (debugWindow && debugWindow.innerHTML === '') {
+                    debugWindow.innerHTML = 'Waiting for logs...';
+                }
+            });
+
             source.onerror = () => {
                 console.log('Logs stream error, reconnecting...');
                 source.close();
@@ -1019,41 +1657,6 @@ class WebController(Controller):
     </script>
 </body>
 </html>'''
-
-
-class LevelGaugeHandler(NodeHandler):
-    """Handler for level gauge nodes"""
-
-    def on_indication(self, msg: fgr.FGRMsg) -> bool:
-        ind_type = msg.subtype
-        if ind_type == 0x100:  # Level reading
-            level_mm = msg.error_or_state
-            self.logger.info(f"Level gauge {self.node.name} reading: {level_mm} mm from top")
-            water_height = RESERVOIR_DEPTH - level_mm
-            if hasattr(self.controller, 'update_node_measurement'):
-                self.controller.update_node_measurement(self.node.name, {
-                    'level': level_mm,
-                    'water_height': max(0, water_height),
-                    'type': 'level_gauge'
-                })
-            return True
-        return super().on_indication(msg)
-
-
-class TestHandler(NodeHandler):
-    """Handler for test nodes"""
-
-    def on_indication(self, msg: fgr.FGRMsg) -> bool:
-        ind_type = msg.subtype
-        if ind_type > fgr.FGRIndRsp.FGR_IND_RSP_LAST:
-            self.logger.info(f"Test node {self.node.name} sent value: {msg.error_or_state}")
-            if hasattr(self.controller, 'update_node_measurement'):
-                self.controller.update_node_measurement(self.node.name, {
-                    'value': msg.error_or_state,
-                    'type': 'test'
-                })
-            return True
-        return super().on_indication(msg)
 
 
 def main():
@@ -1077,6 +1680,9 @@ def main():
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
 
+    # Disable aiohttp access logs
+    logging.getLogger('aiohttp.access').setLevel(logging.WARNING)
+
     # Resolve config file
     cfg_file = args.cfg
     if not cfg_file:
@@ -1093,12 +1699,6 @@ def main():
         http_port=args.http_port
     )
 
-    # Register handlers if not loaded from files
-    if 'level_gauge' not in controller.node_handlers:
-        controller.node_handlers['level_gauge'] = LevelGaugeHandler
-    if 'test' not in controller.node_handlers:
-        controller.node_handlers['test'] = TestHandler
-
     print(f"\n{'='*60}")
     print("FGR Controller with Web Interface")
     print(f"{'='*60}")
@@ -1106,6 +1706,7 @@ def main():
     print(f"Web interface: http://0.0.0.0:{args.http_port}")
     print(f"Journal identifier: {JOURNAL_IDENTIFIER}")
     print(f"Configured nodes: {controller.get_node_names()}")
+    print(f"Node grid layout config: {NODE_GRID_CONFIG}")
     print(f"{'='*60}")
     print("Press Ctrl+C to stop\n")
 

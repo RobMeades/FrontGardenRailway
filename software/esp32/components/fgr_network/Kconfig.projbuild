@@ -17,7 +17,7 @@ menu "FGR Network Configuration"
         int "WiFi reduced TX power"
         default 0
         help
-            Limit max TX power to 8 dBm.
+            Set this to 1 to limit max TX power to 8 dBm.
             can improve reliability when within 1 metre of AP.
 
     config FGR_NETWORK_CONTROLLER_IP_ADDRESS

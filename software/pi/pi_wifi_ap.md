@@ -33,20 +33,23 @@ Since the Pi will lose connectivity to your Wi-Fi network (you do _not_ want an 
 # AP Setup
 Connect to the Pi using a serial terminal and set the AP up as follows:
 
-- On the Pi, `sudo nano /etc/NetworkManager/NetworkManager.conf` and:
+- On the Pi, `sudo nano /etc/NetworkManager/NetworkManager.conf` and, in the section `[ifupdown]` change `managed` to `true` (otherwise you won't be able to create a new connection).
 
-  - In the section `[ifupdown]` change `managed` to `true` (otherwise you won't be able to create a new connection).
+- On the Pi, create a Wi-Fi-specific NetworkManager configuration file with `sudo nano /etc/NetworkManager/conf.d/99-wifi-powersave.conf` and give it the contents:
 
-  - Add a section:
-    ```
-    [802-11-wireless]
-    # Switch power saving off to avoid poll time-outs
-    powersave=2
-    ```
+  ```
+  [connection]
+  # Switch power saving off to avoid poll time-outs
+  wifi.powersave = 2
+  ``
 
 - Restart NetworkManager with:
 
   `sudo systemctl restart NetworkManager`
+
+- NOTE: I suffered occasional crashes of the Broadcomm Wi-Fi driver on the Raspberry Pi Zero W, apparently due to SDIO communication hanging, for which the suggested workaround was to create and populate a driver modification file with:
+
+  `echo "options brcmfmac roamoff=1 feature_disable=0x82000" | sudo tee /etc/modprobe.d/brcmfmac.conf`
 
 - Now you can create the access point with:
 

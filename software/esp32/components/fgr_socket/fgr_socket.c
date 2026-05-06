@@ -211,7 +211,13 @@ static void task_maintain(void *param)
                 if (context_channel->connected && context_channel->cfg_cb) {
                     // If we have reconnected and there is a user configuration
                     // callback, call it
-                    context_channel->cfg_cb(context_channel->sock, context_channel->cb_param);
+                    context_channel->cfg_cb(context_channel->sock,
+                                            context_channel->cb_param);
+                    if (context_channel->heartbeat_cb) {
+                        // Call heartbeat_cb() also so that the controller gets our state
+                        context_channel->heartbeat_cb(context_channel->sock,
+                                                      context_channel->cb_param);
+                    }
                 }
             }
         } else {

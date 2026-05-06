@@ -2,11 +2,54 @@
     "test_1": {
         "ip": "10.10.3.2",
         "type": "test",
+        "essential": false,
         "heartbeat_timeout": 60
     },
     "level_gauge_1": {
         "ip": "10.10.3.3",
         "type": "level_gauge",
+        "heartbeat_timeout": 60
+    },
+    "test_2": {
+        "ip": "10.10.3.4",
+        "type": "test",
+        "essential": false,
+        "heartbeat_timeout": 60
+    },
+    "test_3": {
+        "ip": "10.10.3.5",
+        "type": "test",
+        "essential": false,
+        "heartbeat_timeout": 60
+    },
+    "test_4": {
+        "ip": "10.10.3.6",
+        "type": "test",
+        "essential": false,
+        "heartbeat_timeout": 60
+    },
+    "test_5": {
+        "ip": "10.10.3.7",
+        "type": "test",
+        "essential": false,
+        "heartbeat_timeout": 60
+    },
+    "test_6": {
+        "ip": "10.10.3.8",
+        "type": "test",
+        "essential": false,
+        "heartbeat_timeout": 60
+    },
+    "test_7": {
+        "ip": "10.10.3.9",
+        "type": "test",
+        "essential": false,
+        "heartbeat_timeout": 60
+    },
+    "test_8": {
+        "ip": "10.10.3.10",
+        "type": "test",
+        "essential": false,
         "heartbeat_timeout": 60
     }
 }
