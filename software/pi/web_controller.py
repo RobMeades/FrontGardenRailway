@@ -83,6 +83,9 @@ JOURNAL_IDENTIFIER = 'fgr-log-server'
 # Node grid layout configuration file
 NODE_GRID_CONFIG = Path(__file__).parent / "node_grid_layout.json"
 
+# Nodes per page (2 rows x 4 columns)
+NODES_PER_PAGE = 8
+
 
 def format_fgr_state(state):
     """Format fgr_state_t value for display"""
@@ -179,7 +182,7 @@ class WebController(Controller):
                     return json.load(f)
             except Exception as e:
                 self._log_message(f"Error loading node grid layout: {e}")
-        return {'order': [], 'columns': 4, 'rows': 2}
+        return {'order': [], 'pages': {}, 'columns': 4, 'rows': 2}
 
     def _save_node_grid_layout(self):
         """Save node grid layout to config file"""
@@ -371,9 +374,9 @@ class WebController(Controller):
         """Get current system status for API"""
         nodes_status = []
 
-        # Get ordered node list based on layout
-        ordered_nodes = []
+        # Get ordered node list based on layout (full order, not paginated)
         layout_order = self.node_grid_layout.get('order', [])
+        pages = self.node_grid_layout.get('pages', {})
         remaining_nodes = list(self.nodes.keys())
 
         # Count essential nodes that are in a working state
@@ -381,11 +384,15 @@ class WebController(Controller):
                                 if n.sock and n.essential and
                                 n.fgr_state in WORKING_FGR_STATES])
 
+        # Build full ordered list
+        ordered_nodes = []
+
         # Add nodes in layout order first
         for node_name in layout_order:
             if node_name in self.nodes:
                 ordered_nodes.append(node_name)
-                remaining_nodes.remove(node_name)
+                if node_name in remaining_nodes:
+                    remaining_nodes.remove(node_name)
 
         # Add remaining nodes at the end
         ordered_nodes.extend(remaining_nodes)
@@ -462,7 +469,8 @@ class WebController(Controller):
             'server_uptime': time.time() - self._start_time,
             'journal_enabled': HAS_SYSTEMD,
             'grid_columns': self.node_grid_layout.get('columns', 4),
-            'grid_rows': self.node_grid_layout.get('rows', 2)
+            'grid_rows': self.node_grid_layout.get('rows', 2),
+            'nodes_per_page': NODES_PER_PAGE
         }
 
     async def _broadcast_status(self):
@@ -713,6 +721,26 @@ class WebController(Controller):
         self._save_node_grid_layout()
         return web.json_response({'status': 'ok'})
 
+    async def handle_api_reorder(self, request):
+        """Handle node reordering across pages"""
+        data = await request.json()
+        source_node = data.get('source')
+        target_node = data.get('target')
+
+        if source_node and target_node and source_node != target_node:
+            order = self.node_grid_layout.get('order', [])
+
+            if source_node in order and target_node in order:
+                source_idx = order.index(source_node)
+                target_idx = order.index(target_node)
+                order.pop(source_idx)
+                order.insert(target_idx, source_node)
+                self.node_grid_layout['order'] = order
+                self._save_node_grid_layout()
+                return web.json_response({'status': 'ok', 'order': order})
+
+        return web.json_response({'status': 'error', 'message': 'Invalid reorder operation'})
+
     def start_web(self):
         """Start the web server"""
         self.web_app = web.Application()
@@ -724,6 +752,7 @@ class WebController(Controller):
         self.web_app.router.add_post('/api/logs/clear', self.handle_api_logs_clear)
         self.web_app.router.add_post('/api/command', self.handle_api_command)
         self.web_app.router.add_post('/api/layout', self.handle_api_layout)
+        self.web_app.router.add_post('/api/reorder', self.handle_api_reorder)
 
         async def start_server():
             self.web_runner = web.AppRunner(self.web_app)
@@ -780,68 +809,98 @@ class WebController(Controller):
     <title>FGR Controller</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
+        :root {
+            --card-height: 250px;      /* Change this to adjust card height */
+            --grid-gap: 12px;          /* Gap between cards */
+            --grid-rows: 2;            /* Number of rows per page */
+            --grid-columns: 4;         /* Number of columns per page */
+        }
+
         * { box-sizing: border-box; }
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
             max-width: 1600px;
             margin: 0 auto;
-            padding: 15px;
+            padding: 12px;
             background: #f5f5f5;
+            display: flex;
+            flex-direction: column;
+            min-height: 100vh;
         }
         h1 {
             margin: 0;
-            font-size: 24px;
+            font-size: 22px;
             color: #333;
         }
         .header {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            margin-bottom: 20px;
+            margin-bottom: 12px;
             flex-wrap: wrap;
-            gap: 15px;
+            gap: 12px;
+            flex-shrink: 0;
         }
         .title-section h1 { margin: 0; }
-        .title-section .subtitle { margin: 0; font-size: 12px; color: #666; }
+        .title-section .subtitle { margin: 0; font-size: 11px; color: #666; }
 
         .status-banner {
             background: #fff3e0;
             border-left: 4px solid #ffc107;
-            padding: 8px 15px;
-            border-radius: 8px;
+            padding: 5px 10px;
+            border-radius: 6px;
             display: flex;
             align-items: center;
-            gap: 10px;
-            font-size: 13px;
+            gap: 6px;
+            font-size: 11px;
         }
         .status-banner.ready { background: #e8f5e9; border-left-color: #2e7d32; }
         .status-banner.waiting { background: #fff3e0; border-left-color: #ffc107; }
-        .status-icon { font-size: 18px; }
+        .status-icon { font-size: 14px; }
         .status-text { flex: 1; white-space: nowrap; }
-        .status-details { font-size: 10px; color: #666; margin-top: 2px; }
+        .status-details { font-size: 9px; color: #666; margin-top: 1px; }
 
-        /* Node grid container with horizontal scrolling */
+        /* Main grid wrapper with margin buttons */
+        .grid-wrapper {
+            position: relative;
+            margin: 0 50px;
+            flex-shrink: 0;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* Grid container - uses CSS variable for height calculation */
         .grid-container {
             position: relative;
-            margin-bottom: 20px;
+            margin-bottom: 5px;
+            height: calc(var(--card-height) * var(--grid-rows) + var(--grid-gap));
+            overflow-y: visible;
         }
+
         .node-grid {
             display: grid;
             grid-template-columns: repeat(4, minmax(280px, 1fr));
-            gap: 15px;
+            gap: var(--grid-gap);
             overflow-x: auto;
-            padding-bottom: 10px;
+            height: 100%;
+            align-content: start;
         }
         .node-grid.has-more {
             grid-template-columns: repeat(auto-fill, minmax(280px, 320px));
         }
+
+        /* Node cards - uses CSS variable for height */
         .node-card {
             background: white;
-            border-radius: 10px;
-            padding: 12px;
-            box-shadow: 0 2px 6px rgba(0,0,0,0.1);
+            border-radius: 8px;
+            padding: 10px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
             transition: transform 0.1s, box-shadow 0.2s;
             user-select: text;
+            height: var(--card-height);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
         }
         .node-card * {
             user-select: text;
@@ -888,9 +947,9 @@ class WebController(Controller):
         .drag-handle {
             cursor: grab;
             color: #999;
-            font-size: 16px;
-            padding: 4px 8px;
-            margin-right: 4px;
+            font-size: 14px;
+            padding: 2px 4px;
+            margin-right: 2px;
             display: inline-block;
             transition: color 0.2s;
         }
@@ -900,11 +959,14 @@ class WebController(Controller):
         .drag-handle:active {
             cursor: grabbing;
         }
+
+        /* Header section: node name and type */
         .node-header {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            margin-bottom: 8px;
+            margin-bottom: 4px;
+            flex-shrink: 0;
         }
         .node-title {
             display: flex;
@@ -912,24 +974,59 @@ class WebController(Controller):
             flex: 1;
         }
         .node-name {
-            font-size: 16px;
+            font-size: 13px;
             font-weight: bold;
             color: #333;
         }
-        .node-type { font-size: 10px; color: #888; background: #f0f0f0; padding: 2px 6px; border-radius: 20px; }
-        .node-ip { font-family: monospace; font-size: 10px; color: #666; margin-bottom: 6px; }
-        .node-state { font-size: 12px; margin-bottom: 6px; display: flex; justify-content: space-between; align-items: center; }
+        .node-type {
+            font-size: 8px;
+            color: #888;
+            background: #f0f0f0;
+            padding: 1px 4px;
+            border-radius: 20px;
+            white-space: nowrap;
+        }
+
+        /* IP address inline with type */
+        .node-ip {
+            font-family: monospace;
+            font-size: 8px;
+            color: #666;
+            margin-left: 4px;
+            display: inline-block;
+        }
+
+        /* Fixed footer area (status, metrics, buttons) */
+        .node-footer {
+            margin-top: auto;
+            flex-shrink: 0;
+        }
+
+        /* Status line with state and notification */
+        .node-status-line {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 4px;
+            font-size: 10px;
+            min-height: 18px;
+        }
+        .node-state {
+            display: inline-flex;
+            align-items: center;
+        }
         .node-state.online { color: #4caf50; }
         .node-state.offline { color: #f44336; }
         .state-text { text-transform: capitalize; }
         .notification {
-            font-size: 10px;
-            padding: 2px 6px;
+            font-size: 8px;
+            padding: 1px 4px;
             border-radius: 12px;
             animation: fadeOut 3s forwards;
             background: #2196f3;
             color: white;
             white-space: nowrap;
+            margin-left: 6px;
         }
         .notification.success { background: #4caf50; }
         .notification.failure { background: #f44336; }
@@ -938,43 +1035,66 @@ class WebController(Controller):
             70% { opacity: 1; }
             100% { opacity: 0; display: none; }
         }
+
+        /* Metrics line */
         .node-metrics {
-            font-size: 10px;
+            font-size: 8px;
             color: #888;
-            margin-bottom: 10px;
+            margin-bottom: 6px;
             border-top: 1px solid #eee;
-            padding-top: 6px;
+            padding-top: 4px;
             display: flex;
             justify-content: space-between;
         }
+
+        /* Measurement area - gets maximum space */
+        .node-measurement-container {
+            flex-grow: 1;
+            margin: 4px 0;
+            overflow-y: auto;
+            min-height: 40px;
+        }
         .node-measurement {
             background: #e3f2fd;
-            border-radius: 6px;
+            border-radius: 4px;
             padding: 6px;
-            margin-bottom: 10px;
             text-align: center;
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
         }
-        .measurement-value { font-size: 22px; font-weight: bold; color: #1976d2; }
-        .measurement-unit { font-size: 11px; color: #666; }
+        .measurement-value {
+            font-size: 20px;
+            font-weight: bold;
+            color: #1976d2;
+            line-height: 1.2;
+        }
+        .measurement-unit {
+            font-size: 9px;
+            color: #666;
+            margin-top: 2px;
+        }
 
-        /* Button grid - 2 rows of 4 equal items */
+        /* Button grid */
         .node-actions {
             display: grid;
             grid-template-columns: repeat(4, 1fr);
-            gap: 6px;
-            margin-top: 8px;
+            gap: 4px;
+            margin-top: 4px;
+            margin-bottom: 3px;
         }
         .node-actions-group {
             display: grid;
             grid-template-columns: repeat(4, 1fr);
-            gap: 6px;
-            margin-top: 6px;
+            gap: 4px;
+            margin-top: 3px;
         }
         button, .log-level-select {
-            padding: 5px 4px;
-            font-size: 10px;
+            padding: 3px 2px;
+            font-size: 8px;
             border: none;
-            border-radius: 4px;
+            border-radius: 3px;
             cursor: pointer;
             transition: all 0.2s;
             text-align: center;
@@ -990,34 +1110,117 @@ class WebController(Controller):
         .log-level-select {
             background: #e0e0e0;
             cursor: pointer;
-            font-size: 9px;
+            font-size: 7px;
         }
 
+        /* Side navigation buttons */
+        .nav-btn {
+            position: absolute;
+            top: 50%;
+            transform: translateY(-50%);
+            background: #007bff;
+            color: white;
+            border: none;
+            border-radius: 50%;
+            width: 36px;
+            height: 36px;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.2);
+            z-index: 10;
+            font-family: Arial, Helvetica, sans-serif;
+            font-size: 16px;
+            font-weight: normal;
+            line-height: 1;
+            padding: 0;
+            text-align: center;
+        }
+        .nav-prev {
+            left: -46px;
+        }
+        .nav-prev::before {
+            content: "◀";
+            display: inline-block;
+            position: relative;
+            top: -1px;
+        }
+        .nav-next {
+            right: -46px;
+        }
+        .nav-next::before {
+            content: "▶";
+            display: inline-block;
+            position: relative;
+            top: -1px;
+        }
+        .nav-btn span {
+            display: none;
+        }
+        .nav-btn:hover:not(:disabled) {
+            background: #0056b3;
+            transform: translateY(-50%) scale(1.05);
+        }
+        .nav-btn:disabled {
+            background: #cccccc;
+            cursor: not-allowed;
+            opacity: 0.5;
+        }
+
+        /* Page indicator */
+        .page-indicator {
+            text-align: center;
+            margin-top: 2px;
+            margin-bottom: 8px;
+            font-size: 10px;
+            color: #888;
+            background: rgba(255,255,255,0.8);
+            display: block;
+            padding: 2px 8px;
+            border-radius: 20px;
+            width: fit-content;
+            margin-left: auto;
+            margin-right: auto;
+        }
+        .page-indicator span {
+            font-weight: bold;
+            color: #007bff;
+        }
+
+        /* Debug panel */
         .debug-panel {
             background: white;
-            border-radius: 8px;
-            padding: 15px;
-            margin-top: 20px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            border-radius: 6px;
+            padding: 10px;
+            margin-top: 0;
+            margin-bottom: 0;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+            flex-shrink: 0;
         }
         .debug-header {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            margin-bottom: 8px;
+            margin-bottom: 6px;
             flex-wrap: wrap;
-            gap: 8px;
+            gap: 6px;
         }
-        .debug-header h2 { margin: 0; font-size: 16px; color: #555; }
-        .debug-buttons { display: flex; gap: 6px; }
+        .debug-header h2 { margin: 0; font-size: 12px; color: #555; }
+        .debug-buttons { display: flex; gap: 4px; }
+        .debug-buttons button {
+            padding: 3px 6px;
+            font-size: 9px;
+        }
         .debug-window {
             background: #1e1e1e;
             color: #d4d4d4;
             font-family: 'Courier New', monospace;
-            font-size: 11px;
-            padding: 10px;
-            border-radius: 5px;
-            height: 200px;
+            font-size: 9px;
+            padding: 6px;
+            border-radius: 4px;
+            height: 150px;
             overflow-y: auto;
         }
         .debug-window .log-ctrl { color: #4ec9b0; }
@@ -1025,27 +1228,37 @@ class WebController(Controller):
         .footer {
             text-align: center;
             color: #999;
-            font-size: 10px;
-            margin-top: 15px;
+            font-size: 8px;
+            margin-top: 8px;
+            flex-shrink: 0;
         }
-        .badge-success { background: #4caf50; color: white; padding: 2px 6px; border-radius: 4px; font-size: 10px; }
-        .badge-warning { background: #ff9800; color: white; padding: 2px 6px; border-radius: 4px; font-size: 10px; }
+        .badge-success { background: #4caf50; color: white; padding: 2px 5px; border-radius: 4px; font-size: 8px; }
+        .badge-warning { background: #ff9800; color: white; padding: 2px 5px; border-radius: 4px; font-size: 8px; }
 
         .scroll-hint {
             text-align: center;
-            font-size: 11px;
+            font-size: 9px;
             color: #999;
-            margin-top: 5px;
+            margin-top: 2px;
             display: none;
         }
         .scroll-hint.show { display: block; }
 
         @media (max-width: 1200px) {
             .node-grid { grid-template-columns: repeat(4, minmax(260px, 1fr)); }
+            .grid-wrapper { margin: 0 40px; }
+            .nav-prev { left: -40px; }
+            .nav-next { right: -40px; }
         }
         @media (max-width: 1000px) {
             .node-grid { overflow-x: auto; grid-template-columns: repeat(4, 280px); }
             .scroll-hint.show { display: block; }
+        }
+        @media (max-width: 768px) {
+            .grid-wrapper { margin: 0 35px; }
+            .nav-prev { left: -35px; width: 32px; height: 32px; }
+            .nav-next { right: -35px; width: 32px; height: 32px; }
+            .nav-prev::before, .nav-next::before { font-size: 14px; }
         }
     </style>
 </head>
@@ -1064,11 +1277,18 @@ class WebController(Controller):
         </div>
     </div>
 
-    <div class="grid-container">
-        <div id="nodeGrid" class="node-grid">
-            <div style="text-align: center; grid-column: 1/-1; padding: 40px;">Loading nodes...</div>
+    <div class="grid-wrapper">
+        <button id="prevPageBtn" class="nav-btn nav-prev" onclick="previousPage()" disabled><span>◀</span></button>
+        <button id="nextPageBtn" class="nav-btn nav-next" onclick="nextPage()" disabled><span>▶</span></button>
+
+        <div class="grid-container">
+            <div id="nodeGrid" class="node-grid">
+                <div style="text-align: center; grid-column: 1/-1; padding: 40px;">Loading nodes...</div>
+            </div>
+            <div id="scrollHint" class="scroll-hint">← → Scroll for more nodes → ←</div>
         </div>
-        <div id="scrollHint" class="scroll-hint">← → Scroll for more nodes → ←</div>
+
+        <div id="pageIndicator" class="page-indicator">Page <span id="currentPageNum">1</span> / <span id="totalPagesNum">1</span></div>
     </div>
 
     <div class="debug-panel">
@@ -1083,7 +1303,7 @@ class WebController(Controller):
         <div id="debugWindow" class="debug-window">Waiting for logs...</div>
     </div>
 
-    <div class="footer">FGR Controller - Drag ⋮⋮ to reorder nodes</div>
+    <div class="footer">FGR Controller - Drag ⋮⋮ to reorder nodes (drag to edge to change pages)</div>
 
     <script>
         let statusSource = null;
@@ -1097,8 +1317,33 @@ class WebController(Controller):
         let gridBuilt = false;  // Track if grid has been built
         let lastNotificationTimestamp = {};  // Track last notification timestamp per node
 
+        // Pagination variables
+        let currentPage = 0;
+        let totalPages = 1;
+        let allNodes = [];  // Store all nodes in order
+        let nodesPerPage = 8;  // 2 rows x 4 columns
+
+        // Drag auto-scroll for pagination
+        let dragAutoScrollTimer = null;
+        let isDragging = false;
+        let dragSourceNode = null;
+
         // Log level names
         const logLevelNames = ['DEBUG', 'INFO', 'WARN', 'ERROR'];
+
+        // Set CSS variables from server data if needed
+        function updateCSSVariables(status) {
+            if (status.grid_rows) {
+                document.documentElement.style.setProperty('--grid-rows', status.grid_rows);
+            }
+            if (status.grid_columns) {
+                document.documentElement.style.setProperty('--grid-columns', status.grid_columns);
+            }
+            // Update nodesPerPage based on rows and columns
+            const rows = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--grid-rows')) || 2;
+            const cols = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--grid-columns')) || 4;
+            nodesPerPage = rows * cols;
+        }
 
         function setupDebugWindow() {
             const debugWindow = document.getElementById('debugWindow');
@@ -1213,8 +1458,62 @@ class WebController(Controller):
             }
         }
 
-        // Simple drag and drop - handle is draggable, not the whole card
+        // Update pagination controls
+        function updatePaginationControls() {
+            const prevBtn = document.getElementById('prevPageBtn');
+            const nextBtn = document.getElementById('nextPageBtn');
+            const currentPageSpan = document.getElementById('currentPageNum');
+            const totalPagesSpan = document.getElementById('totalPagesNum');
+
+            totalPages = Math.max(1, Math.ceil(allNodes.length / nodesPerPage));
+
+            if (currentPage >= totalPages) {
+                currentPage = totalPages - 1;
+            }
+            if (currentPage < 0) {
+                currentPage = 0;
+            }
+
+            if (currentPageSpan) currentPageSpan.textContent = currentPage + 1;
+            if (totalPagesSpan) totalPagesSpan.textContent = totalPages;
+
+            if (prevBtn) prevBtn.disabled = (currentPage === 0);
+            if (nextBtn) nextBtn.disabled = (currentPage >= totalPages - 1);
+        }
+
+        // Navigate to previous page
+        function previousPage() {
+            if (currentPage > 0) {
+                currentPage--;
+                updatePaginationControls();
+                renderCurrentPage();
+            }
+        }
+
+        // Navigate to next page
+        function nextPage() {
+            if (currentPage < totalPages - 1) {
+                currentPage++;
+                updatePaginationControls();
+                renderCurrentPage();
+            }
+        }
+
+        // Go to a specific page (used by auto-scroll during drag)
+        function goToPage(page) {
+            if (page >= 0 && page < totalPages && page !== currentPage) {
+                currentPage = page;
+                updatePaginationControls();
+                renderCurrentPage();
+                return true;
+            }
+            return false;
+        }
+
+        // Simple drag and drop with auto-page scroll
         function handleDragStart(e, nodeName) {
+            isDragging = true;
+            dragSourceNode = nodeName;
             e.dataTransfer.setData('text/plain', nodeName);
             e.dataTransfer.effectAllowed = 'move';
             // Make the drag image transparent
@@ -1225,13 +1524,56 @@ class WebController(Controller):
             document.body.appendChild(dragIcon);
             e.dataTransfer.setDragImage(dragIcon, 0, 0);
             setTimeout(() => document.body.removeChild(dragIcon), 0);
+
+            // Start auto-scroll monitoring
+            startDragAutoScroll(e);
         }
 
         function handleDragEnd(e) {
+            isDragging = false;
+            dragSourceNode = null;
+            stopDragAutoScroll();
             document.querySelectorAll('.node-card').forEach(card => {
                 card.classList.remove('drag-over');
             });
         }
+
+        function startDragAutoScroll(e) {
+            if (dragAutoScrollTimer) clearInterval(dragAutoScrollTimer);
+            dragAutoScrollTimer = setInterval(() => {
+                if (!isDragging) return;
+                // Get mouse position from the last drag event
+                const mouseX = window.dragMouseX || 0;
+                const mouseY = window.dragMouseY || 0;
+                const windowWidth = window.innerWidth;
+
+                // Check if mouse is near right edge (last 100px)
+                const nearRightEdge = mouseX > windowWidth - 100;
+                // Check if mouse is near left edge (first 100px)
+                const nearLeftEdge = mouseX < 100;
+
+                if (nearRightEdge && currentPage < totalPages - 1) {
+                    // Auto-scroll to next page
+                    nextPage();
+                } else if (nearLeftEdge && currentPage > 0) {
+                    // Auto-scroll to previous page
+                    previousPage();
+                }
+            }, 500);  // Check every 500ms
+        }
+
+        function stopDragAutoScroll() {
+            if (dragAutoScrollTimer) {
+                clearInterval(dragAutoScrollTimer);
+                dragAutoScrollTimer = null;
+            }
+        }
+
+        // Track mouse position during drag
+        document.addEventListener('drag', function(e) {
+            window.dragMouseX = e.clientX;
+            window.dragMouseY = e.clientY;
+        });
 
         function handleDragOver(e) {
             e.preventDefault();
@@ -1253,25 +1595,22 @@ class WebController(Controller):
             }
         }
 
-        function handleDrop(e, targetNodeName) {
+        async function handleDrop(e, targetNodeName) {
             e.preventDefault();
             const sourceNode = e.dataTransfer.getData('text/plain');
             const targetNode = targetNodeName;
 
             if (sourceNode && targetNode && sourceNode !== targetNode) {
-                const sourceIndex = nodeOrder.indexOf(sourceNode);
-                const targetIndex = nodeOrder.indexOf(targetNode);
+                const sourceIndex = allNodes.indexOf(sourceNode);
+                const targetIndex = allNodes.indexOf(targetNode);
                 if (sourceIndex !== -1 && targetIndex !== -1) {
-                    nodeOrder.splice(sourceIndex, 1);
-                    nodeOrder.splice(targetIndex, 0, sourceNode);
-                    saveNodeOrder();
-                    // Refresh the UI
-                    fetch('/api/status')
-                        .then(response => response.json())
-                        .then(status => {
-                            buildFullGrid(status);
-                        })
-                        .catch(e => console.error('Error refreshing UI:', e));
+                    allNodes.splice(sourceIndex, 1);
+                    allNodes.splice(targetIndex, 0, sourceNode);
+                    nodeOrder = [...allNodes];
+                    await saveNodeOrder();
+
+                    // Re-render current page
+                    renderCurrentPage();
                 }
             }
 
@@ -1280,21 +1619,40 @@ class WebController(Controller):
             });
         }
 
-        function saveNodeOrder() {
-            fetch('/api/layout', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({order: nodeOrder})
-            }).catch(e => console.error('Error saving layout:', e));
+        async function saveNodeOrder() {
+            try {
+                await fetch('/api/layout', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({order: nodeOrder})
+                });
+            } catch (e) {
+                console.error('Error saving layout:', e);
+            }
         }
 
-        function buildFullGrid(status) {
+        // Render only the current page of nodes
+        function renderCurrentPage() {
             const grid = document.getElementById('nodeGrid');
+            const startIdx = currentPage * nodesPerPage;
+            const endIdx = Math.min(startIdx + nodesPerPage, allNodes.length);
+            const pageNodes = allNodes.slice(startIdx, endIdx);
+
+            if (pageNodes.length === 0 && allNodes.length > 0) {
+                // Adjust page if current page is empty
+                currentPage = Math.max(0, totalPages - 1);
+                updatePaginationControls();
+                renderCurrentPage();
+                return;
+            }
+
             let html = '';
-            for (const node of status.nodes) {
+            for (const nodeName of pageNodes) {
+                const nodeData = nodesData[nodeName];
+                if (!nodeData) continue;
+
+                const node = nodeData;
                 const isOnline = node.connected;
-                const measurement = node.measurement || {};
-                const waterHeight = measurement.water_height;
                 const essentialClass = node.essential ? 'essential' : 'non-essential';
 
                 html += `
@@ -1312,43 +1670,52 @@ class WebController(Controller):
                                       ondragend="handleDragEnd(event)">⋮⋮</span>
                                 <span class="node-name">${escapeHtml(node.name)}</span>
                             </div>
-                            <span class="node-type">${escapeHtml(node.type || 'unknown')}</span>
+                            <div>
+                                <span class="node-type">${escapeHtml(node.type || 'unknown')}</span>
+                                <span class="node-ip">${escapeHtml(node.ip)}</span>
+                            </div>
                         </div>
-                        <div class="node-ip">${escapeHtml(node.ip)}</div>
-                        <div class="node-state ${isOnline ? 'online' : 'offline'}">
-                            <span class="state-text">${isOnline ? 'online' : 'offline'} - ${escapeHtml(node.state)}</span>
-                        </div>
-                        <div class="node-metrics">
-                            <span class="connection-duration">${node.connection_duration ? '📡 ' + node.connection_duration : ''}</span>
-                            <span>📨 <span class="message-count">${node.message_count}</span> 💓 <span class="heartbeat-count">${node.heartbeat_count}</span></span>
-                        </div>
+
                         <div class="node-measurement-container"></div>
-                        <div class="node-actions">
-                            <button class="btn-query" onclick="sendCommand('${node.name}', 'query_state')">Ping</button>
-                            <button class="btn-start" onclick="sendCommand('${node.name}', 'start')">Start</button>
-                            <button class="btn-stop" onclick="sendCommand('${node.name}', 'stop')">Stop</button>
-                            <button class="btn-reboot" onclick="sendCommand('${node.name}', 'reboot')">Reboot</button>
-                        </div>
-                        <div class="node-actions-group">
-                            <button class="btn-log-start" onclick="sendCommand('${node.name}', 'log_start')">Log On</button>
-                            <button class="btn-log-stop" onclick="sendCommand('${node.name}', 'log_stop')">Log Off</button>
-                            <select class="log-level-select" data-node-name="${node.name}">
-                                <option value="0">DEBUG</option>
-                                <option value="1" selected>INFO</option>
-                                <option value="2">WARN</option>
-                                <option value="3">ERROR</option>
-                            </select>
-                            <button class="btn-query" onclick="setLogLevelFromSelect('${node.name}')">Set</button>
+
+                        <div class="node-footer">
+                            <div class="node-status-line">
+                                <div class="node-state ${isOnline ? 'online' : 'offline'}">
+                                    <span class="state-text">${isOnline ? '● online' : '○ offline'} - ${escapeHtml(node.state)}</span>
+                                </div>
+                                <div id="notification-${node.name.replace(/[^a-zA-Z0-9]/g, '_')}" class="notification-placeholder"></div>
+                            </div>
+                            <div class="node-metrics">
+                                <span class="connection-duration">${node.connection_duration ? '📡 ' + node.connection_duration : ''}</span>
+                                <span>📨 <span class="message-count">${node.message_count}</span> 💓 <span class="heartbeat-count">${node.heartbeat_count}</span></span>
+                            </div>
+                            <div class="node-actions">
+                                <button class="btn-query" onclick="sendCommand('${node.name}', 'query_state')">Ping</button>
+                                <button class="btn-start" onclick="sendCommand('${node.name}', 'start')">Start</button>
+                                <button class="btn-stop" onclick="sendCommand('${node.name}', 'stop')">Stop</button>
+                                <button class="btn-reboot" onclick="sendCommand('${node.name}', 'reboot')">Reboot</button>
+                            </div>
+                            <div class="node-actions-group">
+                                <button class="btn-log-start" onclick="sendCommand('${node.name}', 'log_start')">Log On</button>
+                                <button class="btn-log-stop" onclick="sendCommand('${node.name}', 'log_stop')">Log Off</button>
+                                <select class="log-level-select" data-node-name="${node.name}">
+                                    <option value="0">DEBUG</option>
+                                    <option value="1" selected>INFO</option>
+                                    <option value="2">WARN</option>
+                                    <option value="3">ERROR</option>
+                                </select>
+                                <button class="btn-query" onclick="setLogLevelFromSelect('${node.name}')">Set</button>
+                            </div>
                         </div>
                     </div>
                 `;
             }
+
             grid.innerHTML = html;
 
-            // Store node data and add measurement displays
-            for (const node of status.nodes) {
-                nodesData[node.name] = node;
-                updateNodeMeasurements(node);
+            // Add measurement displays
+            for (const nodeName of pageNodes) {
+                updateNodeMeasurements(nodesData[nodeName]);
             }
 
             // Add log level change listeners
@@ -1365,16 +1732,26 @@ class WebController(Controller):
         }
 
         function updateExistingNodes(status) {
+            // Update nodesData with latest info
             for (const node of status.nodes) {
-                const oldNodeData = nodesData[node.name];
                 nodesData[node.name] = node;
+            }
 
-                const card = document.querySelector(`.node-card[data-node-name="${node.name}"]`);
+            // Only update visible nodes on current page
+            const startIdx = currentPage * nodesPerPage;
+            const endIdx = Math.min(startIdx + nodesPerPage, allNodes.length);
+            const visibleNodes = allNodes.slice(startIdx, endIdx);
+
+            for (const nodeName of visibleNodes) {
+                const node = nodesData[nodeName];
+                if (!node) continue;
+
+                const card = document.querySelector(`.node-card[data-node-name="${nodeName}"]`);
                 if (!card) continue;
 
                 const isOnline = node.connected;
 
-                // Update classes - set explicitly rather than toggle
+                // Update classes
                 if (isOnline) {
                     card.classList.add('online');
                     card.classList.remove('offline');
@@ -1388,10 +1765,10 @@ class WebController(Controller):
                 // Update node state text
                 const stateSpan = card.querySelector('.state-text');
                 if (stateSpan) {
-                    stateSpan.textContent = `${isOnline ? 'online' : 'offline'} - ${node.state}`;
+                    stateSpan.textContent = `${isOnline ? '● online' : '○ offline'} - ${node.state}`;
                 }
 
-                // Update the node-state div class to match
+                // Update node-state div class
                 const nodeStateDiv = card.querySelector('.node-state');
                 if (nodeStateDiv) {
                     if (isOnline) {
@@ -1403,34 +1780,27 @@ class WebController(Controller):
                     }
                 }
 
-                // Update notification - only show new notifications (based on timestamp)
-                const notificationContainer = card.querySelector('.node-state');
+                // Update notification
+                const notificationContainer = card.querySelector('.notification-placeholder');
                 const existingNotification = notificationContainer?.querySelector('.notification');
 
-                // Check if this is a new notification (different timestamp)
                 const isNewNotification = node.notification &&
                     (!lastNotificationTimestamp[node.name] ||
                      lastNotificationTimestamp[node.name] !== node.notification.timestamp);
 
                 if (node.notification && isNewNotification) {
-                    // Record this notification timestamp
                     lastNotificationTimestamp[node.name] = node.notification.timestamp;
 
                     const notificationClass = node.notification.is_success === false ? 'notification failure' :
                                              (node.notification.message.includes('◀️') ? 'notification success' : 'notification');
 
-                    // Remove old notification if exists
-                    if (existingNotification) {
-                        existingNotification.remove();
-                    }
+                    if (existingNotification) existingNotification.remove();
 
-                    // Add new notification
-                    const newNotification = document.createElement('span');
+                    const newNotification = document.createElement('div');
                     newNotification.className = notificationClass;
                     newNotification.textContent = node.notification.message;
                     notificationContainer.appendChild(newNotification);
 
-                    // Remove after animation
                     setTimeout(() => {
                         if (newNotification.parentNode) newNotification.remove();
                     }, 3000);
@@ -1494,77 +1864,93 @@ class WebController(Controller):
                 badge.className = status.journal_enabled ? 'badge-success' : 'badge-warning';
             }
 
+            // Update CSS variables from server
+            updateCSSVariables(status);
+
+            // Update nodes per page from CSS variables
+            const rows = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--grid-rows')) || 2;
+            const cols = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--grid-columns')) || 4;
+            nodesPerPage = rows * cols;
+
+            // Update allNodes from status
+            if (status.nodes && status.nodes.length > 0) {
+                // Build node order if not set
+                if (nodeOrder.length === 0 && status.nodes.length > 0) {
+                    nodeOrder = status.nodes.map(n => n.name);
+                    allNodes = [...nodeOrder];
+                } else {
+                    // Keep existing order but ensure all nodes are present
+                    const existingNodeNames = new Set(allNodes);
+                    for (const node of status.nodes) {
+                        if (!existingNodeNames.has(node.name)) {
+                            allNodes.push(node.name);
+                        }
+                    }
+                    nodeOrder = [...allNodes];
+                }
+            }
+
+            // Update nodesData
+            for (const node of status.nodes) {
+                nodesData[node.name] = node;
+            }
+
+            // Update pagination
+            updatePaginationControls();
+
+            // Update banner
             const banner = document.getElementById('statusBanner');
             const total = status.total_nodes;
             const essential = status.essential_nodes;
             const connected_essential = status.connected_essential_nodes;
             const working_essential = status.working_essential_nodes;
 
-            // Handle case with no essential nodes
             if (essential === 0) {
                 banner.className = 'status-banner ready';
                 banner.querySelector('.status-icon').textContent = '✅';
                 banner.querySelector('.status-text > div:first-child').textContent = 'NO ESSENTIAL NODES CONFIGURED';
                 banner.querySelector('.status-details').textContent = `${status.total_nodes} total nodes (all optional)`;
-            }
-            // Check if all essential nodes are connected AND working
-            else if (connected_essential === essential && working_essential === essential) {
+            } else if (connected_essential === essential && working_essential === essential) {
                 banner.className = 'status-banner ready';
                 banner.querySelector('.status-icon').textContent = '✅';
                 banner.querySelector('.status-text > div:first-child').textContent = 'ALL ESSENTIAL NODES WORKING';
                 banner.querySelector('.status-details').textContent = `${connected_essential}/${essential} essential connected, ${working_essential} working`;
-            }
-            // Check if at least some essential nodes are working
-            else if (working_essential > 0) {
+            } else if (working_essential > 0) {
                 banner.className = 'status-banner waiting';
                 banner.querySelector('.status-icon').textContent = '⏳';
                 banner.querySelector('.status-text > div:first-child').textContent = 'ESSENTIAL NODES INITIALIZING';
                 banner.querySelector('.status-details').textContent = `${connected_essential}/${essential} essential connected, ${working_essential} working`;
-            }
-            // Check if essential nodes are connected but none working yet
-            else if (connected_essential > 0) {
+            } else if (connected_essential > 0) {
                 banner.className = 'status-banner waiting';
                 banner.querySelector('.status-icon').textContent = '⏳';
                 banner.querySelector('.status-text > div:first-child').textContent = 'ESSENTIAL NODES CONNECTING';
                 banner.querySelector('.status-details').textContent = `${connected_essential}/${essential} essential connected, waiting for working state`;
-            }
-            else {
+            } else {
                 banner.className = 'status-banner waiting';
                 banner.querySelector('.status-icon').textContent = '⚠️';
                 banner.querySelector('.status-text > div:first-child').textContent = 'WAITING FOR ESSENTIAL NODES';
                 banner.querySelector('.status-details').textContent = `0/${essential} essential connected`;
             }
 
-            // Add optional nodes info if any exist
             if (status.total_nodes > essential) {
                 const optional_count = status.total_nodes - essential;
                 const optional_connected = status.connected_nodes - connected_essential;
                 banner.querySelector('.status-details').textContent += ` (${optional_connected}/${optional_count} optional online)`;
             }
 
-            // Update node order from server
-            if (status.nodes.length > 0 && nodeOrder.length === 0) {
-                nodeOrder = status.nodes.map(n => n.name);
-            }
-
-            // Check if grid exists, if not build it
+            // Render or update grid
             const grid = document.getElementById('nodeGrid');
-            if (!gridBuilt || grid.children.length === 0) {
-                buildFullGrid(status);
-            } else if (grid.children[0] && grid.children[0].tagName === 'DIV' && grid.children[0].innerText === 'Loading nodes...') {
-                buildFullGrid(status);
+            if (!gridBuilt || grid.children.length === 0 || grid.children[0]?.innerText === 'Loading nodes...') {
+                renderCurrentPage();
             } else {
-                // Update existing nodes
                 updateExistingNodes(status);
             }
 
             // Check if scrolling is needed
-            const gridRect = grid.getBoundingClientRect();
-            const scrollHint = document.getElementById('scrollHint');
             if (grid.scrollWidth > grid.clientWidth) {
-                scrollHint.classList.add('show');
+                document.getElementById('scrollHint').classList.add('show');
             } else {
-                scrollHint.classList.remove('show');
+                document.getElementById('scrollHint').classList.remove('show');
             }
         }
 
@@ -1615,7 +2001,6 @@ class WebController(Controller):
             if (logsSource) logsSource.close();
             const source = new EventSource('/api/logs/stream');
 
-            // Handle normal data messages (new logs)
             source.onmessage = (event) => {
                 try {
                     const newLogs = JSON.parse(event.data);
@@ -1623,7 +2008,6 @@ class WebController(Controller):
                 } catch (e) { console.error("Error parsing logs:", e); }
             };
 
-            // Handle clear event
             source.addEventListener('clear', (event) => {
                 console.log('Logs cleared remotely');
                 const debugWindow = document.getElementById('debugWindow');
@@ -1634,7 +2018,6 @@ class WebController(Controller):
                 autoScrollEnabled = true;
             });
 
-            // Handle reset event
             source.addEventListener('reset', (event) => {
                 console.log('Log stream reset');
                 const debugWindow = document.getElementById('debugWindow');
@@ -1657,7 +2040,6 @@ class WebController(Controller):
     </script>
 </body>
 </html>'''
-
 
 def main():
     parser = argparse.ArgumentParser(description="FGR Controller with Web Interface")
@@ -1707,6 +2089,7 @@ def main():
     print(f"Journal identifier: {JOURNAL_IDENTIFIER}")
     print(f"Configured nodes: {controller.get_node_names()}")
     print(f"Node grid layout config: {NODE_GRID_CONFIG}")
+    print(f"Nodes per page: {NODES_PER_PAGE}")
     print(f"{'='*60}")
     print("Press Ctrl+C to stop\n")
 
