@@ -21,6 +21,9 @@ This handler inherits from NodeHandler (injected by controller).
 All notification logic is handled by the WebController.
 """
 
+import json
+from typing import Dict, Any
+
 # NodeHandler and FGR protocol are injected by the controller
 
 class TestHandler(NodeHandler):
@@ -41,7 +44,6 @@ class TestHandler(NodeHandler):
         self.logger.info(f"Node {self.node.name} needs configuration, sending test config")
 
         # Build custom configuration data for test node
-        # This could be anything specific to your test node
         config_data = b'\x01'  # Example: set test mode to 1
 
         # Send response with custom config
@@ -52,7 +54,6 @@ class TestHandler(NodeHandler):
         ind_type = msg.subtype
 
         # Let base class handle standard protocol (NEEDS_CFG, START, STOP)
-        # This updates node state and triggers on_needs_cfg above
         super().on_indication(msg)
 
         # Handle device-specific test data (from contents)
@@ -68,3 +69,49 @@ class TestHandler(NodeHandler):
                     })
 
         return True
+
+    def get_card_html(self, node_name: str, node_data: Dict[str, Any]) -> str:
+        """Return HTML snippet for the card's center area."""
+        measurement = node_data.get('measurement', {})
+        value = measurement.get('value', 'N/A')
+
+        return f'''
+            <div class="node-measurement">
+                <div class="measurement-value">{value}</div>
+                <div class="measurement-unit">Test Value</div>
+            </div>
+        '''
+
+    def get_expanded_html(self, node_name: str, node_data: Dict[str, Any]) -> str:
+        """Return HTML for expanded view"""
+        measurement = node_data.get('measurement', {})
+        value = measurement.get('value', 'N/A')
+
+        return f'''
+            <div class="expanded-node">
+                <div class="expanded-header">
+                    <h3>{node_name}</h3>
+                    <button class="collapse-btn">✕ Collapse</button>
+                </div>
+                <div class="expanded-content">
+                    <div class="expanded-section">
+                        <h4>Test Node Details</h4>
+                        <p>Current Value: {value}</p>
+                        <p>Last Update: {measurement.get('last_update', 'N/A')}</p>
+                    </div>
+                    <div class="expanded-section">
+                        <h4>Node Information</h4>
+                        <p>Type: {node_data.get('type', 'unknown')}</p>
+                        <p>IP: {node_data.get('ip', 'unknown')}</p>
+                        <p>State: {node_data.get('state', 'unknown')}</p>
+                        <p>Connected: {node_data.get('connected', False)}</p>
+                        <p>Message Count: {node_data.get('message_count', 0)}</p>
+                        <p>Heartbeat Count: {node_data.get('heartbeat_count', 0)}</p>
+                    </div>
+                </div>
+            </div>
+        '''
+
+# Factory function for controller to create handler
+def create_handler(config: Dict[str, Any]) -> TestHandler:
+    return TestHandler()

@@ -21,6 +21,9 @@ This handler inherits from NodeHandler (injected by controller).
 All notification logic is handled by the WebController.
 """
 
+import json
+from typing import Dict, Any
+
 # NodeHandler and FGR protocol are injected by the controller
 
 # Reservoir depth constant (mm from top to full)
@@ -69,3 +72,16 @@ class LevelGaugeHandler(NodeHandler):
                     })
 
         return True
+
+
+    def get_card_html(self, node_name: str, node_data: Dict[str, Any]) -> str:
+        # Implementation for level gauge card view
+        pass
+
+    def get_expanded_html(self, node_name: str, node_data: Dict[str, Any]) -> str:
+        # Implementation for level gauge expanded view
+        pass
+
+# Factory function for controller to create handler
+def create_handler(config: Dict[str, Any]) -> LevelGaugeHandler:
+    return LevelGaugeHandler()

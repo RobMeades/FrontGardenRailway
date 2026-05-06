@@ -155,6 +155,9 @@ class WebController(Controller):
         # Store recent message notifications
         self.node_notifications: Dict[str, Dict[str, Any]] = {}
 
+        # Store custom card HTML for each node
+        self.node_card_html: Dict[str, str] = {}
+
         # Journal reader thread
         self.journal_running = False
         self.journal_thread = None
@@ -302,11 +305,29 @@ class WebController(Controller):
             self._log_message(f"Journal reader error: {e}")
 
     def update_node_measurement(self, node_name: str, measurement: Dict[str, Any]):
-        """Store a measurement from a node for web display"""
+        """Store a measurement from a node for web display and update card HTML"""
         self.node_measurements[node_name] = {
             **measurement,
             'last_update': datetime.now().isoformat()
         }
+
+        # Update custom card HTML from node handler
+        node = self.nodes.get(node_name)
+        if node and node.handler:
+            try:
+                node_data = {
+                    'name': node_name,
+                    'type': node.node_type,
+                    'ip': node.ip,
+                    'state': node.state.name if hasattr(node.state, 'name') else str(node.state),
+                    'connected': node.sock is not None,
+                    'measurement': measurement,
+                    'message_count': node.message_count,
+                    'heartbeat_count': node.heartbeat_count
+                }
+                self.node_card_html[node_name] = node.handler.get_card_html(node_name, node_data)
+            except Exception as e:
+                self._log_message(f"Error getting card HTML for {node_name}: {e}")
 
     def set_node_notification(self, node_name: str, message: str, is_sent: bool = True, is_success: bool = True):
         """Set a notification for a node (sent/received message)
@@ -404,6 +425,7 @@ class WebController(Controller):
 
             measurement = self.node_measurements.get(name, {})
             notification = self.node_notifications.get(name)
+            custom_html = self.node_card_html.get(name, '')
 
             # Calculate connection duration
             connection_duration = None
@@ -455,7 +477,8 @@ class WebController(Controller):
                 'message_count': node.message_count,
                 'heartbeat_count': node.heartbeat_count,
                 'measurement': measurement,
-                'notification': notification
+                'notification': notification,
+                'custom_html': custom_html  # Include custom HTML for the card
             })
 
         return {
@@ -541,8 +564,6 @@ class WebController(Controller):
         """Clear the log buffer"""
         self.log_entries.clear()
         self._log_counter = 0
-        # No need to broadcast - clients will see that no new logs are available
-        # until new ones arrive, and their last_version will reset when they reconnect
         return web.json_response({'status': 'ok'})
 
     async def handle_api_logs_stream(self, request):
@@ -741,6 +762,99 @@ class WebController(Controller):
 
         return web.json_response({'status': 'error', 'message': 'Invalid reorder operation'})
 
+    async def handle_api_node_html(self, request):
+        """Get expanded HTML for a specific node"""
+        data = await request.json()
+        node_name = data.get('node')
+
+        node = self.nodes.get(node_name)
+        if not node:
+            return web.json_response({'status': 'error', 'message': 'Node not found'})
+
+        # Prepare node data
+        node_data = {
+            'name': node_name,
+            'type': node.node_type,
+            'ip': node.ip,
+            'state': node.state.name if hasattr(node.state, 'name') else str(node.state),
+            'connected': node.sock is not None,
+            'measurement': self.node_measurements.get(node_name, {}),
+            'message_count': node.message_count,
+            'heartbeat_count': node.heartbeat_count,
+            'connection_duration': None
+        }
+
+        # If node is not connected, return a special "disconnected" view
+        if not node.sock:
+            disconnected_html = f'''
+                <div class="expanded-node">
+                    <div class="expanded-header">
+                        <h3>{node_name} (Disconnected)</h3>
+                        <button class="collapse-btn">✕ Collapse</button>
+                    </div>
+                    <div class="expanded-content">
+                        <div class="expanded-section">
+                            <h4>⚠️ Node Not Connected</h4>
+                            <p>This node is currently offline or not responding.</p>
+                            <p>IP Address: {node.ip}</p>
+                            <p>Last seen: {node_data.get('connection_duration', 'Unknown')}</p>
+                            <p>Please check the node's network connection and power supply.</p>
+                        </div>
+                    </div>
+                </div>
+            '''
+            return web.json_response({'status': 'ok', 'html': disconnected_html})
+
+        # If node has no handler, return a basic view with collapse button
+        if not node.handler:
+            basic_html = f'''
+                <div class="expanded-node">
+                    <div class="expanded-header">
+                        <h3>{node_name} (No Handler)</h3>
+                        <button class="collapse-btn">✕ Collapse</button>
+                    </div>
+                    <div class="expanded-content">
+                        <div class="expanded-section">
+                            <h4>ℹ️ Node Information</h4>
+                            <p>Type: {node.node_type}</p>
+                            <p>IP: {node.ip}</p>
+                            <p>State: {node_data.get('state', 'unknown')}</p>
+                            <p>Connected: Yes</p>
+                            <p>Message Count: {node.message_count}</p>
+                            <p>Heartbeat Count: {node.heartbeat_count}</p>
+                        </div>
+                        <div class="expanded-section">
+                            <h4>📊 Recent Measurements</h4>
+                            <pre>{json.dumps(self.node_measurements.get(node_name, {}), indent=2)}</pre>
+                        </div>
+                    </div>
+                </div>
+            '''
+            return web.json_response({'status': 'ok', 'html': basic_html})
+
+        # Normal case - node has handler and is connected
+        try:
+            expanded_html = node.handler.get_expanded_html(node_name, node_data)
+            return web.json_response({'status': 'ok', 'html': expanded_html})
+        except Exception as e:
+            self._log_message(f"Error getting expanded HTML for {node_name}: {e}")
+            error_html = f'''
+                <div class="expanded-node">
+                    <div class="expanded-header">
+                        <h3>{node_name}</h3>
+                        <button class="collapse-btn">✕ Collapse</button>
+                    </div>
+                    <div class="expanded-content">
+                        <div class="expanded-section">
+                            <h4>❌ Error Loading Data</h4>
+                            <p>An error occurred while loading the expanded view:</p>
+                            <pre>{str(e)}</pre>
+                        </div>
+                    </div>
+                </div>
+            '''
+            return web.json_response({'status': 'ok', 'html': error_html})
+
     def start_web(self):
         """Start the web server"""
         self.web_app = web.Application()
@@ -753,6 +867,7 @@ class WebController(Controller):
         self.web_app.router.add_post('/api/command', self.handle_api_command)
         self.web_app.router.add_post('/api/layout', self.handle_api_layout)
         self.web_app.router.add_post('/api/reorder', self.handle_api_reorder)
+        self.web_app.router.add_post('/api/node/html', self.handle_api_node_html)
 
         async def start_server():
             self.web_runner = web.AppRunner(self.web_app)
@@ -884,31 +999,100 @@ class WebController(Controller):
             overflow-x: auto;
             height: 100%;
             align-content: start;
+            transition: all 0.3s ease;
         }
+
+        /* Expanded card mode - single card takes full width */
+        .node-grid.expanded {
+            display: block;
+            position: relative;
+        }
+
+        .node-grid.expanded .node-card:not(.expanded-card) {
+            visibility: hidden;
+            position: absolute;
+        }
+
+        .node-grid.expanded .node-card.expanded-card {
+            display: flex;
+            width: 100%;
+            height: calc(var(--card-height) * var(--grid-rows) + var(--grid-gap) - 10px);
+            min-height: auto;
+            max-height: none;
+            overflow-y: auto;
+            position: relative;
+            z-index: 10;
+        }
+
         .node-grid.has-more {
             grid-template-columns: repeat(auto-fill, minmax(280px, 320px));
         }
 
-        /* Node cards - uses CSS variable for height */
         .node-card {
             background: white;
             border-radius: 8px;
             padding: 10px;
             box-shadow: 0 1px 3px rgba(0,0,0,0.1);
             transition: transform 0.1s, box-shadow 0.2s;
-            user-select: text;
+            -webkit-user-select: none;
+            -moz-user-select: none;
+            -ms-user-select: none;
+            user-select: none;  /* Prevents selection on double-click */
             height: var(--card-height);
             display: flex;
             flex-direction: column;
             overflow: hidden;
+            cursor: pointer;
         }
+
+
+        .node-card.expanded-card {
+            cursor: default;
+            height: calc(var(--card-height) * var(--grid-rows) + var(--grid-gap) - 10px);
+            min-height: auto;
+            max-height: none;
+            overflow-y: auto;
+            position: relative;
+            z-index: 10;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* Hide the expand hint on expanded cards */
+        .node-card.expanded-card .expand-hint {
+            display: none;
+        }
+
         .node-card * {
             user-select: text;
         }
+
+        /* Expand hint - appears on hover */
+        .expand-hint {
+            position: absolute;
+            top: 8px;
+            right: 8px;
+            font-size: 12px;
+            color: #999;
+            opacity: 0;
+            transition: opacity 0.2s;
+            pointer-events: none;
+        }
+
+        .node-card:hover .expand-hint {
+            opacity: 0.7;
+        }
+
         /* Make drag handle not selectable */
         .drag-handle {
             user-select: none;
+            cursor: grab;
         }
+        .drag-handle:active {
+            cursor: grabbing;
+        }
+
         /* Essential vs Non-essential node styling */
         .node-card.non-essential {
             opacity: 0.85;
@@ -931,11 +1115,9 @@ class WebController(Controller):
         .node-card.offline {
             opacity: 0.7;
         }
-        /* When essential and online, essential border-left takes precedence */
         .node-card.essential.online {
             border-left: 4px solid #4caf50;
         }
-        /* Drag over highlight */
         .node-card.drag-over {
             border: 2px solid #4caf50;
             background: #f0fff0;
@@ -943,9 +1125,7 @@ class WebController(Controller):
             transition: all 0.1s ease;
         }
 
-        /* Drag handle styling */
         .drag-handle {
-            cursor: grab;
             color: #999;
             font-size: 14px;
             padding: 2px 4px;
@@ -955,9 +1135,6 @@ class WebController(Controller):
         }
         .drag-handle:hover {
             color: #666;
-        }
-        .drag-handle:active {
-            cursor: grabbing;
         }
 
         /* Header section: node name and type */
@@ -1047,13 +1224,19 @@ class WebController(Controller):
             justify-content: space-between;
         }
 
-        /* Measurement area - gets maximum space */
+        /* Measurement area - gets maximum space, supports custom HTML */
         .node-measurement-container {
             flex-grow: 1;
             margin: 4px 0;
             overflow-y: auto;
             min-height: 40px;
+            -webkit-user-select: text;
+            -moz-user-select: text;
+            -ms-user-select: text;
+            user-select: text;
         }
+
+        /* Default measurement styling (used when no custom HTML provided) */
         .node-measurement {
             background: #e3f2fd;
             border-radius: 4px;
@@ -1074,6 +1257,105 @@ class WebController(Controller):
             font-size: 9px;
             color: #666;
             margin-top: 2px;
+        }
+
+        .expanded-node {
+            padding: 5px;
+            display: flex;
+            flex-direction: column;
+            height: 100%;
+            flex: 1;
+            -webkit-user-select: text;
+            -moz-user-select: text;
+            -ms-user-select: text;
+            user-select: text;
+        }
+
+        .expanded-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid #e0e0e0;
+            flex-shrink: 0;
+        }
+
+        .expanded-header h3 {
+            margin: 0;
+            font-size: 16px;
+            color: #333;
+        }
+
+        .collapse-btn {
+            background: #f0f0f0;
+            color: #666;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            padding: 4px 12px;
+            cursor: pointer;
+            font-size: 11px;
+            transition: all 0.2s;
+            width: auto;
+            min-width: 60px;
+            white-space: nowrap;
+        }
+
+        .collapse-btn:hover {
+            background: #e0e0e0;
+            color: #333;
+            border-color: #ccc;
+        }
+
+        .expanded-content {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 15px;
+            flex: 1;
+            overflow-y: auto;
+            margin-bottom: 10px;
+        }
+
+        .expanded-nav-hint {
+            font-size: 10px;
+            color: #999;
+            margin-left: 10px;
+            font-weight: normal;
+        }
+
+        .expanded-section {
+            background: #f8f9fa;
+            border-radius: 6px;
+            padding: 10px;
+            height: fit-content;
+        }
+
+        .expanded-section h4 {
+            margin: 0 0 8px 0;
+            font-size: 13px;
+            color: #495057;
+            border-bottom: 1px solid #dee2e6;
+            padding-bottom: 4px;
+        }
+
+        .expanded-section p {
+            margin: 6px 0;
+            font-size: 11px;
+        }
+
+        .expanded-section pre {
+            background: #fff;
+            padding: 6px;
+            border-radius: 4px;
+            overflow-x: auto;
+            font-size: 9px;
+            margin: 0;
+        }
+
+        /* Ensure the footer stays at bottom of expanded card */
+        .node-card.expanded-card .node-footer {
+            margin-top: auto;
+            flex-shrink: 0;
         }
 
         /* Button grid */
@@ -1280,7 +1562,6 @@ class WebController(Controller):
     <div class="grid-wrapper">
         <button id="prevPageBtn" class="nav-btn nav-prev" onclick="previousPage()" disabled><span>◀</span></button>
         <button id="nextPageBtn" class="nav-btn nav-next" onclick="nextPage()" disabled><span>▶</span></button>
-
         <div class="grid-container">
             <div id="nodeGrid" class="node-grid">
                 <div style="text-align: center; grid-column: 1/-1; padding: 40px;">Loading nodes...</div>
@@ -1303,7 +1584,7 @@ class WebController(Controller):
         <div id="debugWindow" class="debug-window">Waiting for logs...</div>
     </div>
 
-    <div class="footer">FGR Controller - Drag ⋮⋮ to reorder nodes (drag to edge to change pages)</div>
+    <div class="footer">FGR Controller - Drag ⋮⋮ to reorder nodes | Double-click card to expand</div>
 
     <script>
         let statusSource = null;
@@ -1316,6 +1597,8 @@ class WebController(Controller):
         let nodesData = {};  // Store node data for reference
         let gridBuilt = false;  // Track if grid has been built
         let lastNotificationTimestamp = {};  // Track last notification timestamp per node
+        let isExpanded = false;  // Track if a card is expanded
+        let expandedNodeName = null;  // Track which node is expanded
 
         // Pagination variables
         let currentPage = 0;
@@ -1339,10 +1622,264 @@ class WebController(Controller):
             if (status.grid_columns) {
                 document.documentElement.style.setProperty('--grid-columns', status.grid_columns);
             }
-            // Update nodesPerPage based on rows and columns
             const rows = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--grid-rows')) || 2;
             const cols = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--grid-columns')) || 4;
             nodesPerPage = rows * cols;
+        }
+
+        // Expand a card to full view
+        async function expandCard(nodeName) {
+            // Clear any existing text selection
+            if (window.getSelection) {
+                window.getSelection().removeAllRanges();
+            } else if (document.selection) {
+                document.selection.empty();
+            }
+
+            // If already expanded and trying to expand the same card, collapse it
+            if (isExpanded && expandedNodeName === nodeName) {
+                collapseCard();
+                return;
+            }
+
+            // If already expanded but different node, just swap the content
+            if (isExpanded && expandedNodeName !== nodeName) {
+                // Swap to new node without changing grid layout
+                const currentCard = document.querySelector('.node-card.expanded-card');
+                if (currentCard) {
+                    const measurementContainer = currentCard.querySelector('.node-measurement-container');
+
+                    // Show loading indicator
+                    measurementContainer.innerHTML = '<div style="text-align:center; padding:20px;">Loading expanded view for ' + nodeName + '...</div>';
+
+                    try {
+                        const response = await fetch('/api/node/html', {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({node: nodeName})
+                        });
+                        const result = await response.json();
+
+                        if (result.status === 'ok' && result.html) {
+                            // Set the new expanded content
+                            measurementContainer.innerHTML = result.html;
+
+                            // Add collapse button handler
+                            const collapseBtn = measurementContainer.querySelector('.collapse-btn');
+                            if (collapseBtn) {
+                                collapseBtn.onclick = (e) => {
+                                    e.stopPropagation();
+                                    collapseCard();
+                                };
+                            } else {
+                                // If no collapse button found, add one to the header
+                                const expandedHeader = measurementContainer.querySelector('.expanded-header');
+                                if (expandedHeader && !expandedHeader.querySelector('.collapse-btn')) {
+                                    const missingCollapseBtn = document.createElement('button');
+                                    missingCollapseBtn.className = 'collapse-btn';
+                                    missingCollapseBtn.textContent = '✕ Collapse';
+                                    missingCollapseBtn.onclick = (e) => {
+                                        e.stopPropagation();
+                                        collapseCard();
+                                    };
+                                    expandedHeader.appendChild(missingCollapseBtn);
+                                }
+                            }
+
+                            // Add navigation hint if not present
+                            const expandedHeader = measurementContainer.querySelector('.expanded-header h3');
+                            if (expandedHeader && !measurementContainer.querySelector('.expanded-nav-hint')) {
+                                const navHint = document.createElement('span');
+                                navHint.className = 'expanded-nav-hint';
+                                navHint.textContent = ' ← → use arrow keys or page buttons';
+                                navHint.style.fontSize = '10px';
+                                navHint.style.color = '#999';
+                                navHint.style.fontWeight = 'normal';
+                                navHint.style.marginLeft = '10px';
+                                expandedHeader.appendChild(navHint);
+                            }
+
+                            // Update expanded node name
+                            expandedNodeName = nodeName;
+                            currentCard.setAttribute('data-node-name', nodeName);
+
+                            // Update pagination controls for the new node position
+                            updatePaginationControls();
+
+                        } else {
+                            console.error('Invalid API response:', result);
+                            // Show error with collapse button
+                            measurementContainer.innerHTML = `
+                                <div class="expanded-node">
+                                    <div class="expanded-header">
+                                        <h3>${nodeName}</h3>
+                                        <button class="collapse-btn">✕ Collapse</button>
+                                    </div>
+                                    <div class="expanded-content">
+                                        <div class="expanded-section">
+                                            <h4>❌ Failed to Load Data</h4>
+                                            <p>${result.message || 'Unknown error'}</p>
+                                            <p>The node may be disconnected or unavailable.</p>
+                                        </div>
+                                    </div>
+                                </div>
+                            `;
+                            // Add collapse handler
+                            const collapseBtn = measurementContainer.querySelector('.collapse-btn');
+                            if (collapseBtn) {
+                                collapseBtn.onclick = (e) => {
+                                    e.stopPropagation();
+                                    collapseCard();
+                                };
+                            }
+                            expandedNodeName = nodeName;
+                            currentCard.setAttribute('data-node-name', nodeName);
+                            updatePaginationControls();
+                        }
+                    } catch (e) {
+                        console.error('Error loading expanded view:', e);
+                        measurementContainer.innerHTML = `
+                            <div class="expanded-node">
+                                <div class="expanded-header">
+                                    <h3>${nodeName}</h3>
+                                    <button class="collapse-btn">✕ Collapse</button>
+                                </div>
+                                <div class="expanded-content">
+                                    <div class="expanded-section">
+                                        <h4>❌ Network Error</h4>
+                                        <p>${e.message}</p>
+                                        <p>Please check your connection to the controller.</p>
+                                    </div>
+                                </div>
+                            </div>
+                        `;
+                        const collapseBtn = measurementContainer.querySelector('.collapse-btn');
+                        if (collapseBtn) {
+                            collapseBtn.onclick = (e) => {
+                                e.stopPropagation();
+                                collapseCard();
+                            };
+                        }
+                    }
+                }
+                return;
+            }
+
+            // Otherwise, do the full expansion (first time expanding)
+            const card = document.querySelector(`.node-card[data-node-name="${nodeName}"]`);
+            if (!card) return;
+
+            const measurementContainer = card.querySelector('.node-measurement-container');
+            const originalHtml = measurementContainer.innerHTML;
+            card.setAttribute('data-original-html', originalHtml);
+
+            measurementContainer.innerHTML = '<div style="text-align:center; padding:20px;">Loading expanded view...</div>';
+
+            try {
+                const response = await fetch('/api/node/html', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({node: nodeName})
+                });
+                const result = await response.json();
+
+                if (result.status === 'ok' && result.html) {
+                    measurementContainer.innerHTML = result.html;
+
+                    const collapseBtn = measurementContainer.querySelector('.collapse-btn');
+                    if (collapseBtn) {
+                        collapseBtn.onclick = (e) => {
+                            e.stopPropagation();
+                            collapseCard();
+                        };
+                    } else {
+                        // If no collapse button found, add one to the header
+                        const expandedHeader = measurementContainer.querySelector('.expanded-header');
+                        if (expandedHeader && !expandedHeader.querySelector('.collapse-btn')) {
+                            const missingCollapseBtn = document.createElement('button');
+                            missingCollapseBtn.className = 'collapse-btn';
+                            missingCollapseBtn.textContent = '✕ Collapse';
+                            missingCollapseBtn.onclick = (e) => {
+                                e.stopPropagation();
+                                collapseCard();
+                            };
+                            expandedHeader.appendChild(missingCollapseBtn);
+                        }
+                    }
+
+                    const expandedHeader = measurementContainer.querySelector('.expanded-header h3');
+                    if (expandedHeader && !measurementContainer.querySelector('.expanded-nav-hint')) {
+                        const navHint = document.createElement('span');
+                        navHint.className = 'expanded-nav-hint';
+                        navHint.textContent = ' ← → use arrow keys or page buttons';
+                        navHint.style.fontSize = '10px';
+                        navHint.style.color = '#999';
+                        navHint.style.fontWeight = 'normal';
+                        navHint.style.marginLeft = '10px';
+                        expandedHeader.appendChild(navHint);
+                    }
+
+                    isExpanded = true;
+                    expandedNodeName = nodeName;
+                    card.classList.add('expanded-card');
+                    document.getElementById('nodeGrid').classList.add('expanded');
+
+                    // Hide other cards
+                    document.querySelectorAll('.node-card').forEach(c => {
+                        if (c !== card) {
+                            c.style.visibility = 'hidden';
+                            c.style.position = 'absolute';
+                        }
+                    });
+
+                    // Update pagination controls for expanded mode
+                    updatePaginationControls();
+
+                } else {
+                    measurementContainer.innerHTML = originalHtml;
+                    console.error('Failed to load expanded view:', result.message);
+                }
+            } catch (e) {
+                measurementContainer.innerHTML = originalHtml;
+                console.error('Error loading expanded view:', e);
+            }
+        }
+
+        // Collapse expanded card - restore to original state
+        function collapseCard() {
+            if (!isExpanded) return;
+
+            const expandedCard = document.querySelector('.node-card.expanded-card');
+            if (expandedCard) {
+                const originalHtml = expandedCard.getAttribute('data-original-html');
+
+                // Restore the original measurement container HTML
+                const measurementContainer = expandedCard.querySelector('.node-measurement-container');
+                if (measurementContainer && originalHtml) {
+                    measurementContainer.innerHTML = originalHtml;
+                }
+
+                // Remove expanded class
+                expandedCard.classList.remove('expanded-card');
+            }
+
+            // Restore all cards
+            document.querySelectorAll('.node-card').forEach(c => {
+                c.style.visibility = '';
+                c.style.position = '';
+            });
+
+            // Remove expanded class from grid
+            document.getElementById('nodeGrid').classList.remove('expanded');
+
+            isExpanded = false;
+            expandedNodeName = null;
+
+            // Restore normal pagination mode
+            updatePaginationControls();
+
+            // Refresh the grid to ensure all data is current
+            renderCurrentPage();
         }
 
         function setupDebugWindow() {
@@ -1396,19 +1933,13 @@ class WebController(Controller):
         }
 
         function clearLogs() {
-            // Clear locally immediately for responsiveness
             const debugWindow = document.getElementById('debugWindow');
             if (debugWindow) {
                 debugWindow.innerHTML = 'Logs cleared...';
             }
             logBuffer = [];
-
-            // Tell the server to clear its buffer, then reconnect the stream
             fetch('/api/logs/clear', {method: 'POST'})
-                .then(() => {
-                    // Reconnect the stream to reset version tracking
-                    setupLogsStream();
-                })
+                .then(() => setupLogsStream())
                 .catch(e => console.error('Error clearing logs:', e));
         }
 
@@ -1432,12 +1963,9 @@ class WebController(Controller):
                 return;
             }
 
-            // If the window shows "Logs cleared..." and we have new logs, append them
             if (debugWindow.innerHTML === 'Logs cleared...') {
                 debugWindow.innerHTML = '';
             }
-
-            // If the window is empty, don't add a waiting message, just add logs
             if (debugWindow.innerHTML === '' || debugWindow.innerHTML === 'Waiting for logs...') {
                 debugWindow.innerHTML = '';
             }
@@ -1458,50 +1986,83 @@ class WebController(Controller):
             }
         }
 
-        // Update pagination controls
+        // Update pagination controls - handle expanded mode differently
         function updatePaginationControls() {
             const prevBtn = document.getElementById('prevPageBtn');
             const nextBtn = document.getElementById('nextPageBtn');
             const currentPageSpan = document.getElementById('currentPageNum');
             const totalPagesSpan = document.getElementById('totalPagesNum');
 
-            totalPages = Math.max(1, Math.ceil(allNodes.length / nodesPerPage));
+            if (isExpanded) {
+                // In expanded mode, enable/disable based on node position in list
+                if (expandedNodeName) {
+                    const currentIndex = allNodes.indexOf(expandedNodeName);
+                    if (prevBtn) prevBtn.disabled = (currentIndex <= 0);
+                    if (nextBtn) nextBtn.disabled = (currentIndex >= allNodes.length - 1);
+                }
+                // Show current node position in page indicator
+                if (expandedNodeName) {
+                    const currentIndex = allNodes.indexOf(expandedNodeName);
+                    if (currentPageSpan && totalPagesSpan) {
+                        currentPageSpan.textContent = currentIndex + 1;
+                        totalPagesSpan.textContent = allNodes.length;
+                    }
+                }
+            } else {
+                // Normal pagination mode
+                totalPages = Math.max(1, Math.ceil(allNodes.length / nodesPerPage));
 
-            if (currentPage >= totalPages) {
-                currentPage = totalPages - 1;
+                if (currentPage >= totalPages) {
+                    currentPage = totalPages - 1;
+                }
+                if (currentPage < 0) {
+                    currentPage = 0;
+                }
+
+                if (currentPageSpan) currentPageSpan.textContent = currentPage + 1;
+                if (totalPagesSpan) totalPagesSpan.textContent = totalPages;
+
+                if (prevBtn) prevBtn.disabled = (currentPage === 0);
+                if (nextBtn) nextBtn.disabled = (currentPage >= totalPages - 1);
             }
-            if (currentPage < 0) {
-                currentPage = 0;
-            }
-
-            if (currentPageSpan) currentPageSpan.textContent = currentPage + 1;
-            if (totalPagesSpan) totalPagesSpan.textContent = totalPages;
-
-            if (prevBtn) prevBtn.disabled = (currentPage === 0);
-            if (nextBtn) nextBtn.disabled = (currentPage >= totalPages - 1);
         }
 
-        // Navigate to previous page
-        function previousPage() {
-            if (currentPage > 0) {
+       function previousPage() {
+            if (isExpanded) {
+                // In expanded mode, navigate to previous node in the list
+                if (expandedNodeName) {
+                    const currentIndex = allNodes.indexOf(expandedNodeName);
+                    if (currentIndex > 0) {
+                        const prevNode = allNodes[currentIndex - 1];
+                        expandCard(prevNode);
+                    }
+                }
+            } else if (currentPage > 0) {
                 currentPage--;
                 updatePaginationControls();
                 renderCurrentPage();
             }
         }
 
-        // Navigate to next page
         function nextPage() {
-            if (currentPage < totalPages - 1) {
+            if (isExpanded) {
+                // In expanded mode, navigate to next node in the list
+                if (expandedNodeName) {
+                    const currentIndex = allNodes.indexOf(expandedNodeName);
+                    if (currentIndex < allNodes.length - 1) {
+                        const nextNode = allNodes[currentIndex + 1];
+                        expandCard(nextNode);
+                    }
+                }
+            } else if (currentPage < totalPages - 1) {
                 currentPage++;
                 updatePaginationControls();
                 renderCurrentPage();
             }
         }
 
-        // Go to a specific page (used by auto-scroll during drag)
         function goToPage(page) {
-            if (page >= 0 && page < totalPages && page !== currentPage) {
+            if (page >= 0 && page < totalPages && page !== currentPage && !isExpanded) {
                 currentPage = page;
                 updatePaginationControls();
                 renderCurrentPage();
@@ -1510,13 +2071,12 @@ class WebController(Controller):
             return false;
         }
 
-        // Simple drag and drop with auto-page scroll
         function handleDragStart(e, nodeName) {
+            if (isExpanded) return;
             isDragging = true;
             dragSourceNode = nodeName;
             e.dataTransfer.setData('text/plain', nodeName);
             e.dataTransfer.effectAllowed = 'move';
-            // Make the drag image transparent
             const dragIcon = document.createElement('div');
             dragIcon.textContent = '⋮⋮';
             dragIcon.style.position = 'absolute';
@@ -1524,8 +2084,6 @@ class WebController(Controller):
             document.body.appendChild(dragIcon);
             e.dataTransfer.setDragImage(dragIcon, 0, 0);
             setTimeout(() => document.body.removeChild(dragIcon), 0);
-
-            // Start auto-scroll monitoring
             startDragAutoScroll(e);
         }
 
@@ -1541,25 +2099,19 @@ class WebController(Controller):
         function startDragAutoScroll(e) {
             if (dragAutoScrollTimer) clearInterval(dragAutoScrollTimer);
             dragAutoScrollTimer = setInterval(() => {
-                if (!isDragging) return;
-                // Get mouse position from the last drag event
+                if (!isDragging || isExpanded) return;
                 const mouseX = window.dragMouseX || 0;
-                const mouseY = window.dragMouseY || 0;
                 const windowWidth = window.innerWidth;
 
-                // Check if mouse is near right edge (last 100px)
                 const nearRightEdge = mouseX > windowWidth - 100;
-                // Check if mouse is near left edge (first 100px)
                 const nearLeftEdge = mouseX < 100;
 
                 if (nearRightEdge && currentPage < totalPages - 1) {
-                    // Auto-scroll to next page
                     nextPage();
                 } else if (nearLeftEdge && currentPage > 0) {
-                    // Auto-scroll to previous page
                     previousPage();
                 }
-            }, 500);  // Check every 500ms
+            }, 500);
         }
 
         function stopDragAutoScroll() {
@@ -1569,18 +2121,35 @@ class WebController(Controller):
             }
         }
 
-        // Track mouse position during drag
         document.addEventListener('drag', function(e) {
             window.dragMouseX = e.clientX;
             window.dragMouseY = e.clientY;
         });
 
+
+        document.addEventListener('keydown', function(e) {
+            if (isExpanded) {
+                if (e.key === 'ArrowLeft') {
+                    previousPage();
+                    e.preventDefault();
+                } else if (e.key === 'ArrowRight') {
+                    nextPage();
+                    e.preventDefault();
+                } else if (e.key === 'Escape') {
+                    collapseCard();
+                    e.preventDefault();
+                }
+            }
+        });
+
         function handleDragOver(e) {
+            if (isExpanded) return;
             e.preventDefault();
             e.dataTransfer.dropEffect = 'move';
         }
 
         function handleDragEnter(e) {
+            if (isExpanded) return;
             e.preventDefault();
             const card = e.target.closest('.node-card');
             if (card) {
@@ -1596,6 +2165,7 @@ class WebController(Controller):
         }
 
         async function handleDrop(e, targetNodeName) {
+            if (isExpanded) return;
             e.preventDefault();
             const sourceNode = e.dataTransfer.getData('text/plain');
             const targetNode = targetNodeName;
@@ -1608,8 +2178,6 @@ class WebController(Controller):
                     allNodes.splice(targetIndex, 0, sourceNode);
                     nodeOrder = [...allNodes];
                     await saveNodeOrder();
-
-                    // Re-render current page
                     renderCurrentPage();
                 }
             }
@@ -1631,15 +2199,15 @@ class WebController(Controller):
             }
         }
 
-        // Render only the current page of nodes
         function renderCurrentPage() {
+            if (isExpanded) return;
+
             const grid = document.getElementById('nodeGrid');
             const startIdx = currentPage * nodesPerPage;
             const endIdx = Math.min(startIdx + nodesPerPage, allNodes.length);
             const pageNodes = allNodes.slice(startIdx, endIdx);
 
             if (pageNodes.length === 0 && allNodes.length > 0) {
-                // Adjust page if current page is empty
                 currentPage = Math.max(0, totalPages - 1);
                 updatePaginationControls();
                 renderCurrentPage();
@@ -1654,14 +2222,17 @@ class WebController(Controller):
                 const node = nodeData;
                 const isOnline = node.connected;
                 const essentialClass = node.essential ? 'essential' : 'non-essential';
+                const customHtml = node.custom_html || '';
 
                 html += `
                     <div class="node-card ${isOnline ? 'online' : 'offline'} ${essentialClass}"
                          data-node-name="${node.name}"
+                         ondblclick="expandCard('${node.name}')"
                          ondragover="handleDragOver(event)"
                          ondragenter="handleDragEnter(event)"
                          ondragleave="handleDragLeave(event)"
                          ondrop="handleDrop(event, '${node.name}')">
+                        <div class="expand-hint">⤢ Double-click to expand</div>
                         <div class="node-header">
                             <div class="node-title">
                                 <span class="drag-handle"
@@ -1676,7 +2247,9 @@ class WebController(Controller):
                             </div>
                         </div>
 
-                        <div class="node-measurement-container"></div>
+                        <div class="node-measurement-container">
+                            ${customHtml || '<div class="node-measurement"><div class="measurement-value">—</div><div class="measurement-unit">No data</div></div>'}
+                        </div>
 
                         <div class="node-footer">
                             <div class="node-status-line">
@@ -1713,12 +2286,10 @@ class WebController(Controller):
 
             grid.innerHTML = html;
 
-            // Add measurement displays
             for (const nodeName of pageNodes) {
                 updateNodeMeasurements(nodesData[nodeName]);
             }
 
-            // Add log level change listeners
             document.querySelectorAll('.log-level-select').forEach(select => {
                 select.addEventListener('change', function(e) {
                     e.stopPropagation();
@@ -1732,12 +2303,12 @@ class WebController(Controller):
         }
 
         function updateExistingNodes(status) {
-            // Update nodesData with latest info
+            if (isExpanded) return;
+
             for (const node of status.nodes) {
                 nodesData[node.name] = node;
             }
 
-            // Only update visible nodes on current page
             const startIdx = currentPage * nodesPerPage;
             const endIdx = Math.min(startIdx + nodesPerPage, allNodes.length);
             const visibleNodes = allNodes.slice(startIdx, endIdx);
@@ -1751,7 +2322,6 @@ class WebController(Controller):
 
                 const isOnline = node.connected;
 
-                // Update classes
                 if (isOnline) {
                     card.classList.add('online');
                     card.classList.remove('offline');
@@ -1762,13 +2332,11 @@ class WebController(Controller):
                 card.classList.toggle('essential', node.essential);
                 card.classList.toggle('non-essential', !node.essential);
 
-                // Update node state text
                 const stateSpan = card.querySelector('.state-text');
                 if (stateSpan) {
                     stateSpan.textContent = `${isOnline ? '● online' : '○ offline'} - ${node.state}`;
                 }
 
-                // Update node-state div class
                 const nodeStateDiv = card.querySelector('.node-state');
                 if (nodeStateDiv) {
                     if (isOnline) {
@@ -1808,7 +2376,6 @@ class WebController(Controller):
                     existingNotification.remove();
                 }
 
-                // Update metrics
                 const durationSpan = card.querySelector('.connection-duration');
                 if (durationSpan) {
                     durationSpan.textContent = node.connection_duration ? '📡 ' + node.connection_duration : '';
@@ -1818,7 +2385,6 @@ class WebController(Controller):
                 const heartbeatCountSpan = card.querySelector('.heartbeat-count');
                 if (heartbeatCountSpan) heartbeatCountSpan.textContent = node.heartbeat_count;
 
-                // Update measurements
                 updateNodeMeasurements(node);
             }
         }
@@ -1827,25 +2393,10 @@ class WebController(Controller):
             const card = document.querySelector(`.node-card[data-node-name="${node.name}"]`);
             if (!card) return;
 
-            const measurement = node.measurement || {};
-            const waterHeight = measurement.water_height;
+            // Update custom HTML if provided
             const measurementContainer = card.querySelector('.node-measurement-container');
-            if (measurementContainer) {
-                if (node.type === 'level_gauge' && waterHeight !== undefined) {
-                    measurementContainer.innerHTML = `
-                        <div class="node-measurement">
-                            <div class="measurement-value">${waterHeight} <span class="measurement-unit">mm</span></div>
-                            <div class="measurement-unit">Water Level</div>
-                        </div>`;
-                } else if (node.type === 'test' && measurement.value !== undefined) {
-                    measurementContainer.innerHTML = `
-                        <div class="node-measurement">
-                            <div class="measurement-value">${measurement.value} <span class="measurement-unit">value</span></div>
-                            <div class="measurement-unit">Last reading</div>
-                        </div>`;
-                } else if (measurementContainer.innerHTML !== '') {
-                    measurementContainer.innerHTML = '';
-                }
+            if (measurementContainer && node.custom_html && !isExpanded) {
+                measurementContainer.innerHTML = node.custom_html;
             }
         }
 
@@ -1864,22 +2415,17 @@ class WebController(Controller):
                 badge.className = status.journal_enabled ? 'badge-success' : 'badge-warning';
             }
 
-            // Update CSS variables from server
             updateCSSVariables(status);
 
-            // Update nodes per page from CSS variables
             const rows = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--grid-rows')) || 2;
             const cols = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--grid-columns')) || 4;
             nodesPerPage = rows * cols;
 
-            // Update allNodes from status
             if (status.nodes && status.nodes.length > 0) {
-                // Build node order if not set
                 if (nodeOrder.length === 0 && status.nodes.length > 0) {
                     nodeOrder = status.nodes.map(n => n.name);
                     allNodes = [...nodeOrder];
                 } else {
-                    // Keep existing order but ensure all nodes are present
                     const existingNodeNames = new Set(allNodes);
                     for (const node of status.nodes) {
                         if (!existingNodeNames.has(node.name)) {
@@ -1890,15 +2436,12 @@ class WebController(Controller):
                 }
             }
 
-            // Update nodesData
             for (const node of status.nodes) {
                 nodesData[node.name] = node;
             }
 
-            // Update pagination
             updatePaginationControls();
 
-            // Update banner
             const banner = document.getElementById('statusBanner');
             const total = status.total_nodes;
             const essential = status.essential_nodes;
@@ -1938,15 +2481,13 @@ class WebController(Controller):
                 banner.querySelector('.status-details').textContent += ` (${optional_connected}/${optional_count} optional online)`;
             }
 
-            // Render or update grid
             const grid = document.getElementById('nodeGrid');
-            if (!gridBuilt || grid.children.length === 0 || grid.children[0]?.innerText === 'Loading nodes...') {
+            if (!isExpanded && (!gridBuilt || grid.children.length === 0 || grid.children[0]?.innerText === 'Loading nodes...')) {
                 renderCurrentPage();
-            } else {
+            } else if (!isExpanded) {
                 updateExistingNodes(status);
             }
 
-            // Check if scrolling is needed
             if (grid.scrollWidth > grid.clientWidth) {
                 document.getElementById('scrollHint').classList.add('show');
             } else {

@@ -236,6 +236,78 @@ class NodeHandler:
         rsp = self.send_request(fgr.FGRReqCnf.FGR_REQ_CNF_REBOOT, b"", timeout)
         return rsp is not None and rsp.error_or_state == fgr.FGRError.FGR_ERROR_NONE
 
+    def get_card_html(self, node_name: str, node_data: Dict[str, Any]) -> str:
+        """Return HTML snippet for the card's center area.
+
+        Override this in specific node handlers to display custom information.
+
+        Args:
+            node_name: Name of the node
+            node_data: Current node data including measurements
+
+        Returns:
+            HTML string to display in the card's center area
+        """
+        # Default implementation - show measurement if available
+        measurement = node_data.get('measurement', {})
+        if measurement:
+            if 'water_height' in measurement:
+                return f'''
+                    <div class="node-measurement">
+                        <div class="measurement-value">{measurement['water_height']} <span class="measurement-unit">mm</span></div>
+                        <div class="measurement-unit">Water Level</div>
+                    </div>
+                '''
+            elif 'value' in measurement:
+                return f'''
+                    <div class="node-measurement">
+                        <div class="measurement-value">{measurement['value']} <span class="measurement-unit">value</span></div>
+                        <div class="measurement-unit">Last reading</div>
+                    </div>
+                '''
+        return '<div class="node-measurement-placeholder">No data</div>'
+
+    def get_expanded_html(self, node_name: str, node_data: Dict[str, Any]) -> str:
+        """Return HTML for expanded view (full grid width).
+
+        Override this in specific node handlers for detailed node information.
+
+        Args:
+            node_name: Name of the node
+            node_data: Current node data including measurements
+
+        Returns:
+            HTML string for expanded view
+        """
+        # Default implementation - show basic info
+        measurement = node_data.get('measurement', {})
+        return f'''
+            <div class="expanded-node">
+                <div class="expanded-header">
+                    <h3>{node_name}</h3>
+                    <button class="collapse-btn">✕ Collapse</button>
+                </div>
+                <div class="expanded-content">
+                    <div class="expanded-section">
+                        <h4>Node Information</h4>
+                        <p><strong>Type:</strong> {node_data.get('type', 'unknown')}</p>
+                        <p><strong>IP:</strong> {node_data.get('ip', 'unknown')}</p>
+                        <p><strong>State:</strong> {node_data.get('state', 'unknown')}</p>
+                        <p><strong>Connected:</strong> {node_data.get('connected', False)}</p>
+                    </div>
+                    <div class="expanded-section">
+                        <h4>Measurements</h4>
+                        <pre>{json.dumps(measurement, indent=2)}</pre>
+                    </div>
+                    <div class="expanded-section">
+                        <h4>Statistics</h4>
+                        <p><strong>Message Count:</strong> {node_data.get('message_count', 0)}</p>
+                        <p><strong>Heartbeat Count:</strong> {node_data.get('heartbeat_count', 0)}</p>
+                        <p><strong>Connection Duration:</strong> {node_data.get('connection_duration', 'N/A')}</p>
+                    </div>
+                </div>
+            </div>
+        '''
 
 # ============================================================================
 # Configuration Manager
