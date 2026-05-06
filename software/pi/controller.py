@@ -53,6 +53,7 @@ import importlib.util
 import inspect
 import sys
 import json
+import traceback
 from typing import Dict, Optional, Any, List, Type
 from dataclasses import dataclass, field
 from enum import IntEnum
@@ -80,7 +81,7 @@ except ImportError as e:
 # Node State Management
 # ============================================================================
 
-class NodeState(IntEnum):
+class ConnectionState(IntEnum):
     DISCONNECTED = 0
     CONNECTED = 1
     NEEDS_CFG = fgr.FGRState.FGR_STATE_NEEDS_CFG
@@ -102,7 +103,7 @@ class Node:
     node_type: str = ""
     essential: bool = True
     sock: Optional[socket.socket] = None
-    state: NodeState = NodeState.DISCONNECTED
+    state: ConnectionState = ConnectionState.DISCONNECTED
     fgr_state: int = fgr.FGRState.FGR_STATE_NOT_POPULATED
     reference_counter: int = 0
     pending_requests: Dict[int, queue.Queue] = field(default_factory=dict)
@@ -123,6 +124,35 @@ class Node:
 # Node Handler Base Class
 # ============================================================================
 
+# ============================================================================
+# NodeHandler Message Guide
+# ============================================================================
+#
+# SENDING MESSAGES TO THE NODE:
+# ----------------------------
+#
+# REQ → CNF (Controller initiates, blocking):
+#     cnf = self.send_request(req_type, contents, timeout=5.0)
+#     if cnf and cnf.error_or_state == fgr.FGRError.FGR_ERROR_NONE:
+#         response = cnf.contents
+#
+# IND → RSP (Node initiates, non-blocking):
+#     # Standard IND (HEARTBEAT, NEEDS_CFG, START, STOP) - automatically handled
+#     # Node-specific IND - override on_node_specific_indication():
+#     def on_node_specific_indication(self, msg):
+#         self.send_response(msg.subtype, msg.reference, response_data)
+#         return True
+#
+# OBSERVING MESSAGES (optional):
+# ------------------------------
+#     def on_indication(self, msg):
+#         is_standard = super().on_indication(msg)  # Let parent process
+#         self.logger.debug(f"Observed: {msg.subtype}")
+#         return is_standard
+#
+#     def on_confirmation(self, msg):
+#         self.logger.debug(f"CNF: {msg.subtype}")
+#         return super().on_confirmation(msg)
 class NodeHandler:
     """
     Base class for node-specific handlers.
@@ -135,10 +165,32 @@ class NodeHandler:
     4. The class name should be PascalCase of the type (e.g., LevelGaugeHandler)
     """
 
-    def __init__(self, node: Node, controller: 'Controller'):
-        self.node = node
-        self.controller = controller
-        self.logger = logging.getLogger(f"Handler.{node.name}")
+    def __init__(self, **kwargs):
+        """Initialize the node handler."""
+        self.node = kwargs.get('node')
+        self.config = kwargs.get('config', {})
+        self.logger = kwargs.get('logger')
+        self.controller = kwargs.get('controller')
+
+        # Try to get node name for logging
+        if self.node and hasattr(self.node, 'name'):
+            self._node_name_for_logging = self.node.name
+        elif self.config and 'name' in self.config:
+            self._node_name_for_logging = self.config['name']
+        else:
+            self._node_name_for_logging = "unknown"
+
+        # Log entry
+        if self.logger:
+            self.logger.info(f"{self.__class__.__name__}.__init__() called for node {self._node_name_for_logging}")
+
+    def _log_init_exit(self):
+        if self.logger:
+            self.logger.info(f"{self.__class__.__name__}.__init__() completed for node {self._node_name_for_logging}")
+
+    def _log_init_error(self, error: Exception):
+        if self.logger:
+            self.logger.error(f"!!! {self.__class__.__name__}.__init__() failed for node {self._node_name_for_logging}: {error}")
 
     def on_connected(self):
         """Called when node first connects"""
@@ -150,40 +202,56 @@ class NodeHandler:
 
     def on_indication(self, msg: fgr.FGRMsg) -> bool:
         """
-        Handle an indication message (FGR_MSG_TYPE_IND).
-        Return True if handled, False to pass to generic handler.
+        Handle standard FGR protocol indications.
+        This is the MAIN handler that processes ALL standard protocol messages.
+        Updates state, tracks heartbeats, calls on_needs_cfg(), etc.
+
+        Child classes can OBSERVE by overriding this and calling super(),
+        but they should NOT interfere with standard protocol handling.
+
+        Returns True for standard protocol messages (handled),
+        False for node-specific messages (needs child handling).
         """
         ind_type = msg.subtype
 
         # ALWAYS update the node's FGR state from the message
         self.node.fgr_state = msg.error_or_state
 
-        # Try to map to a known NodeState, but don't fail if unknown
         try:
-            self.node.state = NodeState(msg.error_or_state)
+            self.node.state = ConnectionState(msg.error_or_state)
         except ValueError:
-            # Unknown state value - keep existing state but log debug
-            if self.logger.isEnabledFor(logging.DEBUG):
-                self.logger.debug(f"Unknown state value {msg.error_or_state} from {self.node.name}")
+            pass
 
-        # Now handle specific indication types
-        if ind_type == fgr.FGRIndRsp.FGR_IND_RSP_NEEDS_CFG:
-            self.logger.info(f"Node needs configuration (state={msg.error_or_state})")
+        # Handle standard protocol messages
+        if ind_type == fgr.FGRIndRsp.FGR_IND_RSP_HEARTBEAT:
+            self.node.heartbeat_count += 1
+            self.node.last_heartbeat = time.time()
+            return True
+
+        elif ind_type == fgr.FGRIndRsp.FGR_IND_RSP_NEEDS_CFG:
             self.on_needs_cfg(msg)
             return True
 
         elif ind_type == fgr.FGRIndRsp.FGR_IND_RSP_START:
-            self.logger.info(f"Node started operating (state={msg.error_or_state})")
             self.on_start(msg)
             return True
 
         elif ind_type == fgr.FGRIndRsp.FGR_IND_RSP_STOP:
-            self.logger.info(f"Node stopped operating (state={msg.error_or_state})")
             self.on_stop(msg)
             return True
 
-        # For device-specific indications, we've already updated the state
-        # Return False to allow generic handling or further processing
+        # Must be a node-specific indication
+        return False
+
+    def on_node_specific_indication(self, msg: fgr.FGRMsg) -> bool:
+        """
+        Handle node-specific indications.
+        MUST be overridden by child classes to handle their custom messages.
+
+        This is called ONLY for indications not known to on_indication().
+        Returns True if handled, False otherwise (will be logged).
+        """
+        self.logger.warning(f"Unhandled node-specific indication: 0x{msg.subtype:03X}")
         return False
 
     def on_needs_cfg(self, msg: fgr.FGRMsg):
@@ -208,7 +276,12 @@ class NodeHandler:
 
     def send_request(self, req_type: int, contents: bytes = b"",
                      timeout: float = 5.0) -> Optional[fgr.FGRMsg]:
-        """Send a request to this node and wait for confirmation"""
+        """
+        Send REQ to node, wait for CNF response (blocking).
+
+        Returns CNF message on success, None on timeout/error.
+        Check cnf.error_or_state for success/failure.
+        """
         return self.controller.send_request_to_node(self.node.name, req_type, contents, timeout)
 
     def send_response(self, rsp_type: int, reference: int, contents: bytes = b"") -> bool:
@@ -440,33 +513,24 @@ class Controller:
             sys.path.insert(0, str(parent_dir))
 
         for py_file in sorted(self.nodes_dir.glob("node_*.py")):
-            self.logger.info(f"Found file: {py_file}")
             if py_file.name == "node_base.py":
                 continue
 
             module_name = f"nodes.{py_file.stem}"
-            self.logger.info(f"Attempting to load module: {module_name}")
+
             try:
-                # Read the source file
-                with open(py_file, 'r') as f:
-                    source = f.read()
+                # Create spec and module
+                spec = importlib.util.spec_from_file_location(module_name, py_file)
+                module = importlib.util.module_from_spec(spec)
 
-                # Create a new module
-                module = importlib.util.module_from_spec(
-                    importlib.util.spec_from_file_location(module_name, py_file)
-                )
-
-                # Inject NodeHandler and fgr into the module's globals
+                # Inject dependencies into the module's namespace
                 module.NodeHandler = NodeHandler
                 module.fgr = fgr
-                module.__dict__['NodeHandler'] = NodeHandler
-                module.__dict__['fgr'] = fgr
 
-                # Execute the module with our injected globals
-                exec(source, module.__dict__)
+                # Execute the module - this preserves filename in tracebacks!
+                spec.loader.exec_module(module)
 
-                self.logger.info(f"Module loaded successfully")
-
+                # Find handler classes
                 for name, obj in inspect.getmembers(module, inspect.isclass):
                     try:
                         is_subclass = issubclass(obj, NodeHandler) and obj != NodeHandler
@@ -474,14 +538,15 @@ class Controller:
                         continue
 
                     if is_subclass:
-                        node_type = py_file.stem[5:]
+                        node_type = py_file.stem[5:]  # Remove 'node_' prefix
                         self.node_handlers[node_type] = obj
                         self.logger.info(f"Loaded handler {obj.__name__} for node type '{node_type}'")
-                    else:
-                        self.logger.debug(f"Skipping class {name} (not a handler)")
 
             except Exception as e:
-                self.logger.error(f"Failed to load handler from {py_file.name}: {e}", exc_info=True)
+                self.logger.error(f"Failed to load handler from {py_file.name}: {e}")
+                import traceback
+                self.logger.error(f"Traceback:\n{traceback.format_exc()}")
+
 
     def _load_nodes_from_cfg(self):
         """Load node definitions from configuration"""
@@ -502,14 +567,21 @@ class Controller:
 
     def _get_handler_for_node(self, node: Node) -> NodeHandler:
         """Create appropriate handler instance for a node"""
+        kwargs = {
+            'node': node,
+            'controller': self,
+            'logger': self.logger,
+            'config': node.cfg_data or {}
+        }
+
         if node.node_type and node.node_type in self.node_handlers:
-            return self.node_handlers[node.node_type](node, self)
+            return self.node_handlers[node.node_type](**kwargs)
 
         for prefix, handler_class in self.node_handlers.items():
             if node.name.startswith(prefix):
-                return handler_class(node, self)
+                return handler_class(**kwargs)
 
-        return NodeHandler(node, self)
+        return NodeHandler(**kwargs)
 
     def add_node(self, name: str, ip: str, node_type: str = "",
                  heartbeat_timeout: int = 60, essential: bool = True) -> None:
@@ -526,7 +598,7 @@ class Controller:
 
     def _disconnect_node(self, node: Node) -> None:
         """Internal: disconnect a node"""
-        if node.state == NodeState.DISCONNECTED:
+        if node.state == ConnectionState.DISCONNECTED:
             return
 
         # Record last seen time
@@ -559,7 +631,7 @@ class Controller:
         node.pending_requests.clear()
 
         # Update state
-        node.state = NodeState.DISCONNECTED
+        node.state = ConnectionState.DISCONNECTED
 
         # Notify handler
         if node.handler:
@@ -683,7 +755,7 @@ class Controller:
 
                     # Reset node state for reconnection
                     node.sock = client_sock
-                    node.state = NodeState.CONNECTED
+                    node.state = ConnectionState.CONNECTED
                     node.last_heartbeat = time.time()
                     node.reference_counter = 0
                     node.message_count = 0
@@ -760,7 +832,7 @@ class Controller:
                     traceback.print_exc()
                 break
 
-        if node.state != NodeState.DISCONNECTED:
+        if node.state != ConnectionState.DISCONNECTED:
             self._disconnect_node(node)
             self.logger.info(f"Node {node.name} disconnected")
 
@@ -784,11 +856,20 @@ class Controller:
                     node.handler.on_confirmation(msg)
 
             elif msg_type == fgr.FGRMsgType.FGR_MSG_TYPE_IND:
-                # ALWAYS go through the handler for ALL indications
                 if node.handler:
-                    node.handler.on_indication(msg)
+                    # Let parent handle standard protocol (including observation)
+                    is_standard = node.handler.on_indication(msg)
+
+                    # If not standard protocol, it's node-specific - child MUST handle it
+                    if not is_standard:
+                        if not node.handler.on_node_specific_indication(msg):
+                            # No handler for this node-specific indication
+                            self.logger.warning(
+                                f"[{node.name}] Unhandled node-specific indication: "
+                                f"type=0x{msg.subtype:03X}, len={len(msg.contents)}"
+                            )
                 else:
-                    self.logger.info(f"No handler for {node.name}, using generic")
+                    # No handler, use fallback
                     self._handle_generic_indication(node, msg)
 
             elif msg_type == fgr.FGRMsgType.FGR_MSG_TYPE_RSP:
@@ -798,7 +879,12 @@ class Controller:
             elif msg_type == fgr.FGRMsgType.FGR_MSG_TYPE_REQ:
                 self.logger.warning(f"Unexpected REQ from {node.name}")
 
-            # LOG messages (type 5) are ignored - they go to a different endpoint
+            elif msg_type == fgr.FGRMsgType.FGR_MSG_TYPE_LOG:
+                # LOG messages (type 5) are ignored - they go to a different endpoint
+                pass
+            else:
+                # Unknown message type
+                self.logger.warning(f"[{node.name}] Unknown message type: {msg_type}")
 
         except Exception as e:
             self.logger.error(f"Exception in dispatch for {node.name}: {e}")
@@ -823,20 +909,21 @@ class Controller:
             self.send_response_to_node(node.name, ind_type, msg.reference, b"")
             # Update node state
             node.fgr_state = msg.error_or_state
-            node.state = NodeState.NEEDS_CFG
+            node.state = ConnectionState.NEEDS_CFG
 
         elif ind_type == fgr.FGRIndRsp.FGR_IND_RSP_START:
             self.logger.info(f"Node {node.name}: started")
             node.fgr_state = msg.error_or_state
-            node.state = NodeState.STARTED
+            node.state = ConnectionState.STARTED
 
         elif ind_type == fgr.FGRIndRsp.FGR_IND_RSP_STOP:
             self.logger.info(f"Node {node.name}: stopped")
             node.fgr_state = msg.error_or_state
-            node.state = NodeState.STOPPED
+            node.state = ConnectionState.STOPPED
 
         elif ind_type == fgr.FGRIndRsp.FGR_IND_RSP_HEARTBEAT:
             node.heartbeat_count += 1
+            self.logger.info(f"Node {node.name} hearbeat updated {node.heartbeat_count}")
             node.last_heartbeat = time.time()
             if self.logger.isEnabledFor(logging.DEBUG):
                 self.logger.debug(f"[{node.name}] HEARTBEAT #{node.heartbeat_count}")
@@ -851,7 +938,7 @@ class Controller:
             time.sleep(15)
             now = time.time()
             for node in self.nodes.values():
-                if node.sock and node.state != NodeState.DISCONNECTED:
+                if node.sock and node.state != ConnectionState.DISCONNECTED:
                     time_since = now - node.last_heartbeat
 
                     if time_since > node.heartbeat_timeout:
@@ -926,7 +1013,7 @@ class Controller:
         if cnf and cnf.error_or_state == fgr.FGRError.FGR_ERROR_NONE:
             node = self.nodes.get(node_name)
             if node:
-                node.state = NodeState.READY
+                node.state = ConnectionState.READY
             return True
         return False
 
@@ -936,7 +1023,7 @@ class Controller:
         if cnf and cnf.error_or_state == fgr.FGRError.FGR_ERROR_NONE:
             node = self.nodes.get(node_name)
             if node:
-                node.state = NodeState.STARTED
+                node.state = ConnectionState.STARTED
             return True
         return False
 
@@ -946,7 +1033,7 @@ class Controller:
         if cnf and cnf.error_or_state == fgr.FGRError.FGR_ERROR_NONE:
             node = self.nodes.get(node_name)
             if node:
-                node.state = NodeState.STOPPED
+                node.state = ConnectionState.STOPPED
             return True
         return False
 
@@ -972,13 +1059,13 @@ class Controller:
                 node = self.nodes.get(node_name)
                 if node:
                     node.fgr_state = state_value
-                    # Also update NodeState if needed
+                    # Also update ConnectionState if needed
                     if state_value == fgr.FGRState.FGR_STATE_STARTED:
-                        node.state = NodeState.STARTED
+                        node.state = ConnectionState.STARTED
                     elif state_value == fgr.FGRState.FGR_STATE_STOPPED:
-                        node.state = NodeState.STOPPED
+                        node.state = ConnectionState.STOPPED
                     elif state_value == fgr.FGRState.FGR_STATE_NEEDS_CFG:
-                        node.state = NodeState.NEEDS_CFG
+                        node.state = ConnectionState.NEEDS_CFG
                 self.logger.info(f"Node {node_name} state: {state_value}")
                 return state_value
 

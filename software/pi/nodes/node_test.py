@@ -17,11 +17,14 @@
 """
 Test node handler.
 
-This handler inherits from NodeHandler (injected by controller).
-All notification logic is handled by the WebController.
+This handler inherits from NodeHandler (injected by controller),
+and therefore has access to all of the state variables for a node
+that the Controller updates.
 """
 
 import json
+import time
+import threading
 from typing import Dict, Any
 
 # NodeHandler and FGR protocol are injected by the controller
@@ -30,14 +33,33 @@ class TestHandler(NodeHandler):
     """
     A test node handler for prototyping new features.
     """
+    def __init__(self, *args, **kwargs):
+        """Initialize the test handler."""
+        super().__init__(*args, **kwargs)
+
+        try:
+            self._counter = 0
+            self._last_update = time.time()
+            self._generator_thread = None
+            self._running = False
+            self._log_init_exit()
+        except Exception as e:
+            self._log_init_error(e)
+            raise
 
     def on_connected(self):
         """Called when the node first connects"""
         self.logger.info(f"Test node {self.node.name} is online")
+        # Start generating test data
+        self._start_test_data_generation()
 
     def on_disconnected(self):
         """Called when the node disconnects"""
         self.logger.info(f"Test node {self.node.name} went offline")
+        self._running = False
+        # Wait for thread to finish
+        if self._generator_thread and self._generator_thread.is_alive():
+            self._generator_thread.join(timeout=1)
 
     def on_needs_cfg(self, msg: fgr.FGRMsg):
         """Called when node needs configuration - send custom config data"""
@@ -50,68 +72,131 @@ class TestHandler(NodeHandler):
         self.send_response(msg.subtype, msg.reference, config_data)
 
     def on_indication(self, msg: fgr.FGRMsg) -> bool:
-        """Handle device-specific indications"""
+        """
+        Observe ALL indications (optional).
+        Call parent first to handle standard protocol.
+        """
+        # Let parent handle standard protocol and update state
+        is_standard = super().on_indication(msg)
+
+        # OBSERVATION: Log for debugging (optional)
         ind_type = msg.subtype
+        if is_standard:
+            self.logger.debug(f"Standard indication: {ind_type}")
+        else:
+            self.logger.debug(f"Node-specific indication: {ind_type}")
 
-        # Let base class handle standard protocol (NEEDS_CFG, START, STOP)
-        super().on_indication(msg)
+        return is_standard
 
-        # Handle device-specific test data (from contents)
-        if ind_type > fgr.FGRIndRsp.FGR_IND_RSP_LAST:
-            if len(msg.contents) > 0:
-                value = msg.contents[0]
-                self.logger.info(f"Test node {self.node.name} sent test value: {value}")
+    def on_node_specific_indication(self, msg: fgr.FGRMsg) -> bool:
+        """
+        Handle node-specific indications (REQUIRED).
+        Called only for message types unknown to the base class
+        """
+        if len(msg.contents) > 0:
+            value = msg.contents[0]
+            self.logger.info(f"Test node {self.node.name} sent test value: {value}")
 
+            if hasattr(self.controller, 'update_node_measurement'):
+                self.controller.update_node_measurement(self.node.name, {
+                    'value': value,
+                    'type': 'test',
+                    'last_update': time.time()
+                })
+        return True  # Device-specific handled
+
+    def _start_test_data_generation(self):
+        """Start a background thread to generate test data"""
+        if self._generator_thread and self._generator_thread.is_alive():
+            return
+
+        self._running = True
+
+        def generate_data():
+            while self._running and self.node and self.node.sock:
+                if self.node.fgr_state == fgr.FGRState.FGR_STATE_STARTED:
+                    self._counter += 1
+                current_time = time.time()
+
+                # Update measurement with incrementing counter
                 if hasattr(self.controller, 'update_node_measurement'):
                     self.controller.update_node_measurement(self.node.name, {
-                        'value': value,
+                        'value': self._counter,
+                        'counter': self._counter,
+                        'last_update': current_time,
+                        'uptime': current_time - self._last_update,
                         'type': 'test'
                     })
 
-        return True
+                self.logger.debug(f"Generated test data: counter={self._counter}")
+                time.sleep(5)  # Update every 5 seconds
+
+        self._generator_thread = threading.Thread(target=generate_data, daemon=True)
+        self._generator_thread.start()
 
     def get_card_html(self, node_name: str, node_data: Dict[str, Any]) -> str:
-        """Return HTML snippet for the card's center area."""
+        """Return HTML for the card's center area (node-specific only)"""
         measurement = node_data.get('measurement', {})
         value = measurement.get('value', 'N/A')
+        counter = measurement.get('counter', 'N/A')
 
         return f'''
             <div class="node-measurement">
-                <div class="measurement-value">{value}</div>
-                <div class="measurement-unit">Test Value</div>
+                <div class="measurement-value" data-dynamic="value">{value}</div>
+                <div class="measurement-unit">Current Value</div>
+                <div style="margin-top: 8px; font-size: 10px; color: #666;">
+                    Counter: <span data-dynamic="counter">{counter}</span>
+                </div>
             </div>
         '''
 
     def get_expanded_html(self, node_name: str, node_data: Dict[str, Any]) -> str:
-        """Return HTML for expanded view"""
+        """Return HTML for the expanded view (node-specific content only)"""
         measurement = node_data.get('measurement', {})
         value = measurement.get('value', 'N/A')
+        counter = measurement.get('counter', 'N/A')
+        uptime = measurement.get('uptime', 0)
+
+        # Format uptime
+        if isinstance(uptime, (int, float)):
+            hours = int(uptime // 3600)
+            minutes = int((uptime % 3600) // 60)
+            seconds = int(uptime % 60)
+            if hours > 0:
+                uptime_str = f"{hours}h {minutes}m {seconds}s"
+            elif minutes > 0:
+                uptime_str = f"{minutes}m {seconds}s"
+            else:
+                uptime_str = f"{seconds}s"
+        else:
+            uptime_str = "N/A"
 
         return f'''
-            <div class="expanded-node">
-                <div class="expanded-header">
-                    <h3>{node_name}</h3>
-                    <button class="collapse-btn">✕ Collapse</button>
-                </div>
-                <div class="expanded-content">
-                    <div class="expanded-section">
-                        <h4>Test Node Details</h4>
-                        <p>Current Value: {value}</p>
-                        <p>Last Update: {measurement.get('last_update', 'N/A')}</p>
-                    </div>
-                    <div class="expanded-section">
-                        <h4>Node Information</h4>
-                        <p>Type: {node_data.get('type', 'unknown')}</p>
-                        <p>IP: {node_data.get('ip', 'unknown')}</p>
-                        <p>State: {node_data.get('state', 'unknown')}</p>
-                        <p>Connected: {node_data.get('connected', False)}</p>
-                        <p>Message Count: {node_data.get('message_count', 0)}</p>
-                        <p>Heartbeat Count: {node_data.get('heartbeat_count', 0)}</p>
-                    </div>
-                </div>
+            <div class="expanded-section">
+                <h4>📊 Test Node Dynamic Data</h4>
+                <p>Current Value: <strong><span data-dynamic="value">{value}</span></strong></p>
+                <p>Incrementing Counter: <strong><span data-dynamic="counter">{counter}</span></strong></p>
+                <p>Last Update: <span data-dynamic="last_update">{measurement.get('last_update', 'N/A')}</span></p>
+                <p>Data Generation Uptime: {uptime_str}</p>
+            </div>
+            <div class="expanded-section">
+                <h4>📈 About This Demo</h4>
+                <p>This test node demonstrates dynamic data updates:</p>
+                <ul style="margin: 5px 0; padding-left: 20px;">
+                    <li>The counter increments every 5 seconds</li>
+                    <li>Both the card and expanded view update automatically</li>
+                    <li>The <code>data-dynamic</code> attributes enable live updates</li>
+                </ul>
             </div>
         '''
 
 # Factory function for controller to create handler
-def create_handler(config: Dict[str, Any]) -> TestHandler:
-    return TestHandler()
+def create_handler(**kwargs):
+    """Factory function - automatically finds and returns the handler class in this module."""
+    import inspect, sys
+    for name, obj in inspect.getmembers(sys.modules[__name__]):
+        if (inspect.isclass(obj) and
+            issubclass(obj, NodeHandler) and
+            obj != NodeHandler):
+            return obj(**kwargs)
+    raise RuntimeError("No NodeHandler subclass found in module")

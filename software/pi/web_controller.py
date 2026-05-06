@@ -30,24 +30,25 @@ Usage:
                              [--http-port HTTP_PORT] [--log-level LEVEL]
 """
 
+import time
+import os
+import sys
 import argparse
+print("Importing asyncio: may take some time...", flush=True)
 import asyncio
 import json
 import threading
-import time
 import signal
-import sys
 import logging
-import os
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
 from collections import deque
-
+print("Importing aiohttp: may take some time...", flush=True)
 from aiohttp import web
 
 # Import the controller
-from controller import Controller, NodeState, NodeHandler, Node
+from controller import Controller, ConnectionState, NodeHandler, Node
 import fgr_protocol as fgr
 
 # Try to import systemd journal support
@@ -454,14 +455,14 @@ class WebController(Controller):
 
             # Determine display state with formatted name
             if node.sock:
-                if node.state == NodeState.STARTED:
+                if node.state == ConnectionState.STARTED:
                     display_state = "STARTED"
-                elif node.state == NodeState.READY:
+                elif node.state == ConnectionState.READY:
                     display_state = "READY"
-                elif node.state == NodeState.NEEDS_CFG:
+                elif node.state == ConnectionState.NEEDS_CFG:
                     display_state = "NEEDS CONFIG"
                 else:
-                    display_state = node.state.name if isinstance(node.state, NodeState) else str(node.state)
+                    display_state = node.state.name if isinstance(node.state, ConnectionState) else str(node.state)
                 display_state = format_fgr_state(display_state).lower()
             else:
                 display_state = "disconnected"
@@ -488,7 +489,7 @@ class WebController(Controller):
             'essential_nodes': len([n for n in self.nodes.values() if n.essential]),
             'connected_essential_nodes': len([n for n in self.nodes.values() if n.sock and n.essential]),
             'working_essential_nodes': working_nodes,
-            'initialised_nodes': len([n for n in self.nodes.values() if n.sock and n.state not in [NodeState.DISCONNECTED, NodeState.CONNECTED]]),
+            'initialised_nodes': len([n for n in self.nodes.values() if n.sock and n.state not in [ConnectionState.DISCONNECTED, ConnectionState.CONNECTED]]),
             'server_uptime': time.time() - self._start_time,
             'journal_enabled': HAS_SYSTEMD,
             'grid_columns': self.node_grid_layout.get('columns', 4),
@@ -762,8 +763,8 @@ class WebController(Controller):
 
         return web.json_response({'status': 'error', 'message': 'Invalid reorder operation'})
 
-    async def handle_api_node_html(self, request):
-        """Get expanded HTML for a specific node"""
+    async def handle_api_node_data(self, request):
+        """Get dynamic data for a specific node (for updating expanded view)"""
         data = await request.json()
         node_name = data.get('node')
 
@@ -771,7 +772,30 @@ class WebController(Controller):
         if not node:
             return web.json_response({'status': 'error', 'message': 'Node not found'})
 
-        # Prepare node data
+        # Calculate connection duration
+        connection_duration = None
+        if node.sock and hasattr(node, 'connection_time') and node.connection_time:
+            duration = time.time() - node.connection_time
+            days = int(duration // 86400)
+            hours = int((duration % 86400) // 3600)
+            minutes = int((duration % 3600) // 60)
+            seconds = int(duration % 60)
+
+            if days > 0:
+                connection_duration = f"{days}d {hours}h {minutes}m"
+            elif hours > 0:
+                connection_duration = f"{hours}h {minutes}m"
+            elif minutes > 0:
+                connection_duration = f"{minutes}m {seconds}s"
+            else:
+                connection_duration = f"{seconds}s"
+        elif not node.sock and hasattr(node, 'last_seen') and node.last_seen:
+            duration = time.time() - node.last_seen
+            if duration < 3600:
+                connection_duration = f"disconnected {int(duration // 60)}m ago"
+            else:
+                connection_duration = f"disconnected {int(duration // 3600)}h ago"
+
         node_data = {
             'name': node_name,
             'type': node.node_type,
@@ -781,79 +805,56 @@ class WebController(Controller):
             'measurement': self.node_measurements.get(node_name, {}),
             'message_count': node.message_count,
             'heartbeat_count': node.heartbeat_count,
-            'connection_duration': None
+            'connection_duration': connection_duration
         }
 
-        # If node is not connected, return a special "disconnected" view
-        if not node.sock:
-            disconnected_html = f'''
-                <div class="expanded-node">
-                    <div class="expanded-header">
-                        <h3>{node_name} (Disconnected)</h3>
-                        <button class="collapse-btn">✕ Collapse</button>
-                    </div>
-                    <div class="expanded-content">
-                        <div class="expanded-section">
-                            <h4>⚠️ Node Not Connected</h4>
-                            <p>This node is currently offline or not responding.</p>
-                            <p>IP Address: {node.ip}</p>
-                            <p>Last seen: {node_data.get('connection_duration', 'Unknown')}</p>
-                            <p>Please check the node's network connection and power supply.</p>
-                        </div>
-                    </div>
-                </div>
-            '''
-            return web.json_response({'status': 'ok', 'html': disconnected_html})
+        return web.json_response({'status': 'ok', 'data': node_data})
 
-        # If node has no handler, return a basic view with collapse button
-        if not node.handler:
-            basic_html = f'''
-                <div class="expanded-node">
-                    <div class="expanded-header">
-                        <h3>{node_name} (No Handler)</h3>
-                        <button class="collapse-btn">✕ Collapse</button>
-                    </div>
-                    <div class="expanded-content">
-                        <div class="expanded-section">
-                            <h4>ℹ️ Node Information</h4>
-                            <p>Type: {node.node_type}</p>
-                            <p>IP: {node.ip}</p>
-                            <p>State: {node_data.get('state', 'unknown')}</p>
-                            <p>Connected: Yes</p>
-                            <p>Message Count: {node.message_count}</p>
-                            <p>Heartbeat Count: {node.heartbeat_count}</p>
-                        </div>
-                        <div class="expanded-section">
-                            <h4>📊 Recent Measurements</h4>
-                            <pre>{json.dumps(self.node_measurements.get(node_name, {}), indent=2)}</pre>
-                        </div>
-                    </div>
-                </div>
-            '''
-            return web.json_response({'status': 'ok', 'html': basic_html})
+    async def handle_api_node_html(self, request):
+        """Get expanded HTML for a specific node"""
+        data = await request.json()
+        node_name = data.get('node')
 
-        # Normal case - node has handler and is connected
-        try:
-            expanded_html = node.handler.get_expanded_html(node_name, node_data)
-            return web.json_response({'status': 'ok', 'html': expanded_html})
-        except Exception as e:
-            self._log_message(f"Error getting expanded HTML for {node_name}: {e}")
-            error_html = f'''
-                <div class="expanded-node">
-                    <div class="expanded-header">
-                        <h3>{node_name}</h3>
-                        <button class="collapse-btn">✕ Collapse</button>
-                    </div>
-                    <div class="expanded-content">
-                        <div class="expanded-section">
-                            <h4>❌ Error Loading Data</h4>
-                            <p>An error occurred while loading the expanded view:</p>
-                            <pre>{str(e)}</pre>
-                        </div>
-                    </div>
+        node = self.nodes.get(node_name)
+        if not node:
+            return web.json_response({'status': 'error', 'message': 'Node not found'})
+
+        # Get node-specific content from handler
+        node_specific_html = ""
+        if node.handler and hasattr(node.handler, 'get_expanded_html'):
+            try:
+                # Prepare minimal node data
+                node_data = {
+                    'name': node_name,
+                    'measurement': self.node_measurements.get(node_name, {}),
+                }
+                node_specific_html = node.handler.get_expanded_html(node_name, node_data)
+            except Exception as e:
+                self._log_message(f"Error getting expanded HTML from handler: {e}")
+                node_specific_html = '<div class="expanded-section"><h4>Error</h4><pre>Failed to load node data</pre></div>'
+        else:
+            node_specific_html = f'''
+                <div class="expanded-section">
+                    <h4>Node Data</h4>
+                    <pre>{json.dumps(self.node_measurements.get(node_name, {}), indent=2)}</pre>
                 </div>
             '''
-            return web.json_response({'status': 'ok', 'html': error_html})
+
+        # Build complete expanded view - ONLY node-specific content
+        # The footer (status, metrics, buttons) is already in the card and updated by status stream
+        complete_html = f'''
+            <div class="expanded-node">
+                <div class="expanded-header">
+                    <h3>{node_name}</h3>
+                    <button class="collapse-btn">✕ Collapse</button>
+                </div>
+                <div class="expanded-content">
+                    {node_specific_html}
+                </div>
+            </div>
+        '''
+
+        return web.json_response({'status': 'ok', 'html': complete_html})
 
     def start_web(self):
         """Start the web server"""
@@ -867,6 +868,7 @@ class WebController(Controller):
         self.web_app.router.add_post('/api/command', self.handle_api_command)
         self.web_app.router.add_post('/api/layout', self.handle_api_layout)
         self.web_app.router.add_post('/api/reorder', self.handle_api_reorder)
+        self.web_app.router.add_post('/api/node/data', self.handle_api_node_data)
         self.web_app.router.add_post('/api/node/html', self.handle_api_node_html)
 
         async def start_server():
@@ -1599,6 +1601,7 @@ class WebController(Controller):
         let lastNotificationTimestamp = {};  // Track last notification timestamp per node
         let isExpanded = false;  // Track if a card is expanded
         let expandedNodeName = null;  // Track which node is expanded
+        let expandedRefreshInterval = null;  // Refresh dynamic data for expanded view
 
         // Pagination variables
         let currentPage = 0;
@@ -1629,6 +1632,7 @@ class WebController(Controller):
 
         // Expand a card to full view
         async function expandCard(nodeName) {
+
             // Clear any existing text selection
             if (window.getSelection) {
                 window.getSelection().removeAllRanges();
@@ -1644,6 +1648,7 @@ class WebController(Controller):
 
             // If already expanded but different node, just swap the content
             if (isExpanded && expandedNodeName !== nodeName) {
+
                 // Swap to new node without changing grid layout
                 const currentCard = document.querySelector('.node-card.expanded-card');
                 if (currentCard) {
@@ -1661,7 +1666,6 @@ class WebController(Controller):
                         const result = await response.json();
 
                         if (result.status === 'ok' && result.html) {
-                            // Set the new expanded content
                             measurementContainer.innerHTML = result.html;
 
                             // Add collapse button handler
@@ -1706,9 +1710,11 @@ class WebController(Controller):
                             // Update pagination controls for the new node position
                             updatePaginationControls();
 
+                            // Start refreshing dynamic data for the new node
+                            startExpandedRefresh(nodeName);
+
                         } else {
                             console.error('Invalid API response:', result);
-                            // Show error with collapse button
                             measurementContainer.innerHTML = `
                                 <div class="expanded-node">
                                     <div class="expanded-header">
@@ -1724,7 +1730,6 @@ class WebController(Controller):
                                     </div>
                                 </div>
                             `;
-                            // Add collapse handler
                             const collapseBtn = measurementContainer.querySelector('.collapse-btn');
                             if (collapseBtn) {
                                 collapseBtn.onclick = (e) => {
@@ -1765,9 +1770,11 @@ class WebController(Controller):
                 return;
             }
 
-            // Otherwise, do the full expansion (first time expanding)
             const card = document.querySelector(`.node-card[data-node-name="${nodeName}"]`);
-            if (!card) return;
+            if (!card) {
+                console.error('Card not found for node:', nodeName);
+                return;
+            }
 
             const measurementContainer = card.querySelector('.node-measurement-container');
             const originalHtml = measurementContainer.innerHTML;
@@ -1786,6 +1793,7 @@ class WebController(Controller):
                 if (result.status === 'ok' && result.html) {
                     measurementContainer.innerHTML = result.html;
 
+                    // Add collapse button handler
                     const collapseBtn = measurementContainer.querySelector('.collapse-btn');
                     if (collapseBtn) {
                         collapseBtn.onclick = (e) => {
@@ -1807,6 +1815,7 @@ class WebController(Controller):
                         }
                     }
 
+                    // Add navigation hint if not present
                     const expandedHeader = measurementContainer.querySelector('.expanded-header h3');
                     if (expandedHeader && !measurementContainer.querySelector('.expanded-nav-hint')) {
                         const navHint = document.createElement('span');
@@ -1835,6 +1844,9 @@ class WebController(Controller):
                     // Update pagination controls for expanded mode
                     updatePaginationControls();
 
+                    // Start refreshing dynamic data
+                    startExpandedRefresh(nodeName);
+
                 } else {
                     measurementContainer.innerHTML = originalHtml;
                     console.error('Failed to load expanded view:', result.message);
@@ -1848,6 +1860,9 @@ class WebController(Controller):
         // Collapse expanded card - restore to original state
         function collapseCard() {
             if (!isExpanded) return;
+
+            // Stop the dynamic data refresh
+            stopExpandedRefresh();
 
             const expandedCard = document.querySelector('.node-card.expanded-card');
             if (expandedCard) {
@@ -2303,10 +2318,15 @@ class WebController(Controller):
         }
 
         function updateExistingNodes(status) {
-            if (isExpanded) return;
-
+            // Update nodesData with latest info
             for (const node of status.nodes) {
                 nodesData[node.name] = node;
+            }
+
+            // Find the expanded card if we're expanded
+            let expandedCard = null;
+            if (isExpanded) {
+                expandedCard = document.querySelector('.node-card.expanded-card');
             }
 
             const startIdx = currentPage * nodesPerPage;
@@ -2314,14 +2334,30 @@ class WebController(Controller):
             const visibleNodes = allNodes.slice(startIdx, endIdx);
 
             for (const nodeName of visibleNodes) {
-                const node = nodesData[nodeName];
-                if (!node) continue;
+                // If expanded and this is not the expanded node, skip
+                if (isExpanded && expandedCard && nodeName !== expandedNodeName) {
+                    continue;
+                }
 
-                const card = document.querySelector(`.node-card[data-node-name="${nodeName}"]`);
-                if (!card) continue;
+                const node = nodesData[nodeName];
+                if (!node) {
+                    continue;
+                }
+
+                // If expanded, use the expanded card; otherwise find by selector
+                let card;
+                if (isExpanded && expandedCard && nodeName === expandedNodeName) {
+                    card = expandedCard;
+                } else {
+                    card = document.querySelector(`.node-card[data-node-name="${nodeName}"]`);
+                }
+                if (!card) {
+                    continue;
+                }
 
                 const isOnline = node.connected;
 
+                // Update classes
                 if (isOnline) {
                     card.classList.add('online');
                     card.classList.remove('offline');
@@ -2332,11 +2368,15 @@ class WebController(Controller):
                 card.classList.toggle('essential', node.essential);
                 card.classList.toggle('non-essential', !node.essential);
 
+                // Update node state text
                 const stateSpan = card.querySelector('.state-text');
                 if (stateSpan) {
                     stateSpan.textContent = `${isOnline ? '● online' : '○ offline'} - ${node.state}`;
+                } else {
+                    console.log('  WARNING: state-text not found');
                 }
 
+                // Update node-state div class
                 const nodeStateDiv = card.querySelector('.node-state');
                 if (nodeStateDiv) {
                     if (isOnline) {
@@ -2348,7 +2388,7 @@ class WebController(Controller):
                     }
                 }
 
-                // Update notification
+                // Update notification (toast)
                 const notificationContainer = card.querySelector('.notification-placeholder');
                 const existingNotification = notificationContainer?.querySelector('.notification');
 
@@ -2376,16 +2416,36 @@ class WebController(Controller):
                     existingNotification.remove();
                 }
 
+                // Update metrics (connection duration, message count, heartbeat count)
                 const durationSpan = card.querySelector('.connection-duration');
                 if (durationSpan) {
-                    durationSpan.textContent = node.connection_duration ? '📡 ' + node.connection_duration : '';
+                    const oldValue = durationSpan.textContent;
+                    const newValue = node.connection_duration ? '📡 ' + node.connection_duration : '';
+                    durationSpan.textContent = newValue;
+                } else {
+                    console.log('  WARNING: .connection-duration element not found');
                 }
-                const messageCountSpan = card.querySelector('.message-count');
-                if (messageCountSpan) messageCountSpan.textContent = node.message_count;
-                const heartbeatCountSpan = card.querySelector('.heartbeat-count');
-                if (heartbeatCountSpan) heartbeatCountSpan.textContent = node.heartbeat_count;
 
-                updateNodeMeasurements(node);
+                const messageCountSpan = card.querySelector('.message-count');
+                if (messageCountSpan) {
+                    const oldValue = messageCountSpan.textContent;
+                    messageCountSpan.textContent = node.message_count;
+                } else {
+                    console.log('  WARNING: .message-count element not found');
+                }
+
+                const heartbeatCountSpan = card.querySelector('.heartbeat-count');
+                if (heartbeatCountSpan) {
+                    const oldValue = heartbeatCountSpan.textContent;
+                    heartbeatCountSpan.textContent = node.heartbeat_count;
+                } else {
+                    console.log('  WARNING: .heartbeat-count element not found');
+                }
+
+                // Update measurements (the card's center area - only if not expanded or if it's a different node)
+                if (!isExpanded || (isExpanded && nodeName !== expandedNodeName)) {
+                    updateNodeMeasurements(node);
+                }
             }
         }
 
@@ -2484,7 +2544,7 @@ class WebController(Controller):
             const grid = document.getElementById('nodeGrid');
             if (!isExpanded && (!gridBuilt || grid.children.length === 0 || grid.children[0]?.innerText === 'Loading nodes...')) {
                 renderCurrentPage();
-            } else if (!isExpanded) {
+            } else {
                 updateExistingNodes(status);
             }
 
@@ -2538,6 +2598,93 @@ class WebController(Controller):
             statusSource = source;
         }
 
+        function startExpandedRefresh(nodeName) {
+            // Clear existing interval
+            if (expandedRefreshInterval) {
+                clearInterval(expandedRefreshInterval);
+                expandedRefreshInterval = null;
+            }
+
+            // Start new interval (update every 2 seconds)
+            expandedRefreshInterval = setInterval(async () => {
+
+                if (!isExpanded || expandedNodeName !== nodeName) {
+                    // Not expanded anymore or node changed, stop refreshing
+                    if (expandedRefreshInterval) {
+                        clearInterval(expandedRefreshInterval);
+                        expandedRefreshInterval = null;
+                    }
+                    return;
+                }
+
+                try {
+                    const response = await fetch('/api/node/data', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({node: nodeName})
+                    });
+                    const result = await response.json();
+
+                    if (result.status === 'ok' && result.data) {
+                        updateExpandedDynamicData(result.data);
+                    } else {
+                        console.error('Refresh API error:', result);
+                    }
+                } catch (e) {
+                    console.error('Error refreshing expanded data:', e);
+                }
+            }, 2000);
+        }
+
+        function updateExpandedDynamicData(nodeData) {
+            const expandedCard = document.querySelector('.node-card.expanded-card');
+            if (!expandedCard) return;
+
+            const measurementContainer = expandedCard.querySelector('.node-measurement-container');
+            if (!measurementContainer) return;
+
+            const measurement = nodeData.measurement || {};
+
+            // Only update node-specific dynamic elements
+            const dynamicElements = measurementContainer.querySelectorAll('[data-dynamic]');
+
+            dynamicElements.forEach(el => {
+                const field = el.getAttribute('data-dynamic');
+                let newValue = null;
+
+                if (field === 'value') {
+                    newValue = measurement.value !== undefined ? measurement.value : 'N/A';
+                } else if (field === 'last_update') {
+                    newValue = measurement.last_update || 'N/A';
+                } else if (field === 'water_height') {
+                    newValue = measurement.water_height !== undefined ? measurement.water_height : 'N/A';
+                } else if (field === 'level') {
+                    newValue = measurement.level !== undefined ? measurement.level : 'N/A';
+                } else if (field === 'percentage') {
+                    newValue = measurement.percentage !== undefined ? measurement.percentage.toFixed(1) : 'N/A';
+                } else if (measurement[field] !== undefined) {
+                    newValue = measurement[field];
+                }
+
+                if (newValue !== null && el.textContent != newValue) {
+                    el.textContent = newValue;
+                    // Optional: flash effect
+                    const originalBg = el.style.backgroundColor;
+                    el.style.backgroundColor = '#90ee90';
+                    setTimeout(() => {
+                        el.style.backgroundColor = originalBg;
+                    }, 200);
+                }
+            });
+        }
+
+        function stopExpandedRefresh() {
+            if (expandedRefreshInterval) {
+                clearInterval(expandedRefreshInterval);
+                expandedRefreshInterval = null;
+            }
+        }
+
         function setupLogsStream() {
             if (logsSource) logsSource.close();
             const source = new EventSource('/api/logs/stream');
@@ -2550,7 +2697,6 @@ class WebController(Controller):
             };
 
             source.addEventListener('clear', (event) => {
-                console.log('Logs cleared remotely');
                 const debugWindow = document.getElementById('debugWindow');
                 if (debugWindow) {
                     debugWindow.innerHTML = 'Logs cleared...';
@@ -2560,7 +2706,6 @@ class WebController(Controller):
             });
 
             source.addEventListener('reset', (event) => {
-                console.log('Log stream reset');
                 const debugWindow = document.getElementById('debugWindow');
                 if (debugWindow && debugWindow.innerHTML === '') {
                     debugWindow.innerHTML = 'Waiting for logs...';
