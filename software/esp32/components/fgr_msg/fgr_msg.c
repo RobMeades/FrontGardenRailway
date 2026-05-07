@@ -111,6 +111,8 @@ typedef struct {
     uint8_t ind_reference;
     fgr_msg_state_cb_t state_cb;
     void *state_cb_param;
+    fgr_msg_send_cb_t send_cb;
+    void *send_cb_param;
     void *context_rx;
     struct msg_rx_cb_list_t msg_rx_cb_list;
     context_decoder_t context_decoder;
@@ -451,6 +453,9 @@ static int32_t send_msg(uint16_t type, uint8_t error_state,
             if (err == ESP_OK) {
                 fgr_msg_print_summary(NULL, FGR_LOG_LEVEL_INFO, type, error_state, reference, length);
                 fgr_socket_channel_activity(&g_context.context_sock);
+                if (g_context.send_cb) {
+                    g_context.send_cb(g_context.send_cb_param);
+                }
             } else {
                 fgr_socket_channel_failed(&g_context.context_sock);
             }
@@ -483,6 +488,8 @@ static void clean_up()
         g_context.sock = -1;
         g_context.state_cb = NULL;
         g_context.state_cb_param = NULL;
+        g_context.send_cb = NULL;
+        g_context.send_cb_param = NULL;
 
         // In case we were in the middle of a decode
         decoder_free(&g_context.context_decoder);
@@ -768,6 +775,24 @@ void fgr_msg_send_queue_deinit()
         CONTEXT_UNLOCK(g_context_send.lock, "fgr_msg_send_queue_deinit()");
         // Don't delete the semaphore, someone might have it still
     }
+}
+
+// Set a callback to be called whenever a message is sent.
+int32_t fgr_msg_send_cb(fgr_msg_send_cb_t cb, void *cb_param)
+{
+    int32_t err = -ESP_ERR_INVALID_STATE;
+
+    if (g_context.lock) {
+
+        CONTEXT_LOCK(g_context.lock, "fgr_msg_send_cb()");
+        g_context.send_cb = cb;
+        g_context.send_cb_param = cb_param;
+        err = ESP_OK;
+        CONTEXT_UNLOCK(g_context.lock, "fgr_msg_send_cb()");
+    }
+
+    return err;
+
 }
 
 /* ----------------------------------------------------------------

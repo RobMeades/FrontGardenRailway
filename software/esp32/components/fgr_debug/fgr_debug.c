@@ -59,7 +59,7 @@ int32_t fgr_debug_init()
           err = gpio_set_direction(CONFIG_FGR_DEBUG_LED_PIN, GPIO_MODE_OUTPUT);
           if (err == ESP_OK) {
               // Flash it so that we know it can be active
-              fgr_debug_flash_led(FGR_DEBUG_LED_SHORT_MS);
+              fgr_debug_flash_led(FGR_DEBUG_LED_LONG_MS);
           }
       }
 #endif

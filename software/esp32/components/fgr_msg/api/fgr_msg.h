@@ -79,6 +79,12 @@ typedef bool (*fgr_msg_rx_cb_t)(fgr_msg_t *msg, void *param);
  */
 typedef fgr_state_t (*fgr_msg_state_cb_t)(void *param);
 
+/** Function to call to when a message is sent.
+ *
+ * @param param  cb_param as passed to fgr_msg_send_cb().
+ */
+typedef void (*fgr_msg_send_cb_t)(void *param);
+
 /* ----------------------------------------------------------------
  * FUNCTIONS: INITIALISATION/DEINITIALISATION
  * -------------------------------------------------------------- */
@@ -221,6 +227,24 @@ int32_t fgr_msg_send_queue_size();
  * fgr_msg_deinit() will call this for you.
  */
 void fgr_msg_send_queue_deinit();
+
+/** Set a callback to be called whenever a message is sent,
+ * either through this API or automagically (e.g. the
+ * heartbeat message).  Note that the callback is called
+ * in a blocking fashion after the send, so don't do much
+ * in your callback unless you are happy to delay message
+ * transmission.  Also, do not callback into this API from
+ * the callback as that will cause a deadlock.
+ *
+ * @param cb        the callback; use NULL to cancel a previous
+ *                  callback.
+ * @param cb_param  parameter that will be passed to cb()
+ *                  when it is called.
+ * @return          ESP_OK on success, else a negative value
+ *                  from esp_err_t.
+
+ */
+int32_t fgr_msg_send_cb(fgr_msg_send_cb_t cb, void *cb_param);
 
 /* ----------------------------------------------------------------
  * FUNCTIONS: RECEIVING

@@ -182,6 +182,15 @@ static bool msg_receive_cb(fgr_msg_t *msg, void *param)
     return handled;
 }
 
+// Callback for message sends.
+static void send_cb(void *param)
+{
+    (void) param;
+
+    // Indicate that we are alive
+    fgr_debug_flash_led(FGR_DEBUG_LED_SHORT_MS);
+}
+
 /* ----------------------------------------------------------------
  * STATIC FUNCTIONS: INITIALISATION/DEINITIALISATION
  * -------------------------------------------------------------- */
@@ -245,6 +254,12 @@ static int32_t init(context_t *context)
                            CONFIG_FGR_MSG_PORT,
                            CONFIG_FGR_MSG_HEARTBEAT_SECONDS,
                            state_cb, context);
+    }
+
+
+    // For debug purposes, hook-in a message send callback
+    if (err == ESP_OK) {
+        err = fgr_msg_send_cb(send_cb, context);
     }
 
     // Create a message send queue
