@@ -77,8 +77,8 @@ class LevelGaugeHandler(NodeHandler):
 
                 self.logger.info(f"Level gauge reading: {level_mm} mm from top -> {water_height} mm water ({percentage:.1f}%)")
 
-                if hasattr(self.controller, 'update_node_measurement'):
-                    self.controller.update_node_measurement(self.node.name, {
+                if hasattr(self.controller, 'update_node_custom_data'):  # ← Renamed method
+                    self.controller.update_node_custom_data(self.node.name, {  # ← Renamed method call
                         'level': level_mm,
                         'water_height': max(0, water_height),
                         'percentage': max(0, min(100, percentage)),
@@ -88,21 +88,19 @@ class LevelGaugeHandler(NodeHandler):
         return True
 
     def get_card_html(self, node_name: str, node_data: Dict[str, Any]) -> str:
-        """Return HTML snippet for the card's center area."""
-        measurement = node_data.get('measurement', {})
-        water_height = measurement.get('water_height', 'N/A')
-        percentage = measurement.get('percentage', 0)
+        custom_data = node_data.get('custom_data', {})
+        water_height = custom_data.get('water_height', 'N/A')
+        percentage = custom_data.get('percentage', 0)
 
-        # Ensure percentage is a number for the progress bar
         if isinstance(percentage, (int, float)):
             bar_width = min(100, max(0, percentage))
         else:
             bar_width = 0
 
         return f'''
-            <div class="node-measurement">
-                <div class="measurement-value" data-dynamic="water_height">{water_height} <span class="measurement-unit">mm</span></div>
-                <div class="measurement-unit">Water Level ({percentage:.1f}%)</div>
+            <div class="node-custom">
+                <div class="custom-value" data-dynamic="water_height">{water_height} <span class="custom-unit">mm</span></div>
+                <div class="custom-unit">Water Level ({percentage:.1f}%)</div>
                 <div style="margin-top: 6px; background: #ddd; border-radius: 4px; height: 6px; overflow: hidden;">
                     <div style="background: #2196f3; width: {bar_width}%; height: 6px; border-radius: 4px; transition: width 0.3s ease;"></div>
                 </div>
@@ -111,10 +109,10 @@ class LevelGaugeHandler(NodeHandler):
 
     def get_expanded_html(self, node_name: str, node_data: Dict[str, Any]) -> str:
         """Return HTML for the node-specific section of expanded view"""
-        measurement = node_data.get('measurement', {})
-        water_height = measurement.get('water_height', 'N/A')
-        level = measurement.get('level', 'N/A')
-        percentage = measurement.get('percentage', 0)
+        custom_data = node_data.get('custom_data', {})
+        water_height = custom_data.get('water_height', 'N/A')
+        level = custom_data.get('level', 'N/A')
+        percentage = custom_data.get('percentage', 0)
 
         # Ensure percentage is a number for the progress bar
         if isinstance(percentage, (int, float)):

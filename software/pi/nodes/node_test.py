@@ -97,8 +97,8 @@ class TestHandler(NodeHandler):
             value = msg.contents[0]
             self.logger.info(f"Test node {self.node.name} sent test value: {value}")
 
-            if hasattr(self.controller, 'update_node_measurement'):
-                self.controller.update_node_measurement(self.node.name, {
+            if hasattr(self.controller, 'update_node_custom_data'):
+                self.controller.update_node_custom_data(self.node.name, {
                     'value': value,
                     'type': 'test',
                     'last_update': time.time()
@@ -118,9 +118,9 @@ class TestHandler(NodeHandler):
                     self._counter += 1
                 current_time = time.time()
 
-                # Update measurement with incrementing counter
-                if hasattr(self.controller, 'update_node_measurement'):
-                    self.controller.update_node_measurement(self.node.name, {
+                # Update custom data with incrementing counter
+                if hasattr(self.controller, 'update_node_custom_data'):
+                    self.controller.update_node_custom_data(self.node.name, {
                         'value': self._counter,
                         'counter': self._counter,
                         'last_update': current_time,
@@ -135,15 +135,14 @@ class TestHandler(NodeHandler):
         self._generator_thread.start()
 
     def get_card_html(self, node_name: str, node_data: Dict[str, Any]) -> str:
-        """Return HTML for the card's center area (node-specific only)"""
-        measurement = node_data.get('measurement', {})
-        value = measurement.get('value', 'N/A')
-        counter = measurement.get('counter', 'N/A')
+        custom_data = node_data.get('custom_data', {})
+        value = custom_data.get('value', 'N/A')
+        counter = custom_data.get('counter', 'N/A')
 
         return f'''
-            <div class="node-measurement">
-                <div class="measurement-value" data-dynamic="value">{value}</div>
-                <div class="measurement-unit">Current Value</div>
+            <div class="node-custom">
+                <div class="custom-value" data-dynamic="value">{value}</div>
+                <div class="custom-unit">Current Value</div>
                 <div style="margin-top: 8px; font-size: 10px; color: #666;">
                     Counter: <span data-dynamic="counter">{counter}</span>
                 </div>
@@ -152,10 +151,10 @@ class TestHandler(NodeHandler):
 
     def get_expanded_html(self, node_name: str, node_data: Dict[str, Any]) -> str:
         """Return HTML for the expanded view (node-specific content only)"""
-        measurement = node_data.get('measurement', {})
-        value = measurement.get('value', 'N/A')
-        counter = measurement.get('counter', 'N/A')
-        uptime = measurement.get('uptime', 0)
+        custom_data = node_data.get('custom_data', {})
+        value = custom_data.get('value', 'N/A')
+        counter = custom_data.get('counter', 'N/A')
+        uptime = custom_data.get('uptime', 0)
 
         # Format uptime
         if isinstance(uptime, (int, float)):
@@ -176,7 +175,7 @@ class TestHandler(NodeHandler):
                 <h4>📊 Test Node Dynamic Data</h4>
                 <p>Current Value: <strong><span data-dynamic="value">{value}</span></strong></p>
                 <p>Incrementing Counter: <strong><span data-dynamic="counter">{counter}</span></strong></p>
-                <p>Last Update: <span data-dynamic="last_update">{measurement.get('last_update', 'N/A')}</span></p>
+                <p>Last Update: <span data-dynamic="last_update">{custom_data.get('last_update', 'N/A')}</span></p>
                 <p>Data Generation Uptime: {uptime_str}</p>
             </div>
             <div class="expanded-section">

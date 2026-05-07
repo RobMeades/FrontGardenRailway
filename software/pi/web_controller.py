@@ -151,7 +151,7 @@ class WebController(Controller):
         self.sse_clients = set()
 
         # Store node-specific data for web display
-        self.node_measurements: Dict[str, Dict[str, Any]] = {}
+        self.node_custom_data: Dict[str, Dict[str, Any]] = {}
 
         # Store recent message notifications
         self.node_notifications: Dict[str, Dict[str, Any]] = {}
@@ -305,10 +305,10 @@ class WebController(Controller):
         except Exception as e:
             self._log_message(f"Journal reader error: {e}")
 
-    def update_node_measurement(self, node_name: str, measurement: Dict[str, Any]):
-        """Store a measurement from a node for web display and update card HTML"""
-        self.node_measurements[node_name] = {
-            **measurement,
+    def update_node_custom_data(self, node_name: str, custom_data: Dict[str, Any]):
+        """Store custom data from a node for web display and update card HTML"""
+        self.node_custom_data[node_name] = {
+            **custom_data,
             'last_update': datetime.now().isoformat()
         }
 
@@ -322,7 +322,7 @@ class WebController(Controller):
                     'ip': node.ip,
                     'state': node.state.name if hasattr(node.state, 'name') else str(node.state),
                     'connected': node.sock is not None,
-                    'measurement': measurement,
+                    'custom_data': custom_data,
                     'message_count': node.message_count,
                     'heartbeat_count': node.heartbeat_count
                 }
@@ -424,7 +424,7 @@ class WebController(Controller):
             if not node:
                 continue
 
-            measurement = self.node_measurements.get(name, {})
+            custom_data = self.node_custom_data.get(name, {})
             notification = self.node_notifications.get(name)
             custom_html = self.node_card_html.get(name, '')
 
@@ -477,7 +477,7 @@ class WebController(Controller):
                 'connection_duration': connection_duration,
                 'message_count': node.message_count,
                 'heartbeat_count': node.heartbeat_count,
-                'measurement': measurement,
+                'custom_data': custom_data,
                 'notification': notification,
                 'custom_html': custom_html  # Include custom HTML for the card
             })
@@ -548,10 +548,17 @@ class WebController(Controller):
         try:
             while self.web_running:
                 status = self._get_system_status()
-                await response.write(f"data: {json.dumps(status)}\n\n".encode())
-                await asyncio.sleep(2)
-        except Exception:
+                try:
+                    await response.write(f"data: {json.dumps(status)}\n\n".encode())
+                    await asyncio.sleep(2)
+                except (ConnectionResetError, BrokenPipeError, RuntimeError):
+                    # Client disconnected
+                    break
+        except (ConnectionResetError, BrokenPipeError, RuntimeError):
+            # Client disconnected - normal
             pass
+        except Exception as e:
+            self._log_message(f"Status stream error: {e}")
         finally:
             self.sse_clients.discard(response)
 
@@ -583,7 +590,11 @@ class WebController(Controller):
         last_version = -1
 
         # Send a reset signal
-        await response.write(f"event: reset\ndata: reset\n\n".encode())
+        try:
+            await response.write(f"event: reset\ndata: reset\n\n".encode())
+        except (ConnectionResetError, BrokenPipeError, RuntimeError):
+            # Client disconnected before we even started
+            return response
 
         try:
             while self.web_running:
@@ -597,9 +608,16 @@ class WebController(Controller):
                             last_version = version
 
                     if new_logs:
-                        await response.write(f"data: {json.dumps(new_logs)}\n\n".encode())
+                        try:
+                            await response.write(f"data: {json.dumps(new_logs)}\n\n".encode())
+                        except (ConnectionResetError, BrokenPipeError, RuntimeError):
+                            # Client disconnected - exit cleanly
+                            break
 
                 await asyncio.sleep(0.5)
+        except (ConnectionResetError, BrokenPipeError, RuntimeError):
+            # Client disconnected - normal, don't log
+            pass
         except Exception as e:
             self._log_message(f"Log stream error: {e}")
 
@@ -802,7 +820,7 @@ class WebController(Controller):
             'ip': node.ip,
             'state': node.state.name if hasattr(node.state, 'name') else str(node.state),
             'connected': node.sock is not None,
-            'measurement': self.node_measurements.get(node_name, {}),
+            'custom_data': self.node_custom_data.get(node_name, {}),
             'message_count': node.message_count,
             'heartbeat_count': node.heartbeat_count,
             'connection_duration': connection_duration
@@ -826,7 +844,7 @@ class WebController(Controller):
                 # Prepare minimal node data
                 node_data = {
                     'name': node_name,
-                    'measurement': self.node_measurements.get(node_name, {}),
+                    'custom_data': self.node_custom_data.get(node_name, {}),
                 }
                 node_specific_html = node.handler.get_expanded_html(node_name, node_data)
             except Exception as e:
@@ -836,7 +854,7 @@ class WebController(Controller):
             node_specific_html = f'''
                 <div class="expanded-section">
                     <h4>Node Data</h4>
-                    <pre>{json.dumps(self.node_measurements.get(node_name, {}), indent=2)}</pre>
+                    <pre>{json.dumps(self.node_custom_data.get(node_name, {}), indent=2)}</pre>
                 </div>
             '''
 
@@ -871,6 +889,9 @@ class WebController(Controller):
         self.web_app.router.add_post('/api/node/data', self.handle_api_node_data)
         self.web_app.router.add_post('/api/node/html', self.handle_api_node_html)
 
+        # Event to signal the web thread to stop
+        self.web_stop_event = threading.Event()
+
         async def start_server():
             self.web_runner = web.AppRunner(self.web_app)
             await self.web_runner.setup()
@@ -878,14 +899,18 @@ class WebController(Controller):
             await site.start()
             self.web_running = True
             print(f"Web interface running at http://0.0.0.0:{self.http_port}")
-            while self.web_running:
-                await asyncio.sleep(1)
+            # Wait for stop signal
+            while self.web_running and not self.web_stop_event.is_set():
+                await asyncio.sleep(0.5)
+            # Cleanup in the same loop
+            await self.web_runner.cleanup()
+            print("Web server stopped")
 
         def run_loop():
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             loop.run_until_complete(start_server())
-            loop.run_forever()
+            loop.close()
 
         self.web_thread = threading.Thread(target=run_loop, daemon=True)
         self.web_thread.start()
@@ -893,11 +918,12 @@ class WebController(Controller):
     def stop_web(self):
         """Stop the web server"""
         self.web_running = False
-        if self.web_runner:
-            def cleanup():
-                loop = asyncio.new_event_loop()
-                loop.run_until_complete(self.web_runner.cleanup())
-            threading.Thread(target=cleanup, daemon=True).start()
+        # Signal the web thread to stop
+        if hasattr(self, 'web_stop_event'):
+            self.web_stop_event.set()
+        # Wait for the web thread to finish (with timeout)
+        if hasattr(self, 'web_thread') and self.web_thread.is_alive():
+            self.web_thread.join(timeout=3.0)
 
     def start(self) -> bool:
         """Start the controller and web server"""
@@ -1226,8 +1252,8 @@ class WebController(Controller):
             justify-content: space-between;
         }
 
-        /* Measurement area - gets maximum space, supports custom HTML */
-        .node-measurement-container {
+        /* Custom area - gets maximum space, supports custom HTML */
+        .node-custom-container {
             flex-grow: 1;
             margin: 4px 0;
             overflow-y: auto;
@@ -1238,8 +1264,8 @@ class WebController(Controller):
             user-select: text;
         }
 
-        /* Default measurement styling (used when no custom HTML provided) */
-        .node-measurement {
+        /* Default custom styling (used when no custom HTML provided) */
+        .node-custom {
             background: #e3f2fd;
             border-radius: 4px;
             padding: 6px;
@@ -1249,13 +1275,13 @@ class WebController(Controller):
             flex-direction: column;
             justify-content: center;
         }
-        .measurement-value {
+        .custom-value {
             font-size: 20px;
             font-weight: bold;
             color: #1976d2;
             line-height: 1.2;
         }
-        .measurement-unit {
+        .custom-unit {
             font-size: 9px;
             color: #666;
             margin-top: 2px;
@@ -1652,10 +1678,10 @@ class WebController(Controller):
                 // Swap to new node without changing grid layout
                 const currentCard = document.querySelector('.node-card.expanded-card');
                 if (currentCard) {
-                    const measurementContainer = currentCard.querySelector('.node-measurement-container');
+                    const customContainer = currentCard.querySelector('.node-custom-container');
 
                     // Show loading indicator
-                    measurementContainer.innerHTML = '<div style="text-align:center; padding:20px;">Loading expanded view for ' + nodeName + '...</div>';
+                    customContainer.innerHTML = '<div style="text-align:center; padding:20px;">Loading expanded view for ' + nodeName + '...</div>';
 
                     try {
                         const response = await fetch('/api/node/html', {
@@ -1666,10 +1692,10 @@ class WebController(Controller):
                         const result = await response.json();
 
                         if (result.status === 'ok' && result.html) {
-                            measurementContainer.innerHTML = result.html;
+                            customContainer.innerHTML = result.html;
 
                             // Add collapse button handler
-                            const collapseBtn = measurementContainer.querySelector('.collapse-btn');
+                            const collapseBtn = customContainer.querySelector('.collapse-btn');
                             if (collapseBtn) {
                                 collapseBtn.onclick = (e) => {
                                     e.stopPropagation();
@@ -1677,7 +1703,7 @@ class WebController(Controller):
                                 };
                             } else {
                                 // If no collapse button found, add one to the header
-                                const expandedHeader = measurementContainer.querySelector('.expanded-header');
+                                const expandedHeader = customContainer.querySelector('.expanded-header');
                                 if (expandedHeader && !expandedHeader.querySelector('.collapse-btn')) {
                                     const missingCollapseBtn = document.createElement('button');
                                     missingCollapseBtn.className = 'collapse-btn';
@@ -1691,8 +1717,8 @@ class WebController(Controller):
                             }
 
                             // Add navigation hint if not present
-                            const expandedHeader = measurementContainer.querySelector('.expanded-header h3');
-                            if (expandedHeader && !measurementContainer.querySelector('.expanded-nav-hint')) {
+                            const expandedHeader = customContainer.querySelector('.expanded-header h3');
+                            if (expandedHeader && !customContainer.querySelector('.expanded-nav-hint')) {
                                 const navHint = document.createElement('span');
                                 navHint.className = 'expanded-nav-hint';
                                 navHint.textContent = ' ← → use arrow keys or page buttons';
@@ -1715,7 +1741,7 @@ class WebController(Controller):
 
                         } else {
                             console.error('Invalid API response:', result);
-                            measurementContainer.innerHTML = `
+                            customContainer.innerHTML = `
                                 <div class="expanded-node">
                                     <div class="expanded-header">
                                         <h3>${nodeName}</h3>
@@ -1730,7 +1756,7 @@ class WebController(Controller):
                                     </div>
                                 </div>
                             `;
-                            const collapseBtn = measurementContainer.querySelector('.collapse-btn');
+                            const collapseBtn = customContainer.querySelector('.collapse-btn');
                             if (collapseBtn) {
                                 collapseBtn.onclick = (e) => {
                                     e.stopPropagation();
@@ -1743,7 +1769,7 @@ class WebController(Controller):
                         }
                     } catch (e) {
                         console.error('Error loading expanded view:', e);
-                        measurementContainer.innerHTML = `
+                        customContainer.innerHTML = `
                             <div class="expanded-node">
                                 <div class="expanded-header">
                                     <h3>${nodeName}</h3>
@@ -1758,7 +1784,7 @@ class WebController(Controller):
                                 </div>
                             </div>
                         `;
-                        const collapseBtn = measurementContainer.querySelector('.collapse-btn');
+                        const collapseBtn = customContainer.querySelector('.collapse-btn');
                         if (collapseBtn) {
                             collapseBtn.onclick = (e) => {
                                 e.stopPropagation();
@@ -1776,11 +1802,11 @@ class WebController(Controller):
                 return;
             }
 
-            const measurementContainer = card.querySelector('.node-measurement-container');
-            const originalHtml = measurementContainer.innerHTML;
+            const customContainer = card.querySelector('.node-custom-container');
+            const originalHtml = customContainer.innerHTML;
             card.setAttribute('data-original-html', originalHtml);
 
-            measurementContainer.innerHTML = '<div style="text-align:center; padding:20px;">Loading expanded view...</div>';
+            customContainer.innerHTML = '<div style="text-align:center; padding:20px;">Loading expanded view...</div>';
 
             try {
                 const response = await fetch('/api/node/html', {
@@ -1791,10 +1817,10 @@ class WebController(Controller):
                 const result = await response.json();
 
                 if (result.status === 'ok' && result.html) {
-                    measurementContainer.innerHTML = result.html;
+                    customContainer.innerHTML = result.html;
 
                     // Add collapse button handler
-                    const collapseBtn = measurementContainer.querySelector('.collapse-btn');
+                    const collapseBtn = customContainer.querySelector('.collapse-btn');
                     if (collapseBtn) {
                         collapseBtn.onclick = (e) => {
                             e.stopPropagation();
@@ -1802,7 +1828,7 @@ class WebController(Controller):
                         };
                     } else {
                         // If no collapse button found, add one to the header
-                        const expandedHeader = measurementContainer.querySelector('.expanded-header');
+                        const expandedHeader = customContainer.querySelector('.expanded-header');
                         if (expandedHeader && !expandedHeader.querySelector('.collapse-btn')) {
                             const missingCollapseBtn = document.createElement('button');
                             missingCollapseBtn.className = 'collapse-btn';
@@ -1816,8 +1842,8 @@ class WebController(Controller):
                     }
 
                     // Add navigation hint if not present
-                    const expandedHeader = measurementContainer.querySelector('.expanded-header h3');
-                    if (expandedHeader && !measurementContainer.querySelector('.expanded-nav-hint')) {
+                    const expandedHeader = customContainer.querySelector('.expanded-header h3');
+                    if (expandedHeader && !customContainer.querySelector('.expanded-nav-hint')) {
                         const navHint = document.createElement('span');
                         navHint.className = 'expanded-nav-hint';
                         navHint.textContent = ' ← → use arrow keys or page buttons';
@@ -1848,11 +1874,11 @@ class WebController(Controller):
                     startExpandedRefresh(nodeName);
 
                 } else {
-                    measurementContainer.innerHTML = originalHtml;
+                    customContainer.innerHTML = originalHtml;
                     console.error('Failed to load expanded view:', result.message);
                 }
             } catch (e) {
-                measurementContainer.innerHTML = originalHtml;
+                customContainer.innerHTML = originalHtml;
                 console.error('Error loading expanded view:', e);
             }
         }
@@ -1868,10 +1894,10 @@ class WebController(Controller):
             if (expandedCard) {
                 const originalHtml = expandedCard.getAttribute('data-original-html');
 
-                // Restore the original measurement container HTML
-                const measurementContainer = expandedCard.querySelector('.node-measurement-container');
-                if (measurementContainer && originalHtml) {
-                    measurementContainer.innerHTML = originalHtml;
+                // Restore the original custom data container HTML
+                const customContainer = expandedCard.querySelector('.node-custom-container');
+                if (customContainer && originalHtml) {
+                    customContainer.innerHTML = originalHtml;
                 }
 
                 // Remove expanded class
@@ -2262,8 +2288,8 @@ class WebController(Controller):
                             </div>
                         </div>
 
-                        <div class="node-measurement-container">
-                            ${customHtml || '<div class="node-measurement"><div class="measurement-value">—</div><div class="measurement-unit">No data</div></div>'}
+                        <div class="node-custom-container">
+                            ${customHtml || '<div class="node-custom"><div class="custom-value">—</div><div class="custom-unit">No data</div></div>'}
                         </div>
 
                         <div class="node-footer">
@@ -2302,7 +2328,7 @@ class WebController(Controller):
             grid.innerHTML = html;
 
             for (const nodeName of pageNodes) {
-                updateNodeMeasurements(nodesData[nodeName]);
+                updateNodeCustomData(nodesData[nodeName]);
             }
 
             document.querySelectorAll('.log-level-select').forEach(select => {
@@ -2442,21 +2468,21 @@ class WebController(Controller):
                     console.log('  WARNING: .heartbeat-count element not found');
                 }
 
-                // Update measurements (the card's center area - only if not expanded or if it's a different node)
+                // Update custom data (the card's center area - only if not expanded or if it's a different node)
                 if (!isExpanded || (isExpanded && nodeName !== expandedNodeName)) {
-                    updateNodeMeasurements(node);
+                    updateNodeCustomData(node);
                 }
             }
         }
 
-        function updateNodeMeasurements(node) {
+        function updateNodeCustomData(node) {
             const card = document.querySelector(`.node-card[data-node-name="${node.name}"]`);
             if (!card) return;
 
             // Update custom HTML if provided
-            const measurementContainer = card.querySelector('.node-measurement-container');
-            if (measurementContainer && node.custom_html && !isExpanded) {
-                measurementContainer.innerHTML = node.custom_html;
+            const customContainer = card.querySelector('.node-custom-container');
+            if (customContainer && node.custom_html && !isExpanded) {
+                customContainer.innerHTML = node.custom_html;
             }
         }
 
@@ -2640,30 +2666,30 @@ class WebController(Controller):
             const expandedCard = document.querySelector('.node-card.expanded-card');
             if (!expandedCard) return;
 
-            const measurementContainer = expandedCard.querySelector('.node-measurement-container');
-            if (!measurementContainer) return;
+            const customContainer = expandedCard.querySelector('.node-custom-container');
+            if (!customContainer) return;
 
-            const measurement = nodeData.measurement || {};
+            const customData = nodeData.custom_data || {};
 
             // Only update node-specific dynamic elements
-            const dynamicElements = measurementContainer.querySelectorAll('[data-dynamic]');
+            const dynamicElements = customContainer.querySelectorAll('[data-dynamic]');
 
             dynamicElements.forEach(el => {
                 const field = el.getAttribute('data-dynamic');
                 let newValue = null;
 
                 if (field === 'value') {
-                    newValue = measurement.value !== undefined ? measurement.value : 'N/A';
+                    newValue = customData.value !== undefined ? customData.value : 'N/A';
                 } else if (field === 'last_update') {
-                    newValue = measurement.last_update || 'N/A';
+                    newValue = customData.last_update || 'N/A';
                 } else if (field === 'water_height') {
-                    newValue = measurement.water_height !== undefined ? measurement.water_height : 'N/A';
+                    newValue = customData.water_height !== undefined ? customData.water_height : 'N/A';
                 } else if (field === 'level') {
-                    newValue = measurement.level !== undefined ? measurement.level : 'N/A';
+                    newValue = customData.level !== undefined ? customData.level : 'N/A';
                 } else if (field === 'percentage') {
-                    newValue = measurement.percentage !== undefined ? measurement.percentage.toFixed(1) : 'N/A';
-                } else if (measurement[field] !== undefined) {
-                    newValue = measurement[field];
+                    newValue = customData.percentage !== undefined ? customData.percentage.toFixed(1) : 'N/A';
+                } else if (customData[field] !== undefined) {
+                    newValue = customData[field];
                 }
 
                 if (newValue !== null && el.textContent != newValue) {
