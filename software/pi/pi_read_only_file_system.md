@@ -103,7 +103,9 @@ All credit goes to Chris Dzombak and those who helped him compile the guide.  Th
   sudo apt install ntpsec
   ```
 
-- Edit `sudo nano /etc/ntpsec/ntp.conf` and put the `driftfile` in `/var/tmp/ntp.drift` (which we will put into RAM later).
+- Edit `sudo nano /etc/ntpsec/ntp.conf` and
+  - put the `driftfile` in `/var/tmp/ntp.drift` (which we will put into RAM later),
+  - add `tinker panic 0`: NTP refuses to accept large time updates from an NTP server, which is a bit crap if your Pi has just woken up from nowhere; this tells NTP to just darned well trust the NTP server.
 
 - Enable `ntp` with:
 
@@ -117,6 +119,26 @@ All credit goes to Chris Dzombak and those who helped him compile the guide.  Th
   ```
 
   Those will be the only lines in that file.
+
+- The above isn't always _quite_ enough to make time work, though: if there ends up being a large time offset (e.g. from 1970) `ntpsec` still won't correct it, for that we need to run `ntpdate` a once-shot time straightener, which we can do at boot by creating a service with `sudo nano /etc/systemd/system/ntpdate.service` and putting in it:
+
+  ```
+  [Unit]
+  Description=Set system time via ntpdate before NTP starts
+  Before=ntpsec.service
+  Wants=network-online.target
+  After=network-online.target
+
+  [Service]
+  Type=oneshot
+  #  Update time, one shot, to a known good server (as of 18th March 2025 the IP address of 0.uk.pool.ntp.org was 178.62.68.79)
+  ExecStart=/usr/sbin/ntpdate -u 178.62.68.79
+
+  [Install]
+  WantedBy=multi-user.target
+  ```
+
+  ...then `sudo systemctl enable ntpdate.service` to enable it for next boot.
 
 - In the next step we will move `resolv.conf` to `/var/run`, which will allow NetworkManager to update it when needed, but means it will be deleted every time the system shuts down. By default, though, NetworkManager won’t touch `/etc/resolv.conf` if it is a symlink.  To allow NetworkManager to recreate `resolv.conf` when the system restarts, `sudo nano /etc/NetworkManager/NetworkManager.conf` and add `rc-manager=file` under the [main] section, e.g.:
 
