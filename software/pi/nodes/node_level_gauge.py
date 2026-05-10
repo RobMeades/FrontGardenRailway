@@ -24,11 +24,32 @@ that the Controller updates.
 
 import json
 from typing import Dict, Any
+import sys
+from pathlib import Path
 
 # NodeHandler and FGR protocol are injected by the controller
+# Add protocol directory for IDE type checking
+PROTOCOL_DIR = Path(__file__).parent.parent.parent / "protocol"
+if str(PROTOCOL_DIR) not in sys.path:
+    sys.path.insert(0, str(PROTOCOL_DIR))
+
+try:
+    import fgr_protocol as fgr
+except ImportError:
+    # Will be injected by controller at runtime
+    pass
+
+try:
+    from controller import NodeHandler
+except ImportError:
+    # Will be injected by controller at runtime
+    pass
+
+# Reporting interval in seconds
+REPORTING_INTERVAL_SECONDS = 60
 
 # Reservoir depth constant (mm from top to full)
-RESERVOIR_DEPTH = 1000
+RESERVOIR_DEPTH_MM = 1000
 
 class LevelGaugeHandler(NodeHandler):
     """
@@ -40,7 +61,7 @@ class LevelGaugeHandler(NodeHandler):
         super().__init__(*args, **kwargs)
 
         try:
-            # Nothing to initialise
+            self.reporting_interval_seconds = -1
             self._log_init_exit()
         except Exception as e:
             self._log_init_error(e)
@@ -54,11 +75,34 @@ class LevelGaugeHandler(NodeHandler):
 
     def on_needs_cfg(self, msg: fgr.FGRMsg):
         """Send level-gauge-specific configuration"""
-        self.logger.info(f"Node {self.node.name} needs configuration, sending level gauge config")
+        self.logger.info(f"Node {self.node.name} needs configuration, sending level gauge cfg")
 
-        # Example: configure reporting interval and calibration
-        config_data = b'\x3C'  # 60 seconds reporting interval
-        self.send_response(msg.subtype, msg.reference, config_data)
+        # Send body with a uint32_t containing the measurement reporting interval in seconds
+        contents = REPORTING_INTERVAL_SECONDS.to_bytes(4, 'big')  # network byte order
+        self.send_response(msg.subtype, msg.reference, contents)
+
+    def on_indication(self, msg: fgr.FGRMsg) -> bool:
+        """
+        Observe indications in order to capture the measurement
+        reporting configuration from an FGR_IND_RSP_START_IND
+        """
+        self.logger.debug(f"LevelGaugeHandler on_indication() called")
+
+        # Let parent handle standard protocol and update state
+        is_standard = super().on_indication(msg)
+
+        self.logger.debug(f"In LevelGaugeHandler, msg subtype=0x{msg.subtype:03X}")
+
+        if msg.subtype == fgr.FGRIndRsp.FGR_IND_RSP_START:
+            if len(msg.contents) >= 4:
+                self.reporting_interval_seconds = int.from_bytes(msg.contents[:4], 'big')
+                self.logger.info(f"Node {self.node.name} reporting interval: {self.reporting_interval_seconds} seconds")
+            else:
+                self.logger.info(f"WARNING node {self.node.name} observed FGR_IND_RSP_START_IND"
+                                 f" with unknown message contents: {msg.contents}")
+
+        # Return what super() would have returned
+        return is_standard
 
     def on_node_specific_indication(self, msg: fgr.FGRMsg) -> bool:
         """
@@ -72,20 +116,23 @@ class LevelGaugeHandler(NodeHandler):
             if len(msg.contents) >= 2:
                 # Level reading in contents (e.g., 2 bytes)
                 level_mm = int.from_bytes(msg.contents[:2], 'big')
-                water_height = RESERVOIR_DEPTH - level_mm
-                percentage = (water_height / RESERVOIR_DEPTH) * 100
+                water_height = RESERVOIR_DEPTH_MM - level_mm
+                percentage = (water_height / RESERVOIR_DEPTH_MM) * 100
 
                 self.logger.info(f"Level gauge reading: {level_mm} mm from top -> {water_height} mm water ({percentage:.1f}%)")
 
-                if hasattr(self.controller, 'update_node_custom_data'):  # ← Renamed method
-                    self.controller.update_node_custom_data(self.node.name, {  # ← Renamed method call
+                if hasattr(self.controller, 'update_node_custom_data'):
+                    self.controller.update_node_custom_data(self.node.name, {
                         'level': level_mm,
                         'water_height': max(0, water_height),
                         'percentage': max(0, min(100, percentage)),
                         'type': 'level_gauge'
                     })
+            return True
 
-        return True
+        # Unknown node-specific indication
+        self.logger.warning(f"Unknown node-specific indication: 0x{ind_type:03X}")
+        return False
 
     def get_card_html(self, node_name: str, node_data: Dict[str, Any]) -> str:
         custom_data = node_data.get('custom_data', {})

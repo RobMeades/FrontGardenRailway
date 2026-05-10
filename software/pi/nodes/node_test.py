@@ -26,8 +26,26 @@ import json
 import time
 import threading
 from typing import Dict, Any
+import sys
+from pathlib import Path
 
 # NodeHandler and FGR protocol are injected by the controller
+# Add protocol directory for IDE type checking
+PROTOCOL_DIR = Path(__file__).parent.parent.parent / "protocol"
+if str(PROTOCOL_DIR) not in sys.path:
+    sys.path.insert(0, str(PROTOCOL_DIR))
+
+try:
+    import fgr_protocol as fgr
+except ImportError:
+    # Will be injected by controller at runtime
+    pass
+
+try:
+    from controller import NodeHandler
+except ImportError:
+    # Will be injected by controller at runtime
+    pass
 
 class TestHandler(NodeHandler):
     """

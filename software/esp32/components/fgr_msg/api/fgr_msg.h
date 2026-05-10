@@ -85,6 +85,21 @@ typedef fgr_state_t (*fgr_msg_state_cb_t)(void *param);
  */
 typedef void (*fgr_msg_send_cb_t)(void *param);
 
+/** Function to populate a buffer with what will be
+ * the contents of an FGR_REQ_CNF_PING response to
+ * the controller.
+ *
+ * @param buffer a pointer to the buffer to populate.
+ * @param length the amount of storage at buffer, will
+ *               normally be FGR_MSG_CONTENTS_MAX_LEN.
+ * @param param  cb_param as passed to
+                 fgr_msg_send_ping_body_cb().
+ * @return       the amount of data coped into buffer.
+ */
+typedef uint32_t (*fgr_msg_send_ping_body_cb_t)(uint8_t *buffer,
+                                                uint32_t length,
+                                                void *param);
+
 /* ----------------------------------------------------------------
  * FUNCTIONS: INITIALISATION/DEINITIALISATION
  * -------------------------------------------------------------- */
@@ -104,11 +119,17 @@ typedef void (*fgr_msg_send_cb_t)(void *param);
  *                          way of detecting closure of a socket
  *                          by the far end.
  * @param cb                a pointer to a function that will return
- *                          the state of the node to put in any indication
- *                          messages sent with fgr_msg_send_ind() and
- *                          also any heartbeat messages; may be NULL,
- *                          in which case FGR_STATE_NOT_POPULATED
- *                          will be used.
+ *                          the state of the node.  This will be called
+ *                          (a) to populate any indication messages sent
+ *                          with fgr_msg_send_ind() or any heartbeat
+ *                          messages sent automatically and (b) to
+ *                          populate a uint8_t in the body of an
+ *                          automatic ping confirmation message;
+ *                          may be NULL, in which case
+ *                          FGR_STATE_NOT_POPULATED will be used in
+ *                          the indication messages and the body
+ *                          of the ping confirmation message will
+ *                          be empty.
  * @param cb_param          parameter that will be passed to cb()
  *                          when it is called.
  * @return                  ESP_OK on success, else a negative value
@@ -228,13 +249,25 @@ int32_t fgr_msg_send_queue_size();
  */
 void fgr_msg_send_queue_deinit();
 
-/** Set a callback to be called whenever a message is sent,
- * either through this API or automagically (e.g. the
- * heartbeat message).  Note that the callback is called
- * in a blocking fashion after the send, so don't do much
- * in your callback unless you are happy to delay message
- * transmission.  Also, do not callback into this API from
- * the callback as that will cause a deadlock.
+/** Set a callback to be called whenever a message is
+ * successfully sent, either through this API or
+ * automagically (e.g. the heartbeat message).  Note that
+ * the callback is called in a blocking fashion after the
+ * send, so don't do much in your callback unless you are
+ * happy to delay message transmission.
+ *
+ * IMPORTANT: do not call into the msg API from the callback
+ * as that will cause a deadlock.
+ *
+ * Note: there is no need to respond to FGR_REQ_CNF_PING
+ * messages in your callback, those are automatically
+ * responded to.  Instead call fgr_msg_send_ping_body_cb()
+ * to supply a callback that will populate the body of the
+ * ping confirmation if you wish.  If you DO handle
+ * FGR_REQ_CNF_PING in your callback and return True to
+ * indicate that the message has been handled that will
+ * have the effect of cancelling the automatic ping
+ * confirmation.
  *
  * @param cb        the callback; use NULL to cancel a previous
  *                  callback.
@@ -242,9 +275,31 @@ void fgr_msg_send_queue_deinit();
  *                  when it is called.
  * @return          ESP_OK on success, else a negative value
  *                  from esp_err_t.
-
  */
 int32_t fgr_msg_send_cb(fgr_msg_send_cb_t cb, void *cb_param);
+
+/** This library will automatically confirm a FGR_REQ_CNF_PING
+ * message: with this function you may set a callback that
+ * can supply the optional body to that confirmation.  If you
+ * do not set a callback, the body of the FGR_REQ_CNF_PING
+ * message that is automatically sent will be populated with a
+ * uint8_t containing the current state as populated by the
+ * callback passed to fgr_msg_init() (if set). If no callback
+ * was passed to fgr_msg_init() the body of the
+ * FGR_REQ_CNF_PING will be empty.
+ *
+ * IMPORTANT: do not call into the msg API from the callback as
+ * that will cause a deadlock.
+ *
+ * @param cb        the callback; use NULL to cancel a previous
+ *                  callback.
+ * @param cb_param  parameter that will be passed to cb()
+ *                  when it is called.
+ * @return          ESP_OK on success, else a negative value
+ *                  from esp_err_t.
+ */
+int32_t fgr_msg_send_ping_body_cb(fgr_msg_send_ping_body_cb_t cb,
+                                  void *cb_param);
 
 /* ----------------------------------------------------------------
  * FUNCTIONS: RECEIVING
@@ -272,7 +327,7 @@ int32_t fgr_msg_receive_start();
  * to be called.
  *
  * IMPORTANT: a message handler should not call back into
- * this API (aside from the debug print messages at the bottom)
+ * the msg API (aside from the debug print messages at the bottom)
  * since that could cause a deadlock.  Any calls to, for
  * instance, fgr_msg_send_cnf() or fgr_msg_send_ind(), should
  * be queued for execution after the handler has returned;

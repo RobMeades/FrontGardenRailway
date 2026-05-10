@@ -504,6 +504,7 @@ CONFIG_PARTITION_TABLE_MD5=y
 # FGR Debug Configuration
 #
 CONFIG_FGR_DEBUG_LED_PIN=8
+CONFIG_FGR_DEBUG_LED_WS2812_PIN=21
 # end of FGR Debug Configuration
 
 #

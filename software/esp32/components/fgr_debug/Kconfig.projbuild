@@ -2,8 +2,21 @@ menu "FGR Debug Configuration"
 
     config FGR_DEBUG_LED_PIN
         int "Debug LED pin"
-        default 8
+        default 21
         help
-            The pin where a debug LED is connected
+            The pin where a debug LED is connected: on an ESP32 C3 super mini board
+            a single colour debug LED is usually on pin 8 whereas on an ESP32 S3
+            super mini board the WS2812 RGB LED is usually on pin 21 (and
+            you will need to set CONFIG_FGR_DEBUG_LED_SPI_NUM also).
+
+    config FGR_DEBUG_LED_SPI_NUM
+        int "The SPI port to use for a WS2812 RGB LED"
+        default 2
+        range -1 3
+        help
+            Set this to -1 for a single colour LED (e.g. as usually found on an
+            ESP32 C3 super mini board), set it to a valid SPI HW block number
+            for the WS2812 RGB LED usually found on the ESP32 S3 super mini board
+            DO NOT USE SPI 0 or 1: these are hard-wired internally to flash memory
 
 endmenu

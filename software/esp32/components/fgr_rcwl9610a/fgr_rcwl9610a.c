@@ -19,6 +19,10 @@
  * value in millimetres for a node of the front garden railway.
  */
 
+// Ensure we are compiling with maximum debug, can then be trimmed
+// at run-time by fgr_log
+#define LOG_LOCAL_LEVEL ESP_LOG_DEBUG
+
 #include <string.h>
 #include <inttypes.h>
 #include "freertos/FreeRTOS.h"

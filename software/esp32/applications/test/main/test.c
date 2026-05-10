@@ -18,6 +18,10 @@
  * @brief A test node for the front garden railway.
  */
 
+// Ensure we are compiling with maximum debug, can then be trimmed
+// at run-time by fgr_log
+#define LOG_LOCAL_LEVEL ESP_LOG_DEBUG
+
 #include <string.h>
 #include <inttypes.h>
 #include "freertos/FreeRTOS.h"
@@ -29,6 +33,7 @@
 
 #include "../../../../protocol/fgr_protocol.h"
 #include "fgr_util.h"
+#include "fgr_nvs.h"
 #include "fgr_ota.h"
 #include "fgr_network.h"
 #include "fgr_socket.h"
@@ -136,13 +141,8 @@ static bool msg_receive_cb(fgr_msg_t *msg, void *param)
                 state_set(context, FGR_STATE_STOPPED);
                 msg_error = FGR_ERROR_NONE;
             break;
-            case FGR_REQ_CNF_PING:
-                // Return the current state in the body of the CNF
-                content[0] = state_cb(context);
-                length = 1;
-                msg_error = FGR_ERROR_NONE;
-            break;
             default:
+                //
                 handled = false;
             break;
         }
@@ -188,7 +188,7 @@ static void send_cb(void *param)
     (void) param;
 
     // Indicate that we are alive
-    fgr_debug_flash_led(FGR_DEBUG_LED_SHORT_MS);
+    fgr_debug_flash_led(FGR_DEBUG_LED_SHORT_MS, FGR_DEBUG_LED_COLOUR_GOOD);
 }
 
 /* ----------------------------------------------------------------
@@ -284,6 +284,7 @@ static void deinit(context_t *context)
     fgr_msg_deinit();
     fgr_log_deinit();
     fgr_network_deinit();
+    fgr_debug_deinit();
     vSemaphoreDelete(context->lock);
     esp_restart();
 }
@@ -351,7 +352,7 @@ void app_main(void)
     } else {
         // Only get here if there has been a problem
         state_set(&context, FGR_STATE_GENERIC_FAILED);
-        ESP_LOGE(TAG, "Setup failed, will restart soonish.");
+        ESP_LOGE(TAG, "Setup failed (%s), will restart soonish.", esp_err_to_name(-err));
     }
 
     // Wait a while to let any messages leave the building

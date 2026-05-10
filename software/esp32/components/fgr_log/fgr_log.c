@@ -19,6 +19,10 @@
  * to the controller for a node of the front garden railway.
  */
 
+// Ensure we are compiling with maximum debug, can then be trimmed
+// at run-time
+#define LOG_LOCAL_LEVEL ESP_LOG_DEBUG
+
 #include <string.h>
 #include <inttypes.h>
 #include "freertos/FreeRTOS.h"
@@ -26,6 +30,8 @@
 #include "esp_system.h"
 #include "esp_task_wdt.h"
 #include "esp_log.h"
+#include "nvs.h"
+#include "nvs_flash.h"
 #include "arpa/inet.h"
 #include "errno.h"
 
@@ -41,6 +47,21 @@
 // Logging prefix
 #define TAG "log"
 
+#ifndef NVS_STORAGE_AREA
+// The name of the default NVS storage area.
+#  define NVS_STORAGE_AREA "nvs"
+#endif
+
+#ifndef NVS_NAME_LOG_ON_NOT_OFF
+// A name for the logging on/off field in NV storage.
+#  define NVS_NAME_LOG_ON_NOT_OFF "log_on_not_off"
+#endif
+
+#ifndef NVS_NAME_LOG_LEVEL_MIN
+// A name for the minimum logging level field in NV storage.
+#  define NVS_NAME_LOG_LEVEL_MIN "log_level_min"
+#endif
+
 /* ----------------------------------------------------------------
  * TYPES
  * -------------------------------------------------------------- */
@@ -51,7 +72,7 @@ typedef struct {
     void *context_sock;
     bool connected;
     SemaphoreHandle_t lock;
-    fgr_log_level_t min_level;  // Minimum level to forward
+    fgr_log_level_t level_min;  // Minimum level to forward
     bool on_not_off;
 } context_t;
 
@@ -62,9 +83,184 @@ typedef struct {
 // Context.
 static context_t g_context = {
     .sock = -1,
-    .min_level = FGR_LOG_LEVEL_INFO,  // Default: forward INFO and above
+    .level_min = FGR_LOG_LEVEL_INFO,  // Default: forward INFO and above
     .on_not_off = true
 };
+
+// Table to convert an fgr_log_level_t (the index) into an esp_log_level_t.
+static const esp_log_level_t g_fgr_to_esp_log_level[] = {ESP_LOG_DEBUG,  // FGR_LOG_LEVEL_DEBUG (0)
+                                                         ESP_LOG_INFO,   // FGR_LOG_LEVEL_INFO (1)
+                                                         ESP_LOG_WARN,   // FGR_LOG_LEVEL_WARN (2)
+                                                         ESP_LOG_ERROR}; // FGR_LOG_LEVEL_ERROR (3)
+
+// Table to convert an esp_log_level_t (the index) into an fgr_log_level_t.
+static const fgr_log_level_t g_esp_to_fgr_log_level[] = {FGR_LOG_LEVEL_ERROR,  // ESP_LOG_NONE (0)
+                                                         FGR_LOG_LEVEL_ERROR,  // ESP_LOG_ERROR (1)
+                                                         FGR_LOG_LEVEL_WARN,   // ESP_LOG_WARN (2)
+                                                         FGR_LOG_LEVEL_INFO,   // ESP_LOG_INFO (3)
+                                                         FGR_LOG_LEVEL_DEBUG,  // ESP_LOG_DEBUG (4)
+                                                         FGR_LOG_LEVEL_DEBUG}; // ESP_LOG_VERBOSE (5)
+
+/* ----------------------------------------------------------------
+ * STATIC FUNCTIONS: MISC
+ * -------------------------------------------------------------- */
+
+// Convert an fgr_log_level_t into an esp_log_level_t.
+static esp_log_level_t fgr_to_esp_log_level(fgr_log_level_t fgr_log_level)
+{
+    esp_log_level_t esp_log_level = ESP_LOG_ERROR;
+
+    if (fgr_log_level < FGR_UTIL_ARRAY_LENGTH(g_fgr_to_esp_log_level)) {
+        esp_log_level = g_fgr_to_esp_log_level[fgr_log_level];
+    }
+
+    return esp_log_level;
+}
+
+// Convert an esp_log_level_t into an fgr_log_level_t.
+static fgr_log_level_t esp_to_fgr_log_level(esp_log_level_t esp_log_level)
+{
+    fgr_log_level_t fgr_log_level = FGR_LOG_LEVEL_DEBUG;
+
+    if (esp_log_level < FGR_UTIL_ARRAY_LENGTH(g_esp_to_fgr_log_level)) {
+        fgr_log_level = g_esp_to_fgr_log_level[esp_log_level];
+    }
+
+    return fgr_log_level;
+}
+
+// Wot it says.
+static void clean_up()
+{
+    // Restore default logging
+    esp_log_set_vprintf(vprintf);
+
+    if (g_context.lock) {
+
+        ESP_LOGI(TAG, "Stopping log forwarding.");
+
+        CONTEXT_LOCK(g_context.lock, "clean_up() log");
+
+        // Lose the socket
+        fgr_socket_channel_stop(&g_context.context_sock);
+        g_context.sock = -1;
+
+        CONTEXT_UNLOCK(g_context.lock, "clean_up() log");
+        // Don't delete the semaphore, someone might have it still
+    }
+}
+
+/* ----------------------------------------------------------------
+ * STATIC FUNCTIONS: NVS RELATED
+ * -------------------------------------------------------------- */
+
+// Retrieve a uint32_t value from NVS.
+static int32_t nvs_get(const char *nvs_name, uint32_t *value)
+{
+    esp_err_t err = ESP_ERR_INVALID_ARG;
+    nvs_handle_t nvs_handle;
+
+    if (nvs_name && value) {
+        err = nvs_open(NVS_STORAGE_AREA, NVS_READONLY, &nvs_handle);
+        if (err == ESP_OK) {
+            err = nvs_get_u32(nvs_handle, nvs_name, value);
+            if (err == ESP_OK)  {
+                ESP_LOGD(TAG, "value %d read from storage %s",
+                         *value, nvs_name);
+            } else {
+                ESP_LOGW(TAG, "Unable to read \"%s\" from NVS:"
+                         " 0x%04x (\"%s\")!", nvs_name,
+                         err, esp_err_to_name(err));
+            }
+            nvs_close(nvs_handle);
+        } else {
+            ESP_LOGW(TAG, "Unable to open NVS for read/write: 0x%04x (\"%s\")!",
+                     err, esp_err_to_name(err));
+        }
+    }
+
+    // Returns ESP_OK or negative error code from esp_err_t
+    return (int32_t) -err;
+}
+
+// Write a uint32_t value to NVS.
+static int32_t nvs_set(const char *nvs_name, uint32_t value)
+{
+    esp_err_t err = ESP_ERR_INVALID_ARG;
+    nvs_handle_t nvs_handle;
+
+    if (nvs_name) {
+        esp_err_t err = nvs_open(NVS_STORAGE_AREA, NVS_READWRITE, &nvs_handle);
+        if (err == ESP_OK) {
+            err = nvs_set_u32(nvs_handle, nvs_name, value);
+            if (err == ESP_OK) {
+                err = nvs_commit(nvs_handle);
+                if (err == ESP_OK)  {
+                    ESP_LOGD(TAG, "value %d commited to storage %s",
+                             value, nvs_name);
+                } else {
+                    ESP_LOGW(TAG, "Unable to commit changes to NVS:"
+                             " 0x%04x (\"%s\")!", err, esp_err_to_name(err));
+                }
+            } else {
+                ESP_LOGW(TAG, "Unable to write \"%s\" to NVS:"
+                         " 0x%04x (\"%s\")!", nvs_name,
+                         err, esp_err_to_name(err));
+            }
+            nvs_close(nvs_handle);
+        } else {
+            ESP_LOGW(TAG, "Unable to open NVS for read/write: 0x%04x (\"%s\")!",
+                     err, esp_err_to_name(err));
+        }
+    }
+
+    // Returns ESP_OK or negative error code from esp_err_t
+    return (int32_t) -err;
+}
+
+// Retrieve whether logging is on or off from NVS.
+static int32_t nvs_on_not_off_get(bool *log_on_not_off)
+{
+    int32_t err = -ESP_ERR_INVALID_ARG;
+    uint32_t value = 0;
+
+    if (log_on_not_off) {
+        err = nvs_get(NVS_NAME_LOG_ON_NOT_OFF, &value);
+        if (err == ESP_OK) {
+            *log_on_not_off = (value != 0);
+        }
+    }
+
+    return err;
+}
+
+// Set whether logging is on or off in NVS.
+static int32_t nvs_on_not_off_set(bool log_on_not_off)
+{
+    return nvs_set(NVS_NAME_LOG_ON_NOT_OFF, log_on_not_off);
+}
+
+// Retrieve the minimum logging level from NVS.
+static int32_t nvs_level_min_get(fgr_log_level_t *log_level_min)
+{
+    int32_t err = -ESP_ERR_INVALID_ARG;
+    uint32_t value = 0;
+
+    if (log_level_min) {
+        err = nvs_get(NVS_NAME_LOG_LEVEL_MIN, &value);
+        if (err == ESP_OK) {
+            *log_level_min = (fgr_log_level_t) value;
+        }
+    }
+
+    return err;
+}
+
+// Set the minimum logging level in NVS.
+static int32_t nvs_level_min_set(bool log_level_min)
+{
+    return nvs_set(NVS_NAME_LOG_LEVEL_MIN, log_level_min);
+}
 
 /* ----------------------------------------------------------------
  * STATIC FUNCTIONS: CALLBACKS
@@ -94,26 +290,7 @@ static int tcp_log_vprintf(const char *fmt, va_list args)
         }
 
         // Convert to protocol log level
-        fgr_log_level_t fgr_log_level = FGR_LOG_LEVEL_INFO;
-        switch(esp_log_level) {
-            case ESP_LOG_ERROR:
-                fgr_log_level = FGR_LOG_LEVEL_ERROR;
-                break;
-            case ESP_LOG_WARN:
-                fgr_log_level = FGR_LOG_LEVEL_WARN;
-                break;
-            case ESP_LOG_INFO:
-                fgr_log_level = FGR_LOG_LEVEL_INFO;
-                break;
-            case ESP_LOG_DEBUG:
-                fgr_log_level = FGR_LOG_LEVEL_DEBUG;
-                break;
-            case ESP_LOG_VERBOSE:
-                fgr_log_level = FGR_LOG_LEVEL_DEBUG;
-                break;
-            default:
-                break;
-        }
+        fgr_log_level_t fgr_log_level = esp_to_fgr_log_level(esp_log_level);
 
         // Format the message
         int32_t length = vsnprintf((char *) (body->contents), FGR_LOG_STRING_MAX_LEN, fmt, args);
@@ -128,7 +305,7 @@ static int tcp_log_vprintf(const char *fmt, va_list args)
         }
 
         // Forward if level meets minimum and we're connected
-        if ((length > 0) && g_context.connected && (fgr_log_level >= g_context.min_level)) {
+        if ((length > 0) && g_context.connected && (fgr_log_level >= g_context.level_min)) {
 
             if (xSemaphoreTake(g_context.lock, pdMS_TO_TICKS(100)) == pdTRUE) {
 
@@ -187,37 +364,12 @@ static void socket_reconnect_cb(int sock, void *param)
 }
 
 /* ----------------------------------------------------------------
- * STATIC FUNCTIONS: MISC
- * -------------------------------------------------------------- */
-
-// Wot it says.
-static void clean_up()
-{
-    // Restore default logging
-    esp_log_set_vprintf(vprintf);
-
-    if (g_context.lock) {
-
-        ESP_LOGI(TAG, "Stopping log forwarding.");
-
-        CONTEXT_LOCK(g_context.lock, "clean_up() log");
-
-        // Lose the socket
-        fgr_socket_channel_stop(&g_context.context_sock);
-        g_context.sock = -1;
-
-        CONTEXT_UNLOCK(g_context.lock, "clean_up() log");
-        // Don't delete the semaphore, someone might have it still
-    }
-}
-
-/* ----------------------------------------------------------------
  * PUBLIC FUNCTIONS
  * -------------------------------------------------------------- */
 
 // Initialize logging.
 int32_t fgr_log_init(const char *server_ip, uint16_t port,
-                     fgr_log_level_t min_level)
+                     fgr_log_level_t level_min)
 {
     int32_t err = ESP_OK;
 
@@ -232,7 +384,19 @@ int32_t fgr_log_init(const char *server_ip, uint16_t port,
 
             CONTEXT_LOCK(g_context.lock, "fgr_log_init()");
 
-            g_context.min_level = min_level;
+            g_context.level_min = level_min;
+
+            // Read values from non-volatile storage and,
+            // if not present, write the default value back
+            if (nvs_on_not_off_get(&g_context.on_not_off) != ESP_OK) {
+                nvs_on_not_off_set(g_context.on_not_off);
+            }
+            if (nvs_level_min_get(&g_context.level_min) != ESP_OK) {
+                nvs_level_min_set(g_context.level_min);
+            }
+
+            esp_log_level_set("*", fgr_to_esp_log_level(g_context.level_min));
+
             // Create connection to server
             err = fgr_socket_channel_start(server_ip, port,
                                            &g_context.sock,
@@ -257,7 +421,7 @@ int32_t fgr_log_init(const char *server_ip, uint16_t port,
                 g_context.connected = true;
                 esp_log_set_vprintf(tcp_log_vprintf);
                 ESP_LOGI(TAG, "Logs will be forwarded to %s:%d, log level %d.",
-                         server_ip, port, g_context.min_level);
+                         server_ip, port, g_context.level_min);
 
             }
         }
@@ -277,20 +441,22 @@ void fgr_log_deinit(void)
 }
 
 // Set minimum log level to forward
-int32_t fgr_log_set_min_level(fgr_log_level_t level)
+int32_t fgr_log_set_level_min(fgr_log_level_t level)
 {
     int32_t err = -ESP_ERR_INVALID_STATE;
 
     if (g_context.lock) {
 
-        CONTEXT_LOCK(g_context.lock, "fgr_log_set_min_level()");
+        CONTEXT_LOCK(g_context.lock, "fgr_log_set_level_min()");
 
-        g_context.min_level = level;
+        g_context.level_min = level;
+        esp_log_level_set("*", fgr_to_esp_log_level(level));
+        nvs_level_min_set(level);
         err = ESP_OK;
 
-        CONTEXT_UNLOCK(g_context.lock, "fgr_log_set_min_level()");
+        CONTEXT_UNLOCK(g_context.lock, "fgr_log_set_level_min()");
 
-        ESP_LOGI(TAG, "Log level set to %d.", g_context.min_level);
+        ESP_LOGI(TAG, "Log level set to %d.", g_context.level_min);
     }
 
     return err;
@@ -306,6 +472,7 @@ int32_t fgr_log_off()
         CONTEXT_LOCK(g_context.lock, "fgr_log_off()");
 
         g_context.on_not_off = false;
+        nvs_on_not_off_set(false);
         err = ESP_OK;
 
         CONTEXT_UNLOCK(g_context.lock, "fgr_log_off()");
@@ -326,6 +493,7 @@ int32_t fgr_log_on()
         CONTEXT_LOCK(g_context.lock, "fgr_log_on()");
 
         g_context.on_not_off = true;
+        nvs_on_not_off_set(true);
         err = ESP_OK;
 
         CONTEXT_UNLOCK(g_context.lock, "fgr_log_on()");
@@ -355,7 +523,7 @@ bool fgr_log_msg_receive_cb(fgr_msg_t *msg, void *param)
                 if (msg->body.length == 1) {
                     msg_error = FGR_ERROR_GENERIC;
                     fgr_log_level_t level = msg->body.contents[0];
-                    if (fgr_log_set_min_level(level) == ESP_OK) {
+                    if (fgr_log_set_level_min(level) == ESP_OK) {
                         msg_error = FGR_ERROR_NONE;
                     }
                 }

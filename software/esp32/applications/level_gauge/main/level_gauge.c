@@ -23,6 +23,7 @@
 #include <inttypes.h>
 #include "freertos/FreeRTOS.h"
 #include "esp_event.h"
+#include "arpa/inet.h"
 #include "esp_log.h"
 #include "errno.h"
 #include "esp_timer.h"
@@ -43,8 +44,11 @@
  * COMPILE-TIME MACROS
  * -------------------------------------------------------------- */
 
- // Logging prefix
+ // Logging prefix.
  #define TAG "level_gauge"
+
+// The default reporting interval in seconds.
+#define REPORTING_INTERVAL_DEFAULT_SECONDS 1
 
 /* ----------------------------------------------------------------
  * TYPES
@@ -55,6 +59,7 @@ typedef struct {
     fgr_state_t state;
     SemaphoreHandle_t lock;
     bool running;
+    uint32_t reporting_interval_seconds;
 } context_t;
 
 /* ----------------------------------------------------------------
@@ -78,6 +83,62 @@ static void state_set(context_t *context, fgr_state_t state)
         context->state = state;
         CONTEXT_UNLOCK(context->lock, "state_set()");
     }
+}
+
+// Get the node's state.
+// IMPORTANT: this must be able to lock the context.
+static int32_t state_get(context_t *context)
+{
+    int32_t err = -ESP_ERR_INVALID_ARG;
+
+    if (context->lock) {
+
+        CONTEXT_LOCK(context->lock, "state_get()");
+        err = (int32_t) context->state;
+        CONTEXT_UNLOCK(context->lock, "state_get()");
+    }
+
+    return err;
+}
+
+// Set our configuration based on a message contents,
+// which should be a single, big-endian, uint32_t.
+static int32_t msg_cfg_set(context_t *context,
+                           const uint8_t *buffer, size_t length)
+{
+    int32_t err = -ESP_ERR_INVALID_ARG;
+    uint32_t uint32_network_byte_order;
+
+    if (context && buffer && (length >= sizeof(uint32_network_byte_order))) {
+        CONTEXT_LOCK(context->lock, "msg_cfg_set()");
+        // Must do a copy as buffer may not be 4-byte aligned
+        memcpy(&uint32_network_byte_order, &(buffer[0]), sizeof(uint32_network_byte_order));
+        context->reporting_interval_seconds = ntohl(uint32_network_byte_order);
+        CONTEXT_UNLOCK(context->lock, "msg_cfg_set()");
+        err = ESP_OK;
+    }
+
+    return err;
+}
+
+// Get our configuration into a message contents;
+// a single, big-endian, uint32_t.
+static int32_t msg_cfg_get(context_t *context,
+                           uint8_t *buffer, size_t length)
+{
+    int32_t err = -ESP_ERR_INVALID_ARG;
+    uint32_t uint32_network_byte_order;
+
+    if (context && buffer && (length >= sizeof(uint32_network_byte_order))) {
+        CONTEXT_LOCK(context->lock, "msg_cfg_get()");
+        // Must do a copy as buffer may not be 4-byte aligned
+        uint32_network_byte_order = htonl(context->reporting_interval_seconds);
+        memcpy(&(buffer[0]), &uint32_network_byte_order, sizeof(uint32_network_byte_order));
+        err = sizeof(uint32_network_byte_order);
+        CONTEXT_UNLOCK(context->lock, "msg_cfg_get()");
+    }
+
+    return err;
 }
 
 /* ----------------------------------------------------------------
@@ -106,7 +167,7 @@ static bool msg_receive_cb(fgr_msg_t *msg, void *param)
     context_t *context = (context_t *) param;
     bool handled = false;
     uint32_t length = 0;
-    uint8_t content[FGR_MSG_CONTENTS_MAX_LEN];
+    uint8_t contents[FGR_MSG_CONTENTS_MAX_LEN];
 
     fgr_error_t msg_error = FGR_ERROR_UNHANDLED_REQUEST;
 
@@ -115,9 +176,22 @@ static bool msg_receive_cb(fgr_msg_t *msg, void *param)
         handled = true;
         switch (MSG_MASK(msg->header.req.type)) {
             case FGR_REQ_CNF_CFG:
-                // No configuration required, nothing to do, just confirm
+                msg_error = FGR_ERROR_INVALID_PARAM;
+                if (msg_cfg_set(context, msg->body.contents,
+                                msg->body.length) == ESP_OK) {
+                    msg_error = FGR_ERROR_NONE;
+                    ESP_LOGI(TAG, "Reporting interval set to %d second(s).",
+                             state_get(context));
+                } else {
+                    ESP_LOGE(TAG, "Unable to set reporting interval,"
+                             " it will remain %d second(s).", state_get(context));
+                }
+                // We're somewhat in limbo if the above fails,
+                // best to start anyway with the default interval;
+                // we will return the current configuration in
+                // the confirmation anyway
                 state_set(context, FGR_STATE_STARTED);
-                msg_error = FGR_ERROR_NONE;
+                msg_cfg_get(context, contents, sizeof(contents));
             break;
             case FGR_REQ_CNF_START:
                 state_set(context, FGR_STATE_STARTED);
@@ -133,12 +207,6 @@ static bool msg_receive_cb(fgr_msg_t *msg, void *param)
                 state_set(context, FGR_STATE_STOPPED);
                 msg_error = FGR_ERROR_NONE;
             break;
-            case FGR_REQ_CNF_PING:
-                // Return the current state in the body of the CNF
-                content[0] = state_cb(context);
-                length = 1;
-                msg_error = FGR_ERROR_NONE;
-            break;
             default:
                 handled = false;
             break;
@@ -147,18 +215,30 @@ static bool msg_receive_cb(fgr_msg_t *msg, void *param)
         if (handled) {
             fgr_msg_send_queue_cnf(MSG_MASK(msg->header.req.type), msg_error,
                                    msg->header.req.reference,
-                                   content, length);
+                                   contents, length);
         }
     } else {
         // RESPONSE messages
         handled = true;
         switch (MSG_MASK(msg->header.req.type)) {
             case FGR_IND_RSP_NEEDS_CFG:
-                // No configuration required, nothing to do,
-                // just set state to started and indicate
-                // that we have
+                msg_error = FGR_ERROR_INVALID_PARAM;
+                if (msg_cfg_set(context, msg->body.contents,
+                                msg->body.length) == ESP_OK) {
+                    msg_error = FGR_ERROR_NONE;
+                    ESP_LOGI(TAG, "Reporting interval set to %d second(s).",
+                             state_get(context));
+                } else {
+                    ESP_LOGE(TAG, "Unable to set reporting interval,"
+                             " it will remain %d second(s).", state_get(context));
+                }
+                // We're somewhat in limbo if the above fails,
+                // best to start anyway with the default interval
+                // and return the current configuration in the
+                // FGR_IND_RSP_START
                 state_set(context, FGR_STATE_STARTED);
-                fgr_msg_send_queue_ind(FGR_IND_RSP_START, content, length);
+                msg_cfg_get(context, contents, sizeof(contents));
+                fgr_msg_send_queue_ind(FGR_IND_RSP_START, contents, length);
             break;
             case FGR_IND_RSP_START:
             case FGR_IND_RSP_STOP:
@@ -185,7 +265,7 @@ static void send_cb(void *param)
     (void) param;
 
     // Indicate that we are alive
-    fgr_debug_flash_led(FGR_DEBUG_LED_SHORT_MS);
+    fgr_debug_flash_led(FGR_DEBUG_LED_SHORT_MS, FGR_DEBUG_LED_COLOUR_NOTIFY);
 }
 
 /* ----------------------------------------------------------------
@@ -285,6 +365,7 @@ static void deinit(context_t *context)
     fgr_msg_deinit();
     fgr_log_deinit();
     fgr_network_deinit();
+    fgr_debug_deinit();
     vSemaphoreDelete(context->lock);
     esp_restart();
 }
@@ -323,10 +404,12 @@ void app_main(void)
 {
     context_t context = {
         .state = FGR_STATE_NOT_POPULATED,
-        .running = true
+        .running = true,
+        .reporting_interval_seconds = REPORTING_INTERVAL_DEFAULT_SECONDS
     };
 
-    ESP_LOGI(TAG, "app_main start.");
+    ESP_LOGI(TAG, "app_main start, default reporting interval"
+             " %d second(s).", state_get(&context));
 
     int32_t err = init(&context);
     if (err == ESP_OK) {
@@ -344,7 +427,7 @@ void app_main(void)
     }
 
     if (err == ESP_OK) {
-        // Indicate that we need configuration
+        // Indicate that we need configuration (measurement reporting interval)
         state_set(&context, FGR_STATE_NEEDS_CFG);
         err = fgr_msg_send_ind(FGR_IND_RSP_NEEDS_CFG, NULL, 0);
     }
@@ -355,7 +438,7 @@ void app_main(void)
     } else {
         // Only get here if there has been a problem
         state_set(&context, FGR_STATE_GENERIC_FAILED);
-        ESP_LOGE(TAG, "Setup failed, will restart soonish.");
+        ESP_LOGE(TAG, "Setup failed (%s), will restart soonish.", esp_err_to_name(-err));
     }
 
     // Wait a while to let any messages leave the building

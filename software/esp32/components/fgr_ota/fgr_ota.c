@@ -18,6 +18,10 @@
  * @brief Implementation of the OTA API for a node of the front garden railway.
  */
 
+// Ensure we are compiling with maximum debug, can then be trimmed
+// at run-time by fgr_log
+#define LOG_LOCAL_LEVEL ESP_LOG_DEBUG
+
 #include <string.h>
 #include <inttypes.h>
 #include "freertos/FreeRTOS.h"
@@ -33,6 +37,7 @@
 #include "nvs_flash.h"
 #include "errno.h"
 
+#include "fgr_nvs.h"
 #include "fgr_ota.h"
 
 /* ----------------------------------------------------------------
@@ -190,8 +195,7 @@ static int32_t parse_firmware_header(const char *buffer, size_t buffer_len,
  * PUBLIC FUNCTIONS
  * -------------------------------------------------------------- */
 
-// Initialise OTA, which basically involves setting up non-volatile
-// storage.
+// Initialise OTA.
 int32_t fgr_ota_init()
 {
     uint8_t sha_256[HASH_LEN] = { 0 };
@@ -217,8 +221,7 @@ int32_t fgr_ota_init()
 
     const esp_partition_t *running = esp_ota_get_running_partition();
     esp_ota_img_states_t ota_state;
-    esp_err_t err = esp_ota_get_state_partition(running, &ota_state);
-    if (err == ESP_OK) {
+    if (esp_ota_get_state_partition(running, &ota_state) == ESP_OK) {
         if (ota_state == ESP_OTA_IMG_PENDING_VERIFY) {
             ESP_LOGI(TAG, "No diagnostic, continuing execution ...");
             esp_ota_mark_app_valid_cancel_rollback();
@@ -226,25 +229,7 @@ int32_t fgr_ota_init()
     }
 
     // Initialize NVS
-    err = nvs_flash_init();
-    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        // OTA app partition table has a smaller NVS partition size than the non-OTA
-        // partition table. This size mismatch may cause NVS initialization to fail.
-        // If this happens, we erase NVS partition and initialize NVS again.
-        esp_err_t erase_err = nvs_flash_erase();
-        if (erase_err == ESP_OK) {
-            err = nvs_flash_init();
-        } else {
-            ESP_LOGE(TAG, "Failed to erase NVS: %s.", esp_err_to_name(erase_err));
-        }
-    }
-
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to initialize NVS: %s.", esp_err_to_name(err));
-    }
-
-    // Returns ESP_OK or negative error code from esp_err_t
-    return (int32_t) -err;
+    return fgr_nvs_init();
 }
 
 // Perform an OTA update, requires networking to have been established.

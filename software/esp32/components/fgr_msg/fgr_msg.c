@@ -19,6 +19,10 @@
  * front garden railway.
  */
 
+// Ensure we are compiling with maximum debug, can then be trimmed
+// at run-time by fgr_log
+#define LOG_LOCAL_LEVEL ESP_LOG_DEBUG
+
 #include <string.h>
 #include <inttypes.h>
 #include "freertos/FreeRTOS.h"
@@ -113,6 +117,8 @@ typedef struct {
     void *state_cb_param;
     fgr_msg_send_cb_t send_cb;
     void *send_cb_param;
+    fgr_msg_send_ping_body_cb_t send_ping_body_cb;
+    void *send_ping_body_cb_param;
     void *context_rx;
     struct msg_rx_cb_list_t msg_rx_cb_list;
     context_decoder_t context_decoder;
@@ -339,6 +345,74 @@ static void task_send_queue(void *param)
 }
 
 /* ----------------------------------------------------------------
+ * STATIC FUNCTIONS: SENDING
+ * -------------------------------------------------------------- */
+
+// Core of send_msg().
+// IMPORTANT the context MUST be locked before this is called.
+static int32_t send_msg_locked(context_t *context,
+                               uint16_t type, uint8_t error_state,
+                               uint8_t reference,
+                               const void *buffer,
+                               size_t length)
+{
+    fgr_msg_header_t *_header;
+    uint32_t *_length;
+    uint32_t header_and_length[(sizeof(*_header) + sizeof(*_length)) / sizeof(uint32_t)] = {0};
+
+    // Assemble all of the bits
+    _header = (fgr_msg_header_t *) &(header_and_length[0]);
+    _length = &(header_and_length[sizeof(*_header) / sizeof(uint32_t)]);
+    // We can just fill in the CNF bit of the union, the
+    // IND part follows the same pattern
+    _header->cnf.type = htons(type);
+    _header->cnf.error = error_state;
+    _header->cnf.reference = reference;
+    if (buffer != NULL) {
+        *_length = htonl(length);
+    }
+
+    // Send header and length
+    int32_t err = fgr_socket_send(context->sock, &header_and_length, sizeof(header_and_length), FGR_SOCKET_TX_RETRY_COUNT);
+    if ((err == ESP_OK) && (buffer != NULL)) {
+        // Send contents
+        err = fgr_socket_send(context->sock, buffer, length, FGR_SOCKET_TX_RETRY_COUNT);
+    }
+    if (err == ESP_OK) {
+        fgr_msg_print_summary(NULL, FGR_LOG_LEVEL_INFO, type, error_state, reference, length);
+        fgr_socket_channel_activity(&context->context_sock);
+        if (context->send_cb) {
+            context->send_cb(context->send_cb_param);
+        }
+    } else {
+        fgr_socket_channel_failed(context->context_sock);
+    }
+
+    return err;
+}
+
+// Send a CNF or IND message.
+static int32_t send_msg(uint16_t type, uint8_t error_state,
+                        uint8_t reference, const uint8_t *buffer,
+                        size_t length)
+{
+    int32_t err = -ESP_ERR_INVALID_STATE;
+
+    if (g_context.lock) {
+        err = -ESP_ERR_INVALID_ARG;
+        if ((length == 0) || (buffer != NULL)) {
+
+            CONTEXT_LOCK(g_context.lock, "send_msg()");
+            err = send_msg_locked(&g_context, type, error_state, reference,
+                                  buffer, length);
+            CONTEXT_UNLOCK(g_context.lock, "send_msg()");
+        }
+    }
+
+    return err;
+}
+
+/* ----------------------------------------------------------------
  * STATIC FUNCTIONS: CALLBACKS
  * -------------------------------------------------------------- */
 
@@ -368,6 +442,31 @@ static void socket_reconnect_cb(int sock, void *param)
         context->connected = true;
         CONTEXT_UNLOCK(context->lock, "socket_reconnect_cb() msg");
     }
+}
+
+// Handle a ping message, called by receive_cb().
+// IMPORTANT the context MUST be locked before this is called.
+static void receive_handler_ping_locked(context_t *context, uint8_t reference)
+{
+    uint8_t buffer[FGR_MSG_CONTENTS_MAX_LEN];
+    uint32_t length = 0;
+
+    // Populate the body
+    if (context->send_ping_body_cb) {
+        // Application wants to populate the body: let them do it
+        length = context->send_ping_body_cb(buffer, sizeof(buffer),
+                                            context->send_ping_body_cb_param);
+    } else {
+        if (context->state_cb) {
+            // Populate the body with a uint8_t containing the state
+            buffer[0] = context->state_cb(context->state_cb_param);
+            length = sizeof(uint8_t);
+        }
+    }
+
+    // Send the FGR_REQ_CNF_PING message
+    send_msg_locked(context, MSG_CNF(FGR_REQ_CNF_PING), FGR_ERROR_NONE,
+                    reference, buffer, length);
 }
 
 // Callback to be called when data has been received.
@@ -401,69 +500,24 @@ static void receive_cb(void *buffer, size_t length, void *param)
                 }
             }
             if (!handled) {
-                fgr_msg_print_summary("Unhandled message",
-                                      FGR_LOG_LEVEL_WARN,
-                                      msg->header.req.type, 0,
-                                      msg->header.req.reference,
-                                      msg->body.length);
+                if (MSG_MASK(msg->header.req.type) == FGR_REQ_CNF_PING) {
+                    // If a ping request has not been handled, handle
+                    // it automatically
+                    receive_handler_ping_locked(context,
+                                                msg->header.req.reference);
+                } else {
+                    fgr_msg_print_summary("Unhandled message",
+                                          FGR_LOG_LEVEL_WARN,
+                                          msg->header.req.type, 0,
+                                          msg->header.req.reference,
+                                          msg->body.length);
+                }
             }
             free(msg);
         }
         fgr_socket_channel_activity(&context->context_sock);
         CONTEXT_UNLOCK(context->lock, "receive_cb()");
     }
-}
-
-/* ----------------------------------------------------------------
- * STATIC FUNCTIONS: SENDING
- * -------------------------------------------------------------- */
-
-// Send a CNF or IND message.
-static int32_t send_msg(uint16_t type, uint8_t error_state,
-                        uint8_t reference, const uint8_t *buffer,
-                        size_t length)
-{
-    int32_t err = -ESP_ERR_INVALID_STATE;
-
-    if (g_context.lock) {
-        err = -ESP_ERR_INVALID_ARG;
-        if ((length == 0) || (buffer != NULL)) {
-
-            fgr_msg_header_t *_header;
-            uint32_t *_length;
-            uint32_t header_length[(sizeof(*_header) + sizeof(*_length)) / sizeof(uint32_t)] = {0};
-            _header = (fgr_msg_header_t *) &(header_length[0]);
-            _length = &(header_length[sizeof(*_header) / sizeof(uint32_t)]);
-            // We can just fill in the CNF bit of the union, the
-            // IND part follows the same pattern
-            _header->cnf.type = htons(type);
-            _header->cnf.error = error_state;
-            _header->cnf.reference = reference;
-            if (buffer != NULL) {
-                *_length = htonl(length);
-            }
-
-            CONTEXT_LOCK(g_context.lock, "send_msg()");
-            // Send header and length
-            err = fgr_socket_send(g_context.sock, &header_length, sizeof(header_length), FGR_SOCKET_TX_RETRY_COUNT);
-            if ((err == ESP_OK) && (buffer != NULL)) {
-                // Send contents
-                err = fgr_socket_send(g_context.sock, buffer, length, FGR_SOCKET_TX_RETRY_COUNT);
-            }
-            if (err == ESP_OK) {
-                fgr_msg_print_summary(NULL, FGR_LOG_LEVEL_INFO, type, error_state, reference, length);
-                fgr_socket_channel_activity(&g_context.context_sock);
-                if (g_context.send_cb) {
-                    g_context.send_cb(g_context.send_cb_param);
-                }
-            } else {
-                fgr_socket_channel_failed(&g_context.context_sock);
-            }
-            CONTEXT_UNLOCK(g_context.lock, "send_msg()");
-        }
-    }
-
-    return err;
 }
 
 /* ----------------------------------------------------------------
@@ -578,7 +632,7 @@ int32_t fgr_msg_send_cnf(fgr_req_cnf_t cnf, fgr_error_t error,
                          uint8_t reference, const void *buffer,
                          size_t length)
 {
-    cnf = (cnf & (0x0fff)) | (FGR_MSG_TYPE_CNF << 12);
+    cnf = MSG_CNF(cnf);
     return send_msg((uint16_t) cnf, (uint8_t) error, reference, buffer, length);
 }
 
@@ -592,7 +646,7 @@ int32_t fgr_msg_send_ind(fgr_ind_rsp_t ind, const void *buffer,
 
         fgr_state_t state = FGR_STATE_NOT_POPULATED;
         uint8_t reference;
-        ind = (ind & (0x0fff)) | (FGR_MSG_TYPE_IND << 12);
+        ind = MSG_IND(ind);
 
         CONTEXT_LOCK(g_context.lock, "fgr_msg_send_ind()");
         if (g_context.state_cb) {
@@ -792,7 +846,24 @@ int32_t fgr_msg_send_cb(fgr_msg_send_cb_t cb, void *cb_param)
     }
 
     return err;
+}
 
+// Set a callback to populate the body of an FGR_REQ_CNF_PING message.
+int32_t fgr_msg_send_ping_body_cb(fgr_msg_send_ping_body_cb_t cb,
+                                  void *cb_param)
+{
+    int32_t err = -ESP_ERR_INVALID_STATE;
+
+    if (g_context.lock) {
+
+        CONTEXT_LOCK(g_context.lock, "fgr_msg_send_ping_body_cb()");
+        g_context.send_ping_body_cb = cb;
+        g_context.send_ping_body_cb_param = cb_param;
+        err = ESP_OK;
+        CONTEXT_UNLOCK(g_context.lock, "fgr_msg_send_ping_body_cb()");
+    }
+
+    return err;
 }
 
 /* ----------------------------------------------------------------

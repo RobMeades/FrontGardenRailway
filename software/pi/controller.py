@@ -482,18 +482,38 @@ class Controller:
             module_name = f"nodes.{py_file.stem}"
 
             try:
-                # Create spec and module
+                # Read the file first to check for obvious syntax errors
+                with open(py_file, 'r') as f:
+                    source = f.read()
+                    try:
+                        compile(source, str(py_file), 'exec')
+                    except SyntaxError as e:
+                        self.logger.error(f"SYNTAX ERROR in {py_file.name}: {e}")
+                        self.logger.error(f"  Line {e.lineno}: {e.text.strip() if e.text else '?'}")
+                        continue  # Skip this file
+
                 spec = importlib.util.spec_from_file_location(module_name, py_file)
+                if spec is None:
+                    self.logger.error(f"Could not create spec for {py_file.name}")
+                    continue
+
                 module = importlib.util.module_from_spec(spec)
 
-                # Inject dependencies into the module's namespace
+                # Inject dependencies
                 module.NodeHandler = NodeHandler
                 module.fgr = fgr
 
-                # Execute the module - this preserves filename in tracebacks!
-                spec.loader.exec_module(module)
+                # Execute with explicit error handling
+                try:
+                    spec.loader.exec_module(module)
+                except Exception as e:
+                    self.logger.error(f"Failed to exec_module for {py_file.name}: {e}")
+                    import traceback
+                    self.logger.error(f"Traceback:\n{traceback.format_exc()}")
+                    continue
 
                 # Find handler classes
+                found_handler = False
                 for name, obj in inspect.getmembers(module, inspect.isclass):
                     try:
                         is_subclass = issubclass(obj, NodeHandler) and obj != NodeHandler
@@ -501,9 +521,13 @@ class Controller:
                         continue
 
                     if is_subclass:
-                        node_type = py_file.stem[5:]  # Remove 'node_' prefix
+                        node_type = py_file.stem[5:]
                         self.node_handlers[node_type] = obj
                         self.logger.info(f"Loaded handler {obj.__name__} for node type '{node_type}'")
+                        found_handler = True
+
+                if not found_handler:
+                    self.logger.warning(f"No NodeHandler subclass found in {py_file.name}")
 
             except Exception as e:
                 self.logger.error(f"Failed to load handler from {py_file.name}: {e}")
@@ -740,14 +764,16 @@ class Controller:
                                 pass
                         node.pending_requests.clear()
 
-                        # Reset stop_event for new connection - create a fresh event to be safe
-                        node.stop_event.clear()
-                        node.stop_event = threading.Event()
-
                         # Reset reference counter to avoid confusion
                         node.reference_counter = 0
 
                         self.logger.info(f"Cleanup complete for {node.name}, ready for new connection")
+
+                    # ALWAYS reset stop event for a new connection
+                    # This must happen whether there was an old socket or not,
+                    # because a previous disconnection may have left stop_event.set()
+                    node.stop_event.clear()
+                    node.stop_event = threading.Event()  # Fresh event for new connection
 
                     # Reset node state for reconnection
                     node.sock = client_sock
@@ -763,10 +789,13 @@ class Controller:
                     if not node.handler:
                         node.handler = self._get_handler_for_node(node)
 
-                    # Start new receive thread
+                    # CAPTURE the socket BEFORE creating the thread to avoid race conditions
+                    captured_sock = node.sock
+
+                    # Start new receive thread with captured socket
                     node.rx_thread = threading.Thread(
                         target=self._receive_loop,
-                        args=(node,),
+                        args=(node, captured_sock),  # ← Pass the captured socket
                         name=f"RX-{node.name}"
                     )
                     node.rx_thread.daemon = True
@@ -790,15 +819,32 @@ class Controller:
                     import traceback
                     traceback.print_exc()
 
-    def _receive_loop(self, node: Node) -> None:
-        """Receive messages from a node"""
+    def _receive_loop(self, node: Node, captured_sock: socket.socket) -> None:
+        """Receive messages from a node
+
+        Args:
+            node: The node object
+            captured_sock: The socket captured at thread creation time.
+                        This prevents race conditions where node.sock might
+                        be changed by a new connection before this thread runs.
+        """
         msg_type_names = {1: "REQ", 2: "CNF", 3: "IND", 4: "RSP", 5: "LOG"}
 
-        self.logger.info(f"Starting receive loop for {node.name} (thread={threading.current_thread().name})")
+        # Use the captured socket, not node.sock (which might change)
+        my_sock = captured_sock
+        my_thread_name = threading.current_thread().name
 
-        while self.running and node.sock and not node.stop_event.is_set():
+        self.logger.info(f"Starting receive loop for {node.name} (thread={my_thread_name}, socket={my_sock.fileno() if my_sock else 'None'})")
+
+        # Sanity check - make sure the socket is still valid
+        if not my_sock:
+            self.logger.error(f"Receive loop for {node.name} started with no socket!")
+            return
+
+        while self.running and not node.stop_event.is_set():
             try:
-                msg = fgr.receive_message(node.sock, timeout=0.5)
+                # Use my_sock, not node.sock
+                msg = fgr.receive_message(my_sock, timeout=0.5)
                 if msg is None:
                     continue
 
@@ -833,17 +879,14 @@ class Controller:
                     traceback.print_exc()
                 break
 
-        # Only disconnect if this is the active thread for this node
-        # This prevents old threads from disconnecting new connections
-        if node.state != ConnectionState.DISCONNECTED:
-            # Double-check that the socket hasn't been replaced by a new connection
-            if node.sock == current_sock or node.sock is None:
-                self.logger.info(f"Receive loop ending for {node.name}, disconnecting...")
-                self._disconnect_node(node)
-            else:
-                self.logger.info(f"Receive loop ending for {node.name} but socket was replaced, not disconnecting")
+        # Clean up - only if this thread still owns the connection
+        # Check if node.sock is the same as our captured socket
+        current_sock = node.sock
+        if current_sock is None or (my_sock and current_sock.fileno() == my_sock.fileno()):
+            self.logger.info(f"Receive loop ending for {node.name}, disconnecting...")
+            self._disconnect_node(node)
         else:
-            self.logger.info(f"Receive loop ending for {node.name} (already disconnected)")
+            self.logger.info(f"Receive loop ending for {node.name} but socket was replaced (old_fd={my_sock.fileno() if my_sock else 'None'}, new_fd={current_sock.fileno() if current_sock else 'None'}), not disconnecting")
 
     def _dispatch_message(self, node: Node, msg: fgr.FGRMsg) -> None:
         """Dispatch a message to the appropriate handler"""

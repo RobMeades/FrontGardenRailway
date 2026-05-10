@@ -31,6 +31,9 @@ Since the Pi will lose connectivity to your Wi-Fi network (you do _not_ want an 
 - Check that binary file uploads and downloads work, e.g. in `minicom` `CTRL-A`, `S`, `zmodem`, then find a binary file (let's call it `blah.bin`) and send it, rename the uploaded file to something like `blah_new.bin`, then in the `minicom` terminal type `sz blah_new.bin` to send the file back, leave `minicom` and finally, on Linux, `diff blah.bin blah_new.bin` should produce no output (i.e. the files are the same).
 
 # AP Setup
+
+*** SEE NOTE ABOUT PI ZERO W WIFI BELOW ***
+
 Connect to the Pi using a serial terminal and set the AP up as follows:
 
 - On the Pi, `sudo nano /etc/NetworkManager/NetworkManager.conf` and, in the section `[ifupdown]` change `managed` to `true` (otherwise you won't be able to create a new connection).
@@ -64,6 +67,14 @@ Connect to the Pi using a serial terminal and set the AP up as follows:
   `sudo nmcli connection up FGR`
 
 - If you want to bring the AP down, `sudo nmcli connection down FGR` and the Pi will return to having a connection to your Wi-Fi network.
+
+# Pi Zero W Wifi Instability
+I found the Pi Zero W on-board Wifi to be far too unstable, see these posts for details:
+
+[https://forums.raspberrypi.com/viewtopic.php?p=2374992](https://forums.raspberrypi.com/viewtopic.php?p=2374992)
+[https://github.com/raspberrypi/firmware/issues/1768#issuecomment-4084988745](https://forums.raspberrypi.com/viewtopic.php?p=2374992)
+
+Hence I switched to a Pi Zero I happened to have spare (could also use a Pi Zero W and switch to `wlan1`) and plugged in an AR9271 USB Wifi dongle: be careful which you choose!  the TPLink AC600 (`rtl8811au` chipset) looks good but only one of the three Linux drivers (which you must build yourself for Linux kernel versions > 6.14 (Trixie is 6.12)) I tried worked and the working one did not support transmission of TIM information elements which are required for a standards-compliant Wifi AP (ESP32 refused to connect).  The AR9271 dongle is huge but is known to work with Linux which has built-in drivers for it.
 
 # HTTPS Server Setup
 All of the ESP32 nodes will want to make an HTTPS connection to the access point to download updates to their programs; this is what the Python script `https_server.py` does.  To get it running with the ESP32s, connect a serial terminal to the Pi and do the following:

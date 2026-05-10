@@ -14,10 +14,12 @@ This is done by configuring `iptables`.
 
 - Add `ACCEPT` rules for each MAC address you wish to allow:
 
-```
-  sudo iptables -t raw -A dhcp_clients -m mac --mac-source a1:81:5c:10:2e:f3 -j ACCEPT
-  sudo iptables -t raw -A dhcp_clients -m mac --mac-source 84:d5:5c:63:51:4a -j ACCEPT
-```
+  ```
+  sudo iptables -t raw -A dhcp_clients -m mac --mac-source a1:81:5c:10:2e:f3 -j ACCEPT -m comment --comment "A comment that identifies the thing"
+  sudo iptables -t raw -A dhcp_clients -m mac --mac-source 84:d5:5c:63:51:4a -j ACCEPT -m comment --comment "Another comment that identifies the thing"
+  ```
+
+  Note: it is not possible to add comments in the NetworkManager static address list (see below) so you might want to plan what IP address you will use and put that in the comment to tie the two together more obviously.
 
 - Add a `DROP` rule to the end of the list for all other MAC addresses:
 
@@ -61,7 +63,7 @@ This is done by configuring `iptables`.
 
 - If, later, you want to add a new MAC address to the list, add it at the start to make sure it is above the `DROP` rule with:
 
-  `sudo iptables -t raw -I dhcp_clients 1 -m mac --mac-source e3:b1:5d:31:66:c5 -j ACCEPT`
+  `sudo iptables -t raw -I dhcp_clients 1 -m mac --mac-source e3:b1:5d:31:66:c5 -j ACCEPT -m comment --comment "A comment that identifies the thing"`
 
   ...then:
 

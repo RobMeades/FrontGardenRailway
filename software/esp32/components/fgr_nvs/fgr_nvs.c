@@ -15,21 +15,31 @@
  */
 
 /** @file
- * @brief Utility functions for a node of the front garden railway.
+ * @brief Implementation of the NVS API for a node of the front garden railway.
  */
 
 // Ensure we are compiling with maximum debug, can then be trimmed
 // at run-time by fgr_log
 #define LOG_LOCAL_LEVEL ESP_LOG_DEBUG
 
-#include "fgr_util.h"
+#include <string.h>
+#include <inttypes.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "esp_system.h"
+#include "esp_log.h"
+#include "nvs.h"
+#include "nvs_flash.h"
+#include "errno.h"
+
+#include "fgr_nvs.h"
 
 /* ----------------------------------------------------------------
  * COMPILE-TIME MACROS
  * -------------------------------------------------------------- */
 
  // Logging prefix
- #define TAG "util"
+ #define TAG "nvs"
 
 /* ----------------------------------------------------------------
  * TYPES
@@ -39,6 +49,9 @@
  * VARIABLES
  * -------------------------------------------------------------- */
 
+// Only thing we need to track is whether we've been initialised.
+static bool g_initialised = false;
+
 /* ----------------------------------------------------------------
  * STATIC FUNCTIONS
  * -------------------------------------------------------------- */
@@ -46,6 +59,37 @@
 /* ----------------------------------------------------------------
  * PUBLIC FUNCTIONS
  * -------------------------------------------------------------- */
+
+// Initialise NVS.
+int32_t fgr_nvs_init()
+{
+    esp_err_t err = ESP_OK;
+
+    if (!g_initialised) {
+        // Initialize NVS
+        err = nvs_flash_init();
+        if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+            // OTA app partition table has a smaller NVS partition size than the non-OTA
+            // partition table. This size mismatch may cause NVS initialization to fail.
+            // If this happens, we erase NVS partition and initialize NVS again.
+            esp_err_t erase_err = nvs_flash_erase();
+            if (erase_err == ESP_OK) {
+                err = nvs_flash_init();
+            } else {
+                ESP_LOGE(TAG, "Failed to erase NVS: %s.", esp_err_to_name(erase_err));
+            }
+        }
+
+        if (err == ESP_OK) {
+            g_initialised = true;
+        } else {
+            ESP_LOGE(TAG, "Failed to initialize NVS: %s.", esp_err_to_name(err));
+        }
+    }
+
+    // Returns ESP_OK or negative error code from esp_err_t
+    return (int32_t) -err;
+}
 
 // End of file
 

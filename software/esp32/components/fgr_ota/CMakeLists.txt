@@ -1,6 +1,6 @@
 # HTTPS-based OTA server for the front garden railway
 
-# Note: you will need to supply a ca_cert.pem (for the HTTPS server) for this component to compile,
+# In your application you will need to supply a ca_cert.pem (for the HTTPS server) for this component to compile,
 # i.e. do something like:
 #
 # idf_build_get_property(project_dir PROJECT_DIR)
@@ -11,5 +11,5 @@
 
 idf_component_register(SRCS "fgr_ota.c"
                        INCLUDE_DIRS "api"
-                       PRIV_REQUIRES esp_http_client app_update nvs_flash)
+                       PRIV_REQUIRES esp_http_client app_update nvs_flash fgr_nvs)
 target_compile_options(${COMPONENT_LIB} PRIVATE -Wall -Wextra -Werror)

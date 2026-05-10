@@ -22,7 +22,8 @@
  * an HTTP connection to a server and gets a file which is then
  * written to non-volatile storage and the system restarted.
  * Versions are checked and if all is good the download is
- * not performed, everything is left alone.
+ * not performed, everything is left alone.  Relies on the library
+ * fgr_nvs.
  */
 
 #ifdef __cplusplus
@@ -41,8 +42,8 @@ extern "C" {
   * FUNCTIONS
   * -------------------------------------------------------------- */
 
-/** Initialise OTA, which basically involves setting up non-volatile
- * storage.
+/** Initialise OTA; fgr_nvs_init() MUST have been called first for
+ * this to work.
  *
  * @return  ESP_OK on success, else a negative value from esp_err_t.
  */
