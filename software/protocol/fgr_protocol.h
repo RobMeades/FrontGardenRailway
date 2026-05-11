@@ -79,9 +79,15 @@ typedef enum {
     FGR_REQ_CNF_LOG_LEVEL              = 0x0004, // Set the log level; the REQ message contents will contain the fgr_log_level_t, encoded as a uint8_t
     FGR_REQ_CNF_LOG_START              = 0x0005, // The node should start logging
     FGR_REQ_CNF_LOG_STOP               = 0x0006, // The node should stop logging
-    FGR_REQ_CNF_REBOOT                 = 0x0007, // The node should reboot
-    FGR_REQ_CNF_PING                   = 0x0008, // Ping the node; the CNF message contents shall contain the node's fgr_state_t, encoded as a uint8_t
-    FGR_REQ_CNF_LAST                   = 0x001f
+    FGR_REQ_CNF_LOG_STATUS             = 0x0007, // Request the log status; the CNF message contents shall contain two uint8_t, the first a bool for log on/off, the second fgr_log_level_t
+    FGR_REQ_CNF_DEBUG_LED_OFF          = 0x0008, // Switch the debug LED off, avoiding light pollution
+    FGR_REQ_CNF_DEBUG_LED_ON           = 0x0009, // Switch the debug LED back on
+    FGR_REQ_CNF_DEBUG_LED_BREATHE_OFF  = 0x000a, // Switch the debug LED "breathe" operation off, avoiding background light pollution
+    FGR_REQ_CNF_DEBUG_LED_BREATHE_ON   = 0x000b, // Switch the debug LED "breathe" operation back on
+    FGR_REQ_CNF_DEBUG_LED_STATUS       = 0x000c, // Request the debug LED status; the CNF message contents shall contain two uint8_t, the first a bool for LED on/off, the second a bool for breathe on/off
+    FGR_REQ_CNF_REBOOT                 = 0x000d, // The node should reboot
+    FGR_REQ_CNF_PING                   = 0x000e, // Ping the node; the CNF message contents shall contain the node's fgr_state_t, encoded as a uint8_t
+    FGR_REQ_CNF_LAST                   = 0x0100
     // Request/confirmation messages beyond FGR_REQ_CNF_LAST are node specific
 } fgr_req_cnf_t;
 
@@ -93,8 +99,8 @@ typedef enum {
                                                   // (matches FGR_REQ_CNF_CFG)
     FGR_IND_RSP_START                  = 0x0002,  // The node has started by itself (matches FGR_REQ_CNF_START)
     FGR_IND_RSP_STOP                   = 0x0003,  // The node has stopped by itself (matches FGR_REQ_CNF_STOP)
-    FGR_IND_RSP_HEARTBEAT              = 0x0004,  // Periodic heartbeat
-    FGR_IND_RSP_LAST                   = 0x001f
+    FGR_IND_RSP_HEARTBEAT              = 0x0004,  // Periodic heartbeat: the body shall contain a single uint8_t that is the RSSI of the WiFi link
+    FGR_IND_RSP_LAST                   = 0x0100
     // Indication/response messages beyond FGR_IND_RSP_LAST are node specific
 } fgr_ind_rsp_t;
 
@@ -121,16 +127,19 @@ typedef enum {
     FGR_ERROR_HARDWARE          = 10
 } fgr_error_t;
 
-// States.
+// States; note that this is the most generic, top-level state, indicating that a node
+// has connected, been configured, has stopped for some reason or has ended up in
+// a bad global state e.g. (disconnected).  Any more details states should be signalled
+// in another way.
 typedef enum {
     FGR_STATE_NOT_POPULATED    = 0,
     FGR_STATE_NEEDS_CFG        = 1,   // Matches FGR_IND_RSP_NEEDS_CFG
-    FGR_STATE_STARTED          = 2,   // Matches FGR_REQ_CNF_START
-    FGR_STATE_STOPPED          = 3,   // Matches FGR_REQ_CNF_STOP
+    FGR_STATE_STARTED          = 2,   // Matches FGR_REQ_CNF_START, means configured and connected, operating normally
+    FGR_STATE_STOPPED          = 3,   // Matches FGR_REQ_CNF_STOP, means configured and connected but not currently doing anything useful
     FGR_STATE_BUSY             = 4,
     FGR_STATE_GENERIC_FAILED   = 5,
     FGR_STATE_HARDWARE_FAILURE = 6,
-    FGR_STATE_LAST             = 0x1f
+    FGR_STATE_LAST             = 0x7f
     // States beyond FGR_STATE_LAST are node specific
 } fgr_state_t;
 

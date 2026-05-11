@@ -90,9 +90,9 @@ class ConnectionState(IntEnum):
     BUSY = fgr.FGRState.FGR_STATE_BUSY
     GENERIC_FAILED = fgr.FGRState.FGR_STATE_GENERIC_FAILED
     HARDWARE_FAILURE = fgr.FGRState.FGR_STATE_HARDWARE_FAILURE
-    CONFIGURING = 100
-    READY = 101
-    ERROR = 102
+    CONFIGURING = 200
+    READY = 201
+    ERROR = 202
 
 
 @dataclass

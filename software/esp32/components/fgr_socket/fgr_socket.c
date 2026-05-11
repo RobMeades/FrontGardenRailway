@@ -67,6 +67,7 @@
 #ifndef FGR_SOCKET_TASK_MAINTAIN_STACK_SIZE
 #  define FGR_SOCKET_TASK_MAINTAIN_STACK_SIZE (1024 * 4)
 #endif
+
 /* ----------------------------------------------------------------
  * TYPES
  * -------------------------------------------------------------- */
@@ -88,6 +89,7 @@ typedef struct {
     int64_t last_activity_time_us;
     size_t heartbeat_seconds;
     fgr_socket_channel_cb_t heartbeat_cb;
+    fgr_socket_channel_down_cb_t down_cb;
     fgr_socket_channel_cb_t cfg_cb;
     void *cb_param;
     TaskHandle_t task_handle;
@@ -188,8 +190,6 @@ static void task_maintain(void *param)
                             } else {
                                 if (err == -ESP_ERR_NOT_FINISHED) {
                                     ESP_LOGE(TAG, "Connect timeout after %" PRId32 " ms", elapsed_ms);
-                                } else {
-                                    ESP_LOGE(TAG, "Unexpected failure: %d (%s)", errno, strerror(errno));
                                 }
                                 fgr_socket_connect_stop(&context_connect);
                                 fgr_socket_destroy(&context_channel->sock);
@@ -212,15 +212,22 @@ static void task_maintain(void *param)
                     xSemaphoreGive(context_channel->lock);
                 }
 
-                if (context_channel->connected && context_channel->cfg_cb) {
-                    // If we have reconnected and there is a user configuration
-                    // callback, call it
-                    context_channel->cfg_cb(context_channel->sock,
-                                            context_channel->cb_param);
-                    if (context_channel->heartbeat_cb) {
-                        // Call heartbeat_cb() also so that the controller gets our state
-                        context_channel->heartbeat_cb(context_channel->sock,
-                                                      context_channel->cb_param);
+                if (context_channel->connected) {
+                   if (context_channel->cfg_cb) {
+                        // If we have reconnected and there is a user configuration
+                        // callback, call it
+                        context_channel->cfg_cb(context_channel->sock,
+                                                context_channel->cb_param);
+                        if (context_channel->heartbeat_cb) {
+                            // Call heartbeat_cb() also so that the controller gets our state
+                            context_channel->heartbeat_cb(context_channel->sock,
+                                                          context_channel->cb_param);
+                        }
+                   }
+                } else {
+                    if (context_channel->down_cb) {
+                        // Call down_cb() so that the application knows we're having trouble
+                        context_channel->down_cb(context_channel->cb_param);
                     }
                 }
             }
@@ -548,7 +555,9 @@ int32_t fgr_socket_connect_is_complete(void **context, int32_t timeout_ms)
 {
     int32_t err = -ESP_ERR_INVALID_ARG;
 
-    if (context && *context) {
+    if (fgr_util_is_valid_ptr_to_ptr(context, TAG, "socket context") &&
+        context && *context) {
+
         err = -ESP_ERR_NOT_FINISHED;
         context_connect_t *context_connect = (context_connect_t *) *context;
         fd_set fdset;
@@ -565,11 +574,25 @@ int32_t fgr_socket_connect_is_complete(void **context, int32_t timeout_ms)
             socklen_t len = sizeof(so_error);
             getsockopt(context_connect->sock, SOL_SOCKET, SO_ERROR, &so_error, &len);
             if (so_error == 0) {
-                // Connected
-                err = ESP_OK;
+                // Verify with getpeername() to make completely sure the socket has reconnected
+                struct sockaddr_in peer;
+                socklen_t peer_len = sizeof(peer);
+                if (getpeername(context_connect->sock, (struct sockaddr *)&peer, &peer_len) == 0) {
+                    // Truly connected
+                    err = ESP_OK;
+                } else if (errno == ENOTCONN) {
+                    // Still connecting
+                    err = -ESP_ERR_NOT_FINISHED;
+                    ESP_LOGD(TAG, "Socket not connected yet (ENOTCONN)");
+                } else {
+                    // Other error
+                    err = ESP_FAIL;
+                    ESP_LOGE(TAG, "getpeername() failed: %d (%s)", errno, strerror(errno));
+                }
             } else {
+                errno = so_error;  // Set errno to the socket error as getsockopt() doesn't set it
                 err = ESP_FAIL;
-                ESP_LOGE(TAG, "Connect failed: %" PRId32 " (%s)", so_error, strerror(so_error));
+                ESP_LOGE(TAG, "Connect failed: %d (%s)", (int) so_error, strerror(so_error));
             }
         } else if (sel_rc < 0) {
             err = ESP_FAIL;
@@ -589,7 +612,9 @@ int32_t fgr_socket_connect_is_complete(void **context, int32_t timeout_ms)
 // Stop connecting a non-blocking socket.
 void fgr_socket_connect_stop(void **context)
 {
-    if (context) {
+    if (fgr_util_is_valid_ptr_to_ptr(context, TAG, "socket context") &&
+        context) {
+
         free(*context);
         *context = NULL;
     }
@@ -655,12 +680,15 @@ int32_t fgr_socket_channel_maintain(void **context,
                                     size_t heartbeat_seconds,
                                     fgr_socket_channel_cb_t heartbeat_cb,
                                     fgr_socket_channel_cb_t cfg_cb,
+                                    fgr_socket_channel_down_cb_t down_cb,
                                     void *cb_param)
 {
     int32_t err = -ESP_ERR_INVALID_ARG;
 
-    if (context && *context &&
+    if (fgr_util_is_valid_ptr_to_ptr(context, TAG, "channel context") &&
+        context && *context &&
         ((heartbeat_seconds == 0) || (heartbeat_cb != NULL))) {
+
         context_channel_t *context_channel = (context_channel_t *) *context;
         // Start a task that will send hearbeats and reconnect the socket
         // in the background on failure
@@ -670,6 +698,7 @@ int32_t fgr_socket_channel_maintain(void **context,
         context_channel->running = true;
         context_channel->heartbeat_seconds = heartbeat_seconds;
         context_channel->heartbeat_cb = heartbeat_cb;
+        context_channel->down_cb = down_cb;
         context_channel->cfg_cb = cfg_cb;
         context_channel->cb_param = cb_param;
         if (xTaskCreate(&task_maintain, "socket_maintain", FGR_SOCKET_TASK_MAINTAIN_STACK_SIZE, context_channel,
@@ -684,6 +713,7 @@ int32_t fgr_socket_channel_maintain(void **context,
             context_channel->running = false;
             context_channel->heartbeat_seconds = 0;
             context_channel->heartbeat_cb = NULL;
+            context_channel->down_cb = NULL;
             context_channel->cfg_cb = NULL;
             context_channel->cb_param = NULL;
             ESP_LOGE(TAG, "Failed to create reconnect task %d (%s)!", errno, strerror(errno));
@@ -697,7 +727,9 @@ int32_t fgr_socket_channel_maintain(void **context,
 // Log activity on a channel.
 void fgr_socket_channel_activity(void **context)
 {
-    if (context && *context) {
+    if (fgr_util_is_valid_ptr_to_ptr(context, TAG, "channel context") &&
+        context && *context) {
+
         context_channel_t *context_channel = (context_channel_t *) *context;
         if (context_channel->lock) {
 
@@ -711,7 +743,9 @@ void fgr_socket_channel_activity(void **context)
 // Trigger a reconnection attempt.
 void fgr_socket_channel_failed(void **context)
 {
-    if (context && *context) {
+    if (fgr_util_is_valid_ptr_to_ptr(context, TAG, "channel context") &&
+        context && *context) {
+
         context_channel_t *context_channel = (context_channel_t *) *context;
         if (context_channel->lock) {
 
@@ -725,7 +759,9 @@ void fgr_socket_channel_failed(void **context)
 // Stop a socket connection that was started by fgr_socket_start().
 void fgr_socket_channel_stop(void **context)
 {
-    if (context && *context) {
+    if (fgr_util_is_valid_ptr_to_ptr(context, TAG, "channel context") &&
+        context && *context) {
+
         context_channel_t *context_channel = (context_channel_t *) *context;
 
         if (context_channel->lock) {
@@ -737,6 +773,12 @@ void fgr_socket_channel_stop(void **context)
 
             // Lose the socket
             fgr_socket_destroy(&context_channel->sock);
+
+            // Just in case
+            context_channel->heartbeat_cb = NULL;
+            context_channel->down_cb = NULL;
+            context_channel->cfg_cb = NULL;
+            context_channel->cb_param = NULL;
 
             CONTEXT_UNLOCK(context_channel->lock, "fgr_socket_stop()");
         }

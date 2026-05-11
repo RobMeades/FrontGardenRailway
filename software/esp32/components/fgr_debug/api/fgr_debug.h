@@ -25,13 +25,16 @@
 extern "C" {
 #endif
 
+// Required for fgr_msg_t.
+#include "../../../../../protocol/fgr_protocol.h"
+
 /* ----------------------------------------------------------------
  * COMPILE-TIME MACROS
  * -------------------------------------------------------------- */
 
 #ifndef FGR_DEBUG_LED_SHORT_MS
 // Standard short duration for an LED lash.
-#  define FGR_DEBUG_LED_SHORT_MS 50
+#  define FGR_DEBUG_LED_SHORT_MS 250
 #endif
 
 #ifndef FGR_DEBUG_LED_LONG_MS
@@ -41,15 +44,17 @@ extern "C" {
 
 #ifndef FGR_DEBUG_LED_INTENSITY_LOW
 // How bright to shine the LED for low intensity; ignored
-// for a single colour LED.
-#  define FGR_DEBUG_LED_INTENSITY_LOW 64
+// for a single colour LED: these LEDS are very bright!
+#  define FGR_DEBUG_LED_INTENSITY_LOW 16
 #endif
 
 #ifndef FGR_DEBUG_LED_INTENSITY_HIGH
 // How bright to shine the LED for high intensity; ignored
 // for a single colour LED.
-#  define FGR_DEBUG_LED_INTENSITY_HIGH 128
+#  define FGR_DEBUG_LED_INTENSITY_HIGH 32
 #endif
+
+#define FGR_DEBUG_LED_COLOUR_NONE ((fgr_debug_colour_t) {0, 0, 0})
 
 #ifndef FGR_DEBUG_LED_COLOUR_RED
 // Red; generally better to use one of the "meaning" colours below instead of this.
@@ -126,6 +131,16 @@ extern "C" {
 #  define FGR_DEBUG_LED_COLOUR_BOOT FGR_DEBUG_LED_COLOUR_WHITE
 #endif
 
+#ifndef FGR_DEBUG_LED_COLOUR_NEEDS_CFG
+// Standardised colour, primarily for breathe, when waiting for configuration.
+#  define FGR_DEBUG_LED_COLOUR_NEEDS_CFG FGR_DEBUG_LED_COLOUR_CYAN
+#endif
+
+#ifndef FGR_DEBUG_LED_COLOUR_STOPPED
+// Standardised colour, primarily for breathe, when stopped.
+#  define FGR_DEBUG_LED_COLOUR_STOPPED FGR_DEBUG_LED_COLOUR_MAGENTA
+#endif
+
 #ifndef FGR_DEBUG_LED_COLOUR_ALARM
 // Standardised alarm colour: the only one that is bright.
 #  define FGR_DEBUG_LED_COLOUR_ALARM FGR_DEBUG_LED_COLOUR_BRIGHT_RED
@@ -143,7 +158,12 @@ extern "C" {
 
 #ifndef FGR_DEBUG_LED_COLOUR_NOTIFY
 // Standardised neutral notification colour.
-#  define FGR_DEBUG_LED_COLOUR_NOTIFY FGR_DEBUG_LED_COLOUR_BLUE
+#  define FGR_DEBUG_LED_COLOUR_NOTIFY FGR_DEBUG_LED_COLOUR_YELLOW
+#endif
+
+#ifndef FGR_DEBUG_LED_COLOUR_MSG_SENT
+// Standardised message sent colour.
+#  define FGR_DEBUG_LED_COLOUR_MSG_SENT FGR_DEBUG_LED_COLOUR_BLUE
 #endif
 
 /* ----------------------------------------------------------------
@@ -158,15 +178,51 @@ typedef struct {
     uint8_t blue;
 } fgr_debug_colour_t;
 
+/** Function to call to obtain the state of a node.
+ *
+ * @param param  cb_param as passed to fgr_debug_init().
+ * @return       the state of the node.
+ */
+typedef fgr_state_t (*fgr_debug_state_cb_t)(void *param);
+
 /* ----------------------------------------------------------------
- * FUNCTIONS
+ * FUNCTIONS: INITIALISE/DEINITIALISE
  * -------------------------------------------------------------- */
 
 /** Initialise debug.
  *
+ * Note: this will create a semaphore that is never destroyed.
+ *
+ * @param cb         a pointer to a function that will return
+ *                   the state of the node.  If using a
+ *                   WS2812 debug LED
+ *                   (i.e. CONFIG_FGR_DEBUG_LED_SPI_NUM is defined)
+ *                   this will be called to determine the
+ *                   breathe colour.  Note that this necessarily
+ *                   entails making assumptions about what a
+ *                   given state means: for instance, if you
+ *                   have node-specific states or you have states
+ *                   that indicate that everything is OK _after_
+ *                   the ones that indicate otherwise (like
+ *                   FGR_STATE_GENERIC_FAILED) then you probably
+ *                   want to pass NULL here and instead update
+ *                   the breathe colour directly yourself using
+ *                   fgr_debug_led_breathe_set().  Ignored if
+ *                   CONFIG_FGR_DEBUG_LED_SPI_NUM is not
+ *                   defined.
+ * @param cb_param   parameter that will be passed to cb()
+ *                   when it is called; may be NULL.
  * @return ESP_OK on success, else a negative value from esp_err_t.
  */
-int32_t fgr_debug_init();
+int32_t fgr_debug_init(fgr_debug_state_cb_t cb, void *cb_param);
+
+/** Deinitialise debug.
+ */
+void fgr_debug_deinit();
+
+/* ----------------------------------------------------------------
+ * FUNCTIONS: LED RELATED
+ * -------------------------------------------------------------- */
 
 /** Flash the debug LED.
  *
@@ -175,11 +231,70 @@ int32_t fgr_debug_init();
  * @param colour      the LED colour, ignored if
  *                    CONFIG_FGR_DEBUG_LED_IS_WS2812 is not defined.
  */
-void fgr_debug_flash_led(int32_t duration_ms, fgr_debug_colour_t colour);
+void fgr_debug_led_flash(int32_t duration_ms, fgr_debug_colour_t colour);
 
-/** Deinitialise debug.
+/** Turn the LED "breathe" effect off.  If fgr_nvs_init() or
+ * fgs_ota_init() have been called then the setting will persist
+ * across boot cycles.  The breathe effect only runs if you are using
+ * a WS2812 debug LED (i.e. CONFIG_FGR_DEBUG_LED_SPI_NUM is defined).
  */
-void fgr_debug_deinit();
+void fgr_debug_led_breathe_off(void);
+
+/** Turn the LED "breathe" effect on (i.e. continue to operate
+ * as it did before fgr_debug_led_breathe_off()).  If fgr_nvs_init()
+ * or fgs_ota_init() have been called then the setting will persist
+ * across boot cycles.  The breathe effect only runs if you are using
+ * a WS2812 debug LED (i.e. CONFIG_FGR_DEBUG_LED_SPI_NUM is defined).
+ */
+void fgr_debug_led_breathe_on(void);
+
+/** Turn all debug LEDs off.  If fgr_nvs_init() or fgs_ota_init()
+ * have been called then the setting will persist across boot cycles.
+ */
+void fgr_debug_led_off(void);
+
+/** Turn all debug LEDs on (i.e. continue to operate as they
+ * did before fgr_debug_led_off()).  If fgr_nvs_init() or
+ * fgs_ota_init() have been called then the setting will persist
+ * across boot cycles.
+ */
+void fgr_debug_led_on(void);
+
+/** Set the LED "breathing" manually: you would not normally call
+ * this, just let the debug function operate the breathe effect
+ * based on the state callback passed to fgr_debug_init().  To
+ * return to normal operation after manually setting a breathe
+ * effect, pass in all zeros for the colours.  The breathe
+ * effect only runs if you are using a WS2812 debug LED
+ * (i.e. CONFIG_FGR_DEBUG_LED_SPI_NUM is defined).
+ *
+ * @param colour the LED colour.
+ */
+void fgr_debug_led_breathe_set(fgr_debug_colour_t colour);
+
+/* ----------------------------------------------------------------
+ * FUNCTIONS: MISC
+ * -------------------------------------------------------------- */
+
+/** A message receive callback that will handle
+ * the FGR_REQ_CNF_DEBUG_* messages: add this to your
+ * application's message receive chain (before
+ * your own handlers so that it is below them) with:
+ *
+ * fgr_msg_receive_handler_add(0, fgr_debug_msg_receive_cb, NULL);
+ *
+ * ...and this code will deal with them for you.
+ *
+ * IMPORTANT: for this to work your application must
+ * set up a message send queue (i.e. must have called
+ * fgr_msg_send_queue_init()).
+ *
+ * @param msg    a pointer to the received message.
+ * @param param  cb_param as passed to fgr_msg_receive_handler_add().
+ * @return       true if the message is handled, false if it
+ *               can be passed to subsequent handlers.
+ */
+bool fgr_debug_msg_receive_cb(fgr_msg_t *msg, void *param);
 
 /** Print out our MAC address if possible.
  */
@@ -201,7 +316,8 @@ int32_t fgr_debug_hex_dump_to_buffer(const void *data, size_t data_size,
 #ifdef __cplusplus
 }
 #endif
-/** @}*/
+
+/** @} */
 
 #endif // _FGR_DEBUG_H_
 

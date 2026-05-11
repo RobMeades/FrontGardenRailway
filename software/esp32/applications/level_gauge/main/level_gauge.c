@@ -265,7 +265,7 @@ static void send_cb(void *param)
     (void) param;
 
     // Indicate that we are alive
-    fgr_debug_flash_led(FGR_DEBUG_LED_SHORT_MS, FGR_DEBUG_LED_COLOUR_NOTIFY);
+    fgr_debug_led_flash(FGR_DEBUG_LED_SHORT_MS, FGR_DEBUG_LED_COLOUR_MSG_SENT);
 }
 
 /* ----------------------------------------------------------------
@@ -284,11 +284,6 @@ static int32_t init(context_t *context)
         ESP_LOGE(TAG, "Failed to create default event loop: %s.", esp_err_to_name(err));
     }
 
-    // Configure our debug LED
-    if (err == ESP_OK) {
-        err = fgr_debug_init();
-    }
-
     // Create mutex for the application's context
     if (err == ESP_OK) {
         err = -ESP_ERR_NO_MEM;
@@ -298,12 +293,23 @@ static int32_t init(context_t *context)
         }
     }
 
-#if !defined(CONFIG_FGR_APP_NO_WIFI)
-    // Initialise OTA
+    // Initialise OTA: do this whether there is WiFi or not
+    // as it also initialises non-volatile storage (and you
+    // can't just separately iniitalise non-volatile storage
+    // as there are some OTA-related steps that need to be
+    // performed beforehand)
     if (err == ESP_OK) {
         err = fgr_ota_init();
     }
 
+    // Configure our debug LED: do this after non-volatile
+    // storage has been initialised so that we can read
+    // settings from there.
+    if (err == ESP_OK) {
+        err = fgr_debug_init(state_cb, context);
+    }
+
+#if !defined(CONFIG_FGR_APP_NO_WIFI)
     // Initialize networking
     if (err == ESP_OK) {
         err = fgr_network_init(CONFIG_FGR_NETWORK_WIFI_SSID,
@@ -420,6 +426,10 @@ void app_main(void)
     if (err == ESP_OK) {
         // Add the logging received message handler
         err = fgr_msg_receive_handler_add(0, fgr_log_msg_receive_cb, NULL);
+    }
+    if (err == ESP_OK) {
+        // Add the debug received message handler
+        err = fgr_msg_receive_handler_add(0, fgr_debug_msg_receive_cb, NULL);
     }
     if (err == ESP_OK) {
         // Add our received message handler

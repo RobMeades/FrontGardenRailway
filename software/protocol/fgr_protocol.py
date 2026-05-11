@@ -36,9 +36,15 @@ class FGRReqCnf(IntEnum):
     FGR_REQ_CNF_LOG_LEVEL = 4
     FGR_REQ_CNF_LOG_START = 5
     FGR_REQ_CNF_LOG_STOP = 6
-    FGR_REQ_CNF_REBOOT = 7
-    FGR_REQ_CNF_PING = 8
-    FGR_REQ_CNF_LAST = 31
+    FGR_REQ_CNF_LOG_STATUS = 7
+    FGR_REQ_CNF_DEBUG_LED_OFF = 8
+    FGR_REQ_CNF_DEBUG_LED_ON = 9
+    FGR_REQ_CNF_DEBUG_LED_BREATHE_OFF = 10
+    FGR_REQ_CNF_DEBUG_LED_BREATHE_ON = 11
+    FGR_REQ_CNF_DEBUG_LED_STATUS = 12
+    FGR_REQ_CNF_REBOOT = 13
+    FGR_REQ_CNF_PING = 14
+    FGR_REQ_CNF_LAST = 256
 
 class FGRIndRsp(IntEnum):
     """Indication/Response message types"""
@@ -47,7 +53,7 @@ class FGRIndRsp(IntEnum):
     FGR_IND_RSP_START = 2
     FGR_IND_RSP_STOP = 3
     FGR_IND_RSP_HEARTBEAT = 4
-    FGR_IND_RSP_LAST = 31
+    FGR_IND_RSP_LAST = 256
 
 class FGRLogLevel(IntEnum):
     """Log levels"""
@@ -79,7 +85,7 @@ class FGRState(IntEnum):
     FGR_STATE_BUSY = 4
     FGR_STATE_GENERIC_FAILED = 5
     FGR_STATE_HARDWARE_FAILURE = 6
-    FGR_STATE_LAST = 31
+    FGR_STATE_LAST = 127
 
 class FGRMsgHeader:
     """

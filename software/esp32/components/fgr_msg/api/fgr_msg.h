@@ -79,6 +79,18 @@ typedef bool (*fgr_msg_rx_cb_t)(fgr_msg_t *msg, void *param);
  */
 typedef fgr_state_t (*fgr_msg_state_cb_t)(void *param);
 
+
+/** Function to call when the connection with the controller
+ * goes up or down.
+ *
+ * @param upNotDown true if the connection is up, else false;
+ *                  note that there is nothing you can do about
+ *                  a connection being down, it will be being
+ *                  recreated in the backgroud already
+ * @param param     cb_param as passed to fgr_msg_connection_state_cb().
+ */
+typedef void (*fgr_msg_connection_state_cb_t) (bool upNotDOwn, void *param);
+
 /** Function to call to when a message is sent.
  *
  * @param param  cb_param as passed to fgr_msg_send_cb().
@@ -104,7 +116,8 @@ typedef uint32_t (*fgr_msg_send_ping_body_cb_t)(uint8_t *buffer,
  * FUNCTIONS: INITIALISATION/DEINITIALISATION
  * -------------------------------------------------------------- */
 
-/** Initialise the messaging interface.
+/** Initialise the messaging interface: connects to the controller,
+ * allowing messages to be exchanged.
  *
  * Note: this will create a mutex that is never destroyed.
  *
@@ -131,7 +144,7 @@ typedef uint32_t (*fgr_msg_send_ping_body_cb_t)(uint8_t *buffer,
  *                          of the ping confirmation message will
  *                          be empty.
  * @param cb_param          parameter that will be passed to cb()
- *                          when it is called.
+ *                          when it is called; may be NULL.
  * @return                  ESP_OK on success, else a negative value
  *                          from esp_err_t.
  */
@@ -272,7 +285,7 @@ void fgr_msg_send_queue_deinit();
  * @param cb        the callback; use NULL to cancel a previous
  *                  callback.
  * @param cb_param  parameter that will be passed to cb()
- *                  when it is called.
+ *                  when it is called; may be NULL.
  * @return          ESP_OK on success, else a negative value
  *                  from esp_err_t.
  */
@@ -294,7 +307,7 @@ int32_t fgr_msg_send_cb(fgr_msg_send_cb_t cb, void *cb_param);
  * @param cb        the callback; use NULL to cancel a previous
  *                  callback.
  * @param cb_param  parameter that will be passed to cb()
- *                  when it is called.
+ *                  when it is called; may be NULL.
  * @return          ESP_OK on success, else a negative value
  *                  from esp_err_t.
  */

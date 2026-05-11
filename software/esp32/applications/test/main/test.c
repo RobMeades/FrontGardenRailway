@@ -114,7 +114,7 @@ static bool msg_receive_cb(fgr_msg_t *msg, void *param)
     context_t *context = (context_t *) param;
     bool handled = false;
     uint32_t length = 0;
-    uint8_t content[FGR_MSG_CONTENTS_MAX_LEN];
+    uint8_t contents[FGR_MSG_CONTENTS_MAX_LEN];
 
     fgr_error_t msg_error = FGR_ERROR_UNHANDLED_REQUEST;
 
@@ -150,7 +150,7 @@ static bool msg_receive_cb(fgr_msg_t *msg, void *param)
         if (handled) {
             fgr_msg_send_queue_cnf(MSG_MASK(msg->header.req.type), msg_error,
                                    msg->header.req.reference,
-                                   content, length);
+                                   contents, length);
         }
     } else {
         // RESPONSE messages
@@ -161,7 +161,7 @@ static bool msg_receive_cb(fgr_msg_t *msg, void *param)
                 // just set state to started and indicate
                 // that we have
                 state_set(context, FGR_STATE_STARTED);
-                fgr_msg_send_queue_ind(FGR_IND_RSP_START, content, length);
+                fgr_msg_send_queue_ind(FGR_IND_RSP_START, contents, length);
             break;
             case FGR_IND_RSP_START:
             case FGR_IND_RSP_STOP:
@@ -188,7 +188,7 @@ static void send_cb(void *param)
     (void) param;
 
     // Indicate that we are alive
-    fgr_debug_flash_led(FGR_DEBUG_LED_SHORT_MS, FGR_DEBUG_LED_COLOUR_GOOD);
+    fgr_debug_led_flash(FGR_DEBUG_LED_SHORT_MS, FGR_DEBUG_LED_COLOUR_MSG_SENT);
 }
 
 /* ----------------------------------------------------------------
@@ -207,11 +207,6 @@ static int32_t init(context_t *context)
         ESP_LOGE(TAG, "Failed to create default event loop: %s.", esp_err_to_name(err));
     }
 
-    // Configure our debug LED
-    if (err == ESP_OK) {
-        err = fgr_debug_init();
-    }
-
     // Create mutex for the application's context
     if (err == ESP_OK) {
         err = -ESP_ERR_NO_MEM;
@@ -221,12 +216,23 @@ static int32_t init(context_t *context)
         }
     }
 
-#if !defined(CONFIG_FGR_APP_NO_WIFI)
-    // Initialise OTA
+    // Initialise OTA: do this whether there is WiFi or not
+    // as it also initialises non-volatile storage (and you
+    // can't just separately iniitalise non-volatile storage
+    // as there are some OTA-related steps that need to be
+    // performed beforehand)
     if (err == ESP_OK) {
         err = fgr_ota_init();
     }
 
+    // Configure our debug LED: do this after non-volatile
+    // storage has been initialised so that we can read
+    // settings from there.
+    if (err == ESP_OK) {
+        err = fgr_debug_init(state_cb, context);
+    }
+
+#if !defined(CONFIG_FGR_APP_NO_WIFI)
     // Initialize networking
     if (err == ESP_OK) {
         err = fgr_network_init(CONFIG_FGR_NETWORK_WIFI_SSID,
@@ -255,7 +261,6 @@ static int32_t init(context_t *context)
                            CONFIG_FGR_MSG_HEARTBEAT_SECONDS,
                            state_cb, context);
     }
-
 
     // For debug purposes, hook-in a message send callback
     if (err == ESP_OK) {
@@ -334,6 +339,10 @@ void app_main(void)
     if (err == ESP_OK) {
         // Add the logging received message handler
         err = fgr_msg_receive_handler_add(0, fgr_log_msg_receive_cb, NULL);
+    }
+    if (err == ESP_OK) {
+        // Add the debug received message handler
+        err = fgr_msg_receive_handler_add(0, fgr_debug_msg_receive_cb, NULL);
     }
     if (err == ESP_OK) {
         // Add our received message handler

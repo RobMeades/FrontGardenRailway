@@ -91,5 +91,69 @@ int32_t fgr_nvs_init()
     return (int32_t) -err;
 }
 
+// Retrieve a uint32_t value from NVS.
+int32_t fgr_nvs_get(const char *name, uint32_t *value)
+{
+    esp_err_t err = ESP_ERR_INVALID_ARG;
+    nvs_handle_t nvs_handle;
+
+    if (name && value) {
+        err = nvs_open(FGR_NVS_STORAGE_AREA, NVS_READONLY, &nvs_handle);
+        if (err == ESP_OK) {
+            err = nvs_get_u32(nvs_handle, name, value);
+            if (err == ESP_OK)  {
+                ESP_LOGD(TAG, "value %d read from storage %s",
+                         *value, name);
+            } else {
+                ESP_LOGW(TAG, "Unable to read \"%s\" from NVS:"
+                         " 0x%04x (\"%s\")!", name,
+                         err, esp_err_to_name(err));
+            }
+            nvs_close(nvs_handle);
+        } else {
+            ESP_LOGW(TAG, "Unable to open NVS for read/write: 0x%04x (\"%s\")!",
+                     err, esp_err_to_name(err));
+        }
+    }
+
+    // Returns ESP_OK or negative error code from esp_err_t
+    return (int32_t) -err;
+}
+
+// Store a uint32_t value in NVS.
+int32_t fgr_nvs_set(const char *name, uint32_t value)
+{
+    esp_err_t err = ESP_ERR_INVALID_ARG;
+    nvs_handle_t nvs_handle;
+
+    if (name) {
+        esp_err_t err = nvs_open(FGR_NVS_STORAGE_AREA, NVS_READWRITE, &nvs_handle);
+        if (err == ESP_OK) {
+            err = nvs_set_u32(nvs_handle, name, value);
+            if (err == ESP_OK) {
+                err = nvs_commit(nvs_handle);
+                if (err == ESP_OK)  {
+                    ESP_LOGD(TAG, "value %d commited to storage %s",
+                             value, name);
+                } else {
+                    ESP_LOGW(TAG, "Unable to commit changes to NVS:"
+                             " 0x%04x (\"%s\")!", err, esp_err_to_name(err));
+                }
+            } else {
+                ESP_LOGW(TAG, "Unable to store \"%s\" to NVS:"
+                         " 0x%04x (\"%s\")!", name,
+                         err, esp_err_to_name(err));
+            }
+            nvs_close(nvs_handle);
+        } else {
+            ESP_LOGW(TAG, "Unable to open NVS for read/write: 0x%04x (\"%s\")!",
+                     err, esp_err_to_name(err));
+        }
+    }
+
+    // Returns ESP_OK or negative error code from esp_err_t
+    return (int32_t) -err;
+}
+
 // End of file
 

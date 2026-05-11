@@ -25,6 +25,11 @@
 extern "C" {
 #endif
 
+#include "stddef.h"
+#include "stdbool.h"
+#include "esp_log.h"
+#include "esp_debug_helpers.h"
+
 /* ----------------------------------------------------------------
  * COMPILE-TIME MACROS
  * -------------------------------------------------------------- */
@@ -85,6 +90,49 @@ extern "C" {
 /* ----------------------------------------------------------------
  * FUNCTIONS
  * -------------------------------------------------------------- */
+
+/** Check if a double-indirect is correct: use this wherever
+ * a function receives a ** parameter, e.g.:
+ *
+ *     if (is_valid_ptr_to_ptr(context, TAG, "channel context")) {
+ *        // do stuff
+ *     }
+ *
+ * Note: defined as static in a header file so that it will be
+ * inlined properly.
+ *
+ * @param pptr   the ** parameter to check.
+ * @param tag    the TAG that would have been passed to ESP_LOGX().
+ * @param name   a null-terminated string to identify the pointer
+ *               being checked.
+ * @return       true if the parameter passes the check, else false.
+ */
+static inline bool fgr_util_is_valid_ptr_to_ptr(void **pptr, const char *tag,
+                                                const char *name)
+{
+    if (pptr == NULL) {
+        ESP_LOGE(tag, "Invalid %s: context is NULL", name);
+        return false;
+    }
+
+    uint32_t addr = (uint32_t)pptr;
+    if (addr < 0x3f000000 || addr > 0x3fffffff) {
+        ESP_LOGE(tag, "Invalid %s: context=%p (not in heap range)", name, pptr);
+        return false;
+    }
+
+    if (*pptr != NULL) {
+        uint32_t val = (uint32_t)(*pptr);
+        if (val < 0x3f000000 || val > 0x3fffffff) {
+            ESP_LOGE(tag, "ATTENTION ATTENTION Invalid %s: *context=%p (not a valid pointer) ATTENTION ATTENTION", name, *pptr);
+            // Print backtrace to see who called this
+            esp_backtrace_print(100);
+            return false;
+        }
+    }
+
+    return true;
+}
 
 #ifdef __cplusplus
 }

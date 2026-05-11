@@ -30,14 +30,13 @@
 #include "esp_system.h"
 #include "esp_task_wdt.h"
 #include "esp_log.h"
-#include "nvs.h"
-#include "nvs_flash.h"
 #include "arpa/inet.h"
 #include "errno.h"
 
 #include "fgr_util.h"
 #include "fgr_socket.h"
 #include "fgr_msg.h"
+#include "fgr_nvs.h"
 #include "fgr_log.h"
 
 /* ----------------------------------------------------------------
@@ -46,11 +45,6 @@
 
 // Logging prefix
 #define TAG "log"
-
-#ifndef NVS_STORAGE_AREA
-// The name of the default NVS storage area.
-#  define NVS_STORAGE_AREA "nvs"
-#endif
 
 #ifndef NVS_NAME_LOG_ON_NOT_OFF
 // A name for the logging on/off field in NV storage.
@@ -154,70 +148,6 @@ static void clean_up()
  * STATIC FUNCTIONS: NVS RELATED
  * -------------------------------------------------------------- */
 
-// Retrieve a uint32_t value from NVS.
-static int32_t nvs_get(const char *nvs_name, uint32_t *value)
-{
-    esp_err_t err = ESP_ERR_INVALID_ARG;
-    nvs_handle_t nvs_handle;
-
-    if (nvs_name && value) {
-        err = nvs_open(NVS_STORAGE_AREA, NVS_READONLY, &nvs_handle);
-        if (err == ESP_OK) {
-            err = nvs_get_u32(nvs_handle, nvs_name, value);
-            if (err == ESP_OK)  {
-                ESP_LOGD(TAG, "value %d read from storage %s",
-                         *value, nvs_name);
-            } else {
-                ESP_LOGW(TAG, "Unable to read \"%s\" from NVS:"
-                         " 0x%04x (\"%s\")!", nvs_name,
-                         err, esp_err_to_name(err));
-            }
-            nvs_close(nvs_handle);
-        } else {
-            ESP_LOGW(TAG, "Unable to open NVS for read/write: 0x%04x (\"%s\")!",
-                     err, esp_err_to_name(err));
-        }
-    }
-
-    // Returns ESP_OK or negative error code from esp_err_t
-    return (int32_t) -err;
-}
-
-// Write a uint32_t value to NVS.
-static int32_t nvs_set(const char *nvs_name, uint32_t value)
-{
-    esp_err_t err = ESP_ERR_INVALID_ARG;
-    nvs_handle_t nvs_handle;
-
-    if (nvs_name) {
-        esp_err_t err = nvs_open(NVS_STORAGE_AREA, NVS_READWRITE, &nvs_handle);
-        if (err == ESP_OK) {
-            err = nvs_set_u32(nvs_handle, nvs_name, value);
-            if (err == ESP_OK) {
-                err = nvs_commit(nvs_handle);
-                if (err == ESP_OK)  {
-                    ESP_LOGD(TAG, "value %d commited to storage %s",
-                             value, nvs_name);
-                } else {
-                    ESP_LOGW(TAG, "Unable to commit changes to NVS:"
-                             " 0x%04x (\"%s\")!", err, esp_err_to_name(err));
-                }
-            } else {
-                ESP_LOGW(TAG, "Unable to write \"%s\" to NVS:"
-                         " 0x%04x (\"%s\")!", nvs_name,
-                         err, esp_err_to_name(err));
-            }
-            nvs_close(nvs_handle);
-        } else {
-            ESP_LOGW(TAG, "Unable to open NVS for read/write: 0x%04x (\"%s\")!",
-                     err, esp_err_to_name(err));
-        }
-    }
-
-    // Returns ESP_OK or negative error code from esp_err_t
-    return (int32_t) -err;
-}
-
 // Retrieve whether logging is on or off from NVS.
 static int32_t nvs_on_not_off_get(bool *log_on_not_off)
 {
@@ -225,7 +155,7 @@ static int32_t nvs_on_not_off_get(bool *log_on_not_off)
     uint32_t value = 0;
 
     if (log_on_not_off) {
-        err = nvs_get(NVS_NAME_LOG_ON_NOT_OFF, &value);
+        err = fgr_nvs_get(NVS_NAME_LOG_ON_NOT_OFF, &value);
         if (err == ESP_OK) {
             *log_on_not_off = (value != 0);
         }
@@ -237,7 +167,7 @@ static int32_t nvs_on_not_off_get(bool *log_on_not_off)
 // Set whether logging is on or off in NVS.
 static int32_t nvs_on_not_off_set(bool log_on_not_off)
 {
-    return nvs_set(NVS_NAME_LOG_ON_NOT_OFF, log_on_not_off);
+    return fgr_nvs_set(NVS_NAME_LOG_ON_NOT_OFF, log_on_not_off);
 }
 
 // Retrieve the minimum logging level from NVS.
@@ -247,7 +177,7 @@ static int32_t nvs_level_min_get(fgr_log_level_t *log_level_min)
     uint32_t value = 0;
 
     if (log_level_min) {
-        err = nvs_get(NVS_NAME_LOG_LEVEL_MIN, &value);
+        err = fgr_nvs_get(NVS_NAME_LOG_LEVEL_MIN, &value);
         if (err == ESP_OK) {
             *log_level_min = (fgr_log_level_t) value;
         }
@@ -259,7 +189,7 @@ static int32_t nvs_level_min_get(fgr_log_level_t *log_level_min)
 // Set the minimum logging level in NVS.
 static int32_t nvs_level_min_set(bool log_level_min)
 {
-    return nvs_set(NVS_NAME_LOG_LEVEL_MIN, log_level_min);
+    return fgr_nvs_set(NVS_NAME_LOG_LEVEL_MIN, log_level_min);
 }
 
 /* ----------------------------------------------------------------
@@ -407,6 +337,7 @@ int32_t fgr_log_init(const char *server_ip, uint16_t port,
                                                   CONFIG_FGR_LOG_HEARTBEAT_SECONDS,
                                                   socket_heartbeat_cb,
                                                   socket_reconnect_cb,
+                                                  NULL,
                                                   &g_context);
                 if (err != ESP_OK) {
                     fgr_socket_channel_stop(&g_context.context_sock);
@@ -508,6 +439,9 @@ int32_t fgr_log_on()
 bool fgr_log_msg_receive_cb(fgr_msg_t *msg, void *param)
 {
     bool handled = false;
+    uint32_t length = 0;
+    // Only need two bytes for the stuff we return here
+    uint8_t contents[2];
 
     (void) param;
 
@@ -540,6 +474,18 @@ bool fgr_log_msg_receive_cb(fgr_msg_t *msg, void *param)
                     msg_error = FGR_ERROR_NONE;
                 }
             break;
+            case FGR_REQ_CNF_LOG_STATUS:
+                // Contents should be one uint8_t
+                // representing the bool of log
+                // on/off and another representing
+                // the log level
+                CONTEXT_LOCK(g_context.lock, "fgr_log_msg_receive_cb()");
+                contents[0] = g_context.on_not_off;
+                contents[1] = g_context.level_min;
+                length = 2;
+                CONTEXT_UNLOCK(g_context.lock, "fgr_log_msg_receive_cb()");
+                msg_error = FGR_ERROR_NONE;
+            break;
             default:
                 handled = false;
             break;
@@ -547,7 +493,7 @@ bool fgr_log_msg_receive_cb(fgr_msg_t *msg, void *param)
 
         if (handled) {
             fgr_msg_send_queue_cnf(MSG_MASK(msg->header.req.type), msg_error,
-                                   msg->header.req.reference, NULL, 0);
+                                   msg->header.req.reference, contents, length);
         }
     }
 

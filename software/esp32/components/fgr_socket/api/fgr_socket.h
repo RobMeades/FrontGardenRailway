@@ -65,6 +65,13 @@ extern "C" {
  */
 typedef void (*fgr_socket_channel_cb_t)(int sock, void *param);
 
+/** Function to call to when a channel has become disconnected and
+ * reconnection is taking a while.
+ *
+ * @param param  cb_param as passed to fgr_socket_channel_maintain().
+ */
+typedef void (*fgr_socket_channel_down_cb_t)(void *param);
+
 /** Function to call when data is received on a socket.
  *
  * @param buffer a pointer to the data: this should be handled/
@@ -293,6 +300,10 @@ int32_t fgr_socket_channel_start(const char *server_ip, uint16_t port,
  *                           call fgr_socket_channel_activity() if sending
  *                           succeeds or fgr_socket_channel_failed()
  *                           if sending fails.
+ * @param down_cb            a callback that will be called if the connection
+ *                           has gone down and reconnection is taking a while.
+ *                           The eventual success of reconnection is
+ *                           indicated by cfg_cb() being called.
  * @param cfg_cb             a callback that will be called after the
  *                           connection has been recreated due to
  *                           a failure.  The value of sock passed to
@@ -301,7 +312,9 @@ int32_t fgr_socket_channel_start(const char *server_ip, uint16_t port,
  *                           You may perform any custom configuration
  *                           of the socket (e.g. calling
  *                           fgr_socket_enable_tcp_keep_alive()) in this
- *                           callback.
+ *                           callback.  Note that this may be called even
+ *                           if down_cb() has not been called should the
+ *                           duration of the disconnect be a short one.
  * @param cb_param           user parameter to be passed to hearbeat_cb()
  *                           and cfg_cb() when they are called; may be NULL.
  *
@@ -310,6 +323,7 @@ int32_t fgr_socket_channel_maintain(void **context,
                                     size_t heartbeat_seconds,
                                     fgr_socket_channel_cb_t heartbeat_cb,
                                     fgr_socket_channel_cb_t cfg_cb,
+                                    fgr_socket_channel_down_cb_t down_cb,
                                     void *cb_param);
 
 /** If fgr_socket_channel_maintain() has been called with
@@ -374,7 +388,7 @@ int32_t fgr_socket_send(int sock, const void *buffer, size_t length,
  *                           when it is called: if your reconnect_cb() is
  *                           fgr_socket_channel_failed() then this should
  *                           be the context pointer that was passed to
- *                           fgr_socket_channel_start().
+ *                           fgr_socket_channel_start(); may be NULL.
  * @param rx_cb              callback to be called when data is received.
  * @param rx_cb_param        user parameter to be passed to rx_cb()
  *                           when it is called; may be NULL.

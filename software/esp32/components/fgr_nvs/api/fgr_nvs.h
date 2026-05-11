@@ -30,6 +30,11 @@ extern "C" {
   * COMPILE-TIME MACROS
   * -------------------------------------------------------------- */
 
+#ifndef FGR_NVS_STORAGE_AREA
+// The name of the default NVS storage area.
+#  define FGR_NVS_STORAGE_AREA "nvs"
+#endif
+
  /* ----------------------------------------------------------------
   * TYPES
   * -------------------------------------------------------------- */
@@ -48,6 +53,24 @@ extern "C" {
  * @return  ESP_OK on success, else a negative value from esp_err_t.
  */
 int32_t fgr_nvs_init();
+
+/** Retrieve a uint32_t value from NVS.
+ *
+ * @param name  a null-terminated string that is the name of the
+ *              value to retrieve.
+ * @param value a pointer to a place to put the returned value.
+ * @return      ESP_OK on success, else a negative value from esp_err_t.
+ */
+int32_t fgr_nvs_get(const char *name, uint32_t *value);
+
+/** Store a uint32_t value to NVS.
+ *
+ * @param name  a null-terminated string that is the name of the
+ *              value to store.
+ * @param value the value to store.
+ * @return      ESP_OK on success, else a negative value from esp_err_t.
+ */
+int32_t fgr_nvs_set(const char *name, uint32_t value);
 
 #ifdef __cplusplus
 }

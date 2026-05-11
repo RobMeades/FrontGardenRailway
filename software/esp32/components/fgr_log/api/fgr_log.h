@@ -45,7 +45,7 @@ extern "C" {
  * be up first.  May be safely called at any time: will return
  * success if fgr_log_init() has already been called.
  *
- * If fgr_nvs_init() of fgs_ota_init() have been called before this
+ * If fgr_nvs_init() or fgs_ota_init() have been called before this
  * function then the log level setting and whether logging is on or
  * off will be stored in non-volatile storage for use on
  * subsequent boots.
@@ -58,9 +58,10 @@ extern "C" {
  * @param port      the port on the server that is listening for
  *                  log messages.
  * @param level_min the minimum level to log (default LOG_INFO);
- *                  if fgr_nvs_init() has been called and there
- *                  is a saved log level then this value will be
- *                  ignored: use fgr_log_set_level_min() to set it.
+ *                  if fgr_nvs_init() or fgs_ota_init() have been
+ *                  called and there is a saved log level then this
+ *                  value will be ignored: use fgr_log_set_level_min()
+ *                  to set it.
  * @return          ESP_OK on success, else a negative value from
  *                  esp_err_t.
  */
@@ -70,8 +71,8 @@ int32_t fgr_log_init(const char *server_ip, uint16_t port, fgr_log_level_t level
  */
 void fgr_log_deinit();
 
-/** Change the minimum log level.  If fgr_nvs_init() has been
- * called then the value will be saved and used on the next boot.
+/** Change the minimum log level.  If fgr_nvs_init() or fgs_ota_init()
+ * have been called then the value will be saved and used on the next boot.
  *
  * @param level the new minimum level to log.
  * @return      ESP_OK on success, else a negative value from
@@ -79,21 +80,21 @@ void fgr_log_deinit();
  */
 int32_t fgr_log_set_level_min(fgr_log_level_t level);
 
-/** Stop logging.  If fgr_nvs_init() has been called then
- * the log setting will persist across boot cycles.
+/** Stop logging.  If fgr_nvs_init() or fgs_ota_init() hav been called
+ * then the log setting will persist across boot cycles.
  *
  * @return  ESP_OK on success, else a negative value from esp_err_t.
  */
 int32_t fgr_log_off();
 
-/** Turn logging on.  If fgr_nvs_init() has been called then
- * the log setting will persist across boot cycles.
+/** Turn logging on.  If fgr_nvs_init() or fgs_ota_init() have been
+ * called then the log setting will persist across boot cycles.
  *
  * @return  ESP_OK on success, else a negative value from esp_err_t.
  */
 int32_t fgr_log_on();
 
-/**  A message receive callback that will handle
+/** A message receive callback that will handle
  * the FGR_REQ_CNF_LOG_* messages: add this to your
  * application's message receive chain (before
  * your own handlers so that it is below them) with:
@@ -105,6 +106,11 @@ int32_t fgr_log_on();
  * IMPORTANT: for this to work your application must
  * set up a message send queue (i.e. must have called
  * fgr_msg_send_queue_init()).
+ *
+ * @param msg    a pointer to the received message.
+ * @param param  cb_param as passed to fgr_msg_receive_handler_add().
+ * @return       true if the message is handled, false if it
+ *               can be passed to subsequent handlers.
  */
 bool fgr_log_msg_receive_cb(fgr_msg_t *msg, void *param);
 

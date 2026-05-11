@@ -33,8 +33,10 @@
 #include "esp_log.h"
 #include "arpa/inet.h"
 #include "sys/queue.h"
+#include "esp_wifi.h" // for esp_wifi_sta_get_rssi()
 
 #include "fgr_util.h"
+#include "fgr_debug.h"
 #include "fgr_socket.h"
 #include "fgr_msg.h"
 
@@ -50,6 +52,20 @@
 
 #ifndef FGR_MSG_TASK_SEND_QUEUE_STACK_SIZE
 #  define FGR_MSG_TASK_SEND_QUEUE_STACK_SIZE (1024 * 4)
+#endif
+
+#ifndef FGR_MSG_TASK_RSSI_STACK_SIZE
+#  define FGR_MSG_TASK_RSSI_STACK_SIZE 1024
+#endif
+
+#ifndef RSSI_BUFFER_LENGTH
+// How many readings to average RSSI over.
+#  define RSSI_BUFFER_LENGTH 10
+#endif
+
+#ifndef RSSI_AVERAGE_TIME_SECONDS
+// How long average the RSSI over.
+#  define RSSI_AVERAGE_TIME_SECONDS 10
 #endif
 
 /* ----------------------------------------------------------------
@@ -95,6 +111,13 @@ typedef struct msg_rx_cb_t {
 // Message receive callback list head.
 SLIST_HEAD(msg_rx_cb_list_t, msg_rx_cb_t);
 
+// An RSSI buffer.
+typedef struct {
+    int8_t average_dbm; // The RSSI averaged over the readings
+    size_t count;       // How many readings there are
+    int8_t readings[RSSI_BUFFER_LENGTH];
+} buffer_rssi_t;
+
 // Context for message send queue.
 typedef struct {
     SemaphoreHandle_t lock;
@@ -109,8 +132,7 @@ typedef struct {
     void *context_sock;
     bool connected;
     SemaphoreHandle_t lock;
-    TaskHandle_t task_send;
-    QueueHandle_t queue_send;
+    TaskHandle_t task_rssi;
     bool running;
     uint8_t ind_reference;
     fgr_msg_state_cb_t state_cb;
@@ -122,6 +144,7 @@ typedef struct {
     void *context_rx;
     struct msg_rx_cb_list_t msg_rx_cb_list;
     context_decoder_t context_decoder;
+    buffer_rssi_t buffer_rssi;
 } context_t;
 
 /* ----------------------------------------------------------------
@@ -344,6 +367,55 @@ static void task_send_queue(void *param)
     vTaskDelete(NULL);
 }
 
+// RSSI averaging task.
+static void task_rssi(void *param)
+{
+    context_t *context = (context_t *) param;
+    buffer_rssi_t *buffer_rssi = &(context->buffer_rssi);
+
+    // Allow us to feed the watchdog
+    esp_task_wdt_add(NULL);
+
+    while (context->running) {
+
+        CONTEXT_LOCK(context->lock, "task_rssi()");
+
+        // Shuffle all the readings down
+        for (int32_t x = buffer_rssi->count; x >= 0; x--) {
+            if (x < FGR_UTIL_ARRAY_LENGTH(buffer_rssi->readings) - 1) {
+                buffer_rssi->readings[x + 1] = buffer_rssi->readings[x];
+            }
+        }
+
+        // Add a new reading
+        int rssi = 0;
+        if (esp_wifi_sta_get_rssi(&rssi) == ESP_OK) {
+            buffer_rssi->readings[0] = (int8_t) rssi;
+            buffer_rssi->count++;
+            if (buffer_rssi->count > FGR_UTIL_ARRAY_LENGTH(buffer_rssi->readings)) {
+                buffer_rssi->count = FGR_UTIL_ARRAY_LENGTH(buffer_rssi->readings);
+            }
+        }
+
+        // Calculate a new average
+        buffer_rssi->average_dbm = 0;
+        for (int32_t x = 0; x < buffer_rssi->count; x++) {
+            buffer_rssi->average_dbm += buffer_rssi->readings[x];
+        }
+        buffer_rssi->average_dbm /= buffer_rssi->count;
+
+        CONTEXT_UNLOCK(context->lock, "task_rssi()");
+
+        esp_task_wdt_reset();
+        // Wait to take the next measurement
+        vTaskDelay(pdMS_TO_TICKS(RSSI_AVERAGE_TIME_SECONDS * 1000 / FGR_UTIL_ARRAY_LENGTH(buffer_rssi->readings)));
+    }
+
+    ESP_LOGI(TAG, "RSSI averaging task exiting.");
+    esp_task_wdt_delete(NULL);
+    vTaskDelete(NULL);
+}
+
 /* ----------------------------------------------------------------
  * STATIC FUNCTIONS: SENDING
  * -------------------------------------------------------------- */
@@ -419,11 +491,19 @@ static int32_t send_msg(uint16_t type, uint8_t error_state,
 // Callback to send a heartbeat message.
 static void socket_heartbeat_cb(int sock, void *param)
 {
-    (void) param;
-    fgr_msg_send_ind(FGR_IND_RSP_HEARTBEAT, NULL, 0);
+    context_t *context = (context_t *) param;
+    uint8_t contents = 0;
+
+    CONTEXT_LOCK(context->lock, "socket_heartbeat_cb() msg");
+    contents = (uint8_t) context->buffer_rssi.average_dbm;
+    CONTEXT_UNLOCK(context->lock, "socket_heartbeat_cb() msg");
+
+    // A single byte in the contents containing the RSSI
+    fgr_msg_send_ind(FGR_IND_RSP_HEARTBEAT, &contents, 1);
 }
 
-// Callback called by fgr_socket_channel_maintain().
+// Callback called by fgr_socket_channel_maintain() when a
+// connection has been re-made.
 static void socket_reconnect_cb(int sock, void *param)
 {
     context_t *context = (context_t *) param;
@@ -440,8 +520,20 @@ static void socket_reconnect_cb(int sock, void *param)
         }
         context->sock = sock;
         context->connected = true;
+        // Set the debug LED back to normal
+        fgr_debug_led_breathe_set(FGR_DEBUG_LED_COLOUR_NONE);
         CONTEXT_UNLOCK(context->lock, "socket_reconnect_cb() msg");
     }
+}
+
+// Callback called by fgr_socket_channel_maintain() when a
+// connection has gone down.
+static void socket_down_cb(void *param)
+{
+    (void) param;
+
+    // Make the debug LED breathe an appropriate colour
+    fgr_debug_led_breathe_set(FGR_DEBUG_LED_COLOUR_BAD);
 }
 
 // Handle a ping message, called by receive_cb().
@@ -537,6 +629,12 @@ static void clean_up()
 
         CONTEXT_LOCK(g_context.lock, "clean_up() msg");
 
+        g_context.running = false;
+
+        // Wait for the RSSI task to exit
+        vTaskDelay(pdMS_TO_TICKS(100));
+        g_context.task_rssi = NULL;
+
         // Lose the socket
         fgr_socket_channel_stop(&g_context.context_sock);
         g_context.sock = -1;
@@ -595,12 +693,25 @@ int32_t fgr_msg_init(const char *server_ip, uint16_t port,
                                                   heartbeat_seconds,
                                                   socket_heartbeat_cb,
                                                   socket_reconnect_cb,
+                                                  socket_down_cb,
                                                   &g_context);
                 if (err != ESP_OK) {
                     fgr_socket_channel_stop(&g_context.context_sock);
                     g_context.sock = -1;
                     g_context.state_cb = NULL;
                     g_context.state_cb_param = NULL;
+                }
+            }
+
+            if (err == ESP_OK) {
+                // On a best-effort basis, start the RSSI read task
+                g_context.running = true;
+                if (xTaskCreate(&task_rssi, "rssi", FGR_MSG_TASK_RSSI_STACK_SIZE,
+                                &g_context, 5, &g_context.task_rssi) == pdPASS) {
+                    err = ESP_OK;
+                } else {
+                    g_context.task_rssi = NULL;  // Just in case
+                    g_context.running = false;
                 }
             }
 
@@ -687,7 +798,7 @@ int32_t fgr_msg_send_queue_init(size_t length)
                 } else {
                     g_context_send.running = false;
                     vQueueDelete(g_context_send.queue_send);
-                    g_context.queue_send = NULL;
+                    g_context_send.queue_send = NULL;
                 }
             }
         }
@@ -823,7 +934,7 @@ void fgr_msg_send_queue_deinit()
                     esp_task_wdt_reset();
                 }
                 vQueueDelete(g_context_send.queue_send);
-                g_context.queue_send = NULL;
+                g_context_send.queue_send = NULL;
             }
         }
         CONTEXT_UNLOCK(g_context_send.lock, "fgr_msg_send_queue_deinit()");
