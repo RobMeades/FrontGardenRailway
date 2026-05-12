@@ -55,7 +55,7 @@
 #endif
 
 #ifndef FGR_MSG_TASK_RSSI_STACK_SIZE
-#  define FGR_MSG_TASK_RSSI_STACK_SIZE 1024
+#  define FGR_MSG_TASK_RSSI_STACK_SIZE (1024 * 4)
 #endif
 
 #ifndef RSSI_BUFFER_LENGTH
@@ -113,8 +113,8 @@ SLIST_HEAD(msg_rx_cb_list_t, msg_rx_cb_t);
 
 // An RSSI buffer.
 typedef struct {
-    int8_t average_dbm; // The RSSI averaged over the readings
-    size_t count;       // How many readings there are
+    int32_t average_dbm; // The RSSI averaged over the readings
+    size_t count;        // How many readings there are
     int8_t readings[RSSI_BUFFER_LENGTH];
 } buffer_rssi_t;
 
@@ -157,7 +157,9 @@ static const char *g_msg_variety_str_list[] = {"NULL", "REQ", "CNF", "IND", "RSP
 // List of known message REQ/CNF names, in order.
 static const char *g_msg_req_cnf_str_list[] = {"NULL", "CFG", "START", "STOP",
                                                "LOG_LEVEL", "LOG_START", "LOG_STOP",
-                                               "REBOOT", "PING"};
+                                               "LOG_STATUS", "DEBUG_LED_OFF", "DEBUG_LED_ON",
+                                               "DEBUG_LED_BREATHE_OFF", "DEBUG_LED_BREATHE_ON",
+                                               "DEBUG_LED_STATUS", "REBOOT", "PING"};
 
 // List of known message IND/RSP names, in order.
 static const char *g_msg_ind_rsp_str_list[] = {"NULL", "NEEDS_CFG", "START", "STOP",
@@ -373,42 +375,42 @@ static void task_rssi(void *param)
     context_t *context = (context_t *) param;
     buffer_rssi_t *buffer_rssi = &(context->buffer_rssi);
 
-    // Allow us to feed the watchdog
     esp_task_wdt_add(NULL);
 
     while (context->running) {
-
         CONTEXT_LOCK(context->lock, "task_rssi()");
 
-        // Shuffle all the readings down
-        for (int32_t x = buffer_rssi->count; x >= 0; x--) {
-            if (x < FGR_UTIL_ARRAY_LENGTH(buffer_rssi->readings) - 1) {
-                buffer_rssi->readings[x + 1] = buffer_rssi->readings[x];
-            }
+        // Shift readings (from highest index down)
+        for (int32_t x = buffer_rssi->count - 1; x >= 0; x--) {
+            buffer_rssi->readings[x + 1] = buffer_rssi->readings[x];
         }
 
-        // Add a new reading
+        // Add new reading
         int rssi = 0;
-        if (esp_wifi_sta_get_rssi(&rssi) == ESP_OK) {
+        esp_err_t err = esp_wifi_sta_get_rssi(&rssi);
+        if (err == ESP_OK) {
             buffer_rssi->readings[0] = (int8_t) rssi;
-            buffer_rssi->count++;
-            if (buffer_rssi->count > FGR_UTIL_ARRAY_LENGTH(buffer_rssi->readings)) {
-                buffer_rssi->count = FGR_UTIL_ARRAY_LENGTH(buffer_rssi->readings);
+            if (buffer_rssi->count < FGR_UTIL_ARRAY_LENGTH(buffer_rssi->readings)) {
+                buffer_rssi->count++;
             }
+        } else {
+            ESP_LOGD(TAG, "Unable to take RSSI reading (%s).", esp_err_to_name(err));
         }
 
-        // Calculate a new average
+        // Calculate average
         buffer_rssi->average_dbm = 0;
-        for (int32_t x = 0; x < buffer_rssi->count; x++) {
-            buffer_rssi->average_dbm += buffer_rssi->readings[x];
+        if (buffer_rssi->count > 0) {
+            int32_t sum = 0;
+            for (int32_t x = 0; x < buffer_rssi->count; x++) {
+                sum += buffer_rssi->readings[x];
+            }
+            // Denominator has to be signed to produce a signed result
+            buffer_rssi->average_dbm = sum / (int32_t) buffer_rssi->count;
         }
-        buffer_rssi->average_dbm /= buffer_rssi->count;
-
         CONTEXT_UNLOCK(context->lock, "task_rssi()");
 
         esp_task_wdt_reset();
-        // Wait to take the next measurement
-        vTaskDelay(pdMS_TO_TICKS(RSSI_AVERAGE_TIME_SECONDS * 1000 / FGR_UTIL_ARRAY_LENGTH(buffer_rssi->readings)));
+        vTaskDelay(pdMS_TO_TICKS(RSSI_AVERAGE_TIME_SECONDS * 1000 / RSSI_BUFFER_LENGTH));
     }
 
     ESP_LOGI(TAG, "RSSI averaging task exiting.");
@@ -457,7 +459,7 @@ static int32_t send_msg_locked(context_t *context,
             context->send_cb(context->send_cb_param);
         }
     } else {
-        fgr_socket_channel_failed(context->context_sock);
+        fgr_socket_channel_failed(&context->context_sock);
     }
 
     return err;
@@ -627,13 +629,15 @@ static void clean_up()
 
     if (g_context.lock) {
 
-        CONTEXT_LOCK(g_context.lock, "clean_up() msg");
-
         g_context.running = false;
 
-        // Wait for the RSSI task to exit
-        vTaskDelay(pdMS_TO_TICKS(100));
-        g_context.task_rssi = NULL;
+        CONTEXT_LOCK(g_context.lock, "clean_up() msg");
+
+        if (g_context.task_rssi){
+            // Wait for the RSSI task to exit
+            vTaskDelay(pdMS_TO_TICKS(100));
+            g_context.task_rssi = NULL;
+        }
 
         // Lose the socket
         fgr_socket_channel_stop(&g_context.context_sock);

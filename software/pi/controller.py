@@ -82,17 +82,38 @@ except ImportError as e:
 # ============================================================================
 
 class ConnectionState(IntEnum):
-    DISCONNECTED = 0
-    CONNECTED = 1
-    NEEDS_CFG = fgr.FGRState.FGR_STATE_NEEDS_CFG
-    STARTED = fgr.FGRState.FGR_STATE_STARTED
-    STOPPED = fgr.FGRState.FGR_STATE_STOPPED
-    BUSY = fgr.FGRState.FGR_STATE_BUSY
-    GENERIC_FAILED = fgr.FGRState.FGR_STATE_GENERIC_FAILED
-    HARDWARE_FAILURE = fgr.FGRState.FGR_STATE_HARDWARE_FAILURE
-    CONFIGURING = 200
-    READY = 201
-    ERROR = 202
+    """Node connection states - local states (200+) and FGR states (1-127)"""
+    # Local states (200-255 range, separate from FGR states)
+    DISCONNECTED = 200
+    CONNECTED = 201
+    CONFIGURING = 202
+    READY = 203
+    ERROR = 204
+
+    # FGR states (mirror the protocol values)
+    FGR_NEEDS_CFG = 1
+    FGR_STARTED = 2
+    FGR_STOPPED = 3
+    FGR_BUSY = 4
+    FGR_GENERIC_FAILED = 5
+    FGR_HARDWARE_FAILURE = 6
+
+    @classmethod
+    def from_fgr_state(cls, fgr_state: int):
+        """Convert FGR state to ConnectionState"""
+        if fgr_state == 1:
+            return cls.FGR_NEEDS_CFG
+        elif fgr_state == 2:
+            return cls.FGR_STARTED
+        elif fgr_state == 3:
+            return cls.FGR_STOPPED
+        elif fgr_state == 4:
+            return cls.FGR_BUSY
+        elif fgr_state == 5:
+            return cls.FGR_GENERIC_FAILED
+        elif fgr_state == 6:
+            return cls.FGR_HARDWARE_FAILURE
+        return cls.DISCONNECTED
 
 
 @dataclass
@@ -120,6 +141,13 @@ class Node:
     message_count: int = 0
     heartbeat_count: int = 0
     connection_id: int = 0
+    # Status information from node
+    log_on: Optional[bool] = None
+    log_level: Optional[int] = None
+    led_on: Optional[bool] = None
+    led_breathe_on: Optional[bool] = None
+    rssi: Optional[int] = None  # WiFi signal strength in dBm
+
 
 # ============================================================================
 # Node Handler Base Class
@@ -217,16 +245,23 @@ class NodeHandler:
 
         # ALWAYS update the node's FGR state from the message
         self.node.fgr_state = msg.error_or_state
-
-        try:
-            self.node.state = ConnectionState(msg.error_or_state)
-        except ValueError:
-            pass
+        self.node.state = ConnectionState.from_fgr_state(msg.error_or_state)
 
         # Handle standard protocol messages
         if ind_type == fgr.FGRIndRsp.FGR_IND_RSP_HEARTBEAT:
             self.node.heartbeat_count += 1
             self.node.last_heartbeat = time.time()
+            # Extract RSSI from message contents (if present)
+            if len(msg.contents) >= 1:
+                rssi = msg.contents[0]
+                if rssi > 127:
+                    rssi = rssi - 256  # Convert to signed
+                self.node.rssi = rssi
+            else:
+                # No RSSI in heartbeat - leave as None (will show "?")
+                # Optionally log a debug message
+                if self.logger.isEnabledFor(logging.DEBUG):
+                    self.logger.debug(f"Heartbeat from {self.node.name} has no RSSI value")
             return True
 
         elif ind_type == fgr.FGRIndRsp.FGR_IND_RSP_NEEDS_CFG:
@@ -293,17 +328,58 @@ class NodeHandler:
         """Set the node's log level"""
         contents = bytes([level])
         rsp = self.send_request(fgr.FGRReqCnf.FGR_REQ_CNF_LOG_LEVEL, contents, timeout)
-        return rsp is not None and rsp.error_or_state == fgr.FGRError.FGR_ERROR_NONE
+        if rsp is not None and rsp.error_or_state == fgr.FGRError.FGR_ERROR_NONE:
+            self.node.log_level = level
+            return True
+        return False
 
     def start_logging(self, timeout: float = 2.0) -> bool:
         """Tell node to start logging"""
         rsp = self.send_request(fgr.FGRReqCnf.FGR_REQ_CNF_LOG_START, b"", timeout)
-        return rsp is not None and rsp.error_or_state == fgr.FGRError.FGR_ERROR_NONE
+        if rsp is not None and rsp.error_or_state == fgr.FGRError.FGR_ERROR_NONE:
+            self.node.log_on = True
+            return True
+        return False
 
     def stop_logging(self, timeout: float = 2.0) -> bool:
         """Tell node to stop logging"""
         rsp = self.send_request(fgr.FGRReqCnf.FGR_REQ_CNF_LOG_STOP, b"", timeout)
-        return rsp is not None and rsp.error_or_state == fgr.FGRError.FGR_ERROR_NONE
+        if rsp is not None and rsp.error_or_state == fgr.FGRError.FGR_ERROR_NONE:
+            self.node.log_on = False
+            return True
+        return False
+
+    def led_on(self, timeout: float = 2.0) -> bool:
+        """Tell node to turn debug LED on"""
+        rsp = self.send_request(fgr.FGRReqCnf.FGR_REQ_CNF_DEBUG_LED_ON, b"", timeout)
+        if rsp is not None and rsp.error_or_state == fgr.FGRError.FGR_ERROR_NONE:
+            self.node.led_on = True
+            return True
+        return False
+
+    def led_off(self, timeout: float = 2.0) -> bool:
+        """Tell node to turn debug LED off"""
+        rsp = self.send_request(fgr.FGRReqCnf.FGR_REQ_CNF_DEBUG_LED_OFF, b"", timeout)
+        if rsp is not None and rsp.error_or_state == fgr.FGRError.FGR_ERROR_NONE:
+            self.node.led_on = False
+            return True
+        return False
+
+    def led_breathe_on(self, timeout: float = 2.0) -> bool:
+        """Tell node to turn debug LED breathe on"""
+        rsp = self.send_request(fgr.FGRReqCnf.FGR_REQ_CNF_DEBUG_LED_BREATHE_ON, b"", timeout)
+        if rsp is not None and rsp.error_or_state == fgr.FGRError.FGR_ERROR_NONE:
+            self.node.led_breathe_on = True
+            return True
+        return False
+
+    def led_breathe_off(self, timeout: float = 2.0) -> bool:
+        """Tell node to turn debug LED breathe off"""
+        rsp = self.send_request(fgr.FGRReqCnf.FGR_REQ_CNF_DEBUG_LED_BREATHE_OFF, b"", timeout)
+        if rsp is not None and rsp.error_or_state == fgr.FGRError.FGR_ERROR_NONE:
+            self.node.led_breathe_on = False
+            return True
+        return False
 
     def reboot(self, timeout: float = 2.0) -> bool:
         """Tell node to reboot"""
@@ -344,6 +420,7 @@ class NodeHandler:
                 </div>
             </div>
         '''
+
 
 # ============================================================================
 # Configuration Manager
@@ -546,7 +623,7 @@ class Controller:
                 continue
 
             node_type = node_cfg.get("type", "")
-            essential = node_cfg.get("essential", True)  # Add this line
+            essential = node_cfg.get("essential", True)
             merged_cfg = self.config_mgr.get_node_config(name, node_type)
             heartbeat_timeout = merged_cfg.get("heartbeat_timeout", 60)
 
@@ -582,6 +659,31 @@ class Controller:
         self.nodes[name] = node
         self.nodes_by_ip[ip] = node
         self.logger.info(f"Added node: {name} ({ip}) type='{node_type}', timeout={heartbeat_timeout}s, essential={essential}")
+
+    def _query_node_status(self, node: Node):
+        """Query log and LED status from node after connection"""
+        if not node.sock:
+            return
+
+        # Query log status
+        cnf = self.send_request_to_node(node.name, fgr.FGRReqCnf.FGR_REQ_CNF_LOG_STATUS, b"", timeout=3.0)
+        if cnf and cnf.error_or_state == fgr.FGRError.FGR_ERROR_NONE and len(cnf.contents) >= 2:
+            node.log_on = bool(cnf.contents[0])
+            node.log_level = cnf.contents[1]
+            self.logger.info(f"Node {node.name}: log_on={node.log_on}, log_level={node.log_level}")
+        else:
+            self.logger.debug(f"Node {node.name}: log status query failed/timeout")
+            # Leave as None (unknown)
+
+        # Query debug LED status
+        cnf = self.send_request_to_node(node.name, fgr.FGRReqCnf.FGR_REQ_CNF_DEBUG_LED_STATUS, b"", timeout=3.0)
+        if cnf and cnf.error_or_state == fgr.FGRError.FGR_ERROR_NONE and len(cnf.contents) >= 2:
+            node.led_on = bool(cnf.contents[0])
+            node.led_breathe_on = bool(cnf.contents[1])
+            self.logger.info(f"Node {node.name}: led_on={node.led_on}, led_breathe_on={node.led_breathe_on}")
+        else:
+            self.logger.debug(f"Node {node.name}: LED status query failed/timeout")
+            # Leave as None (unknown)
 
     def _disconnect_node(self, node: Node) -> None:
         """Internal: disconnect a node"""
@@ -801,6 +903,9 @@ class Controller:
                     node.rx_thread.daemon = True
                     node.rx_thread.start()
 
+                    # Query status from node (log and LED settings)
+                    self._query_node_status(node)
+
                     # Notify handler of successful connection
                     try:
                         node.handler.on_connected()
@@ -961,24 +1066,29 @@ class Controller:
             self.send_response_to_node(node.name, ind_type, msg.reference, b"")
             # Update node state
             node.fgr_state = msg.error_or_state
-            node.state = ConnectionState.NEEDS_CFG
+            node.state = ConnectionState.from_fgr_state(msg.error_or_state)
 
         elif ind_type == fgr.FGRIndRsp.FGR_IND_RSP_START:
             self.logger.info(f"Node {node.name}: started")
             node.fgr_state = msg.error_or_state
-            node.state = ConnectionState.STARTED
+            node.state = ConnectionState.from_fgr_state(msg.error_or_state)
 
         elif ind_type == fgr.FGRIndRsp.FGR_IND_RSP_STOP:
             self.logger.info(f"Node {node.name}: stopped")
             node.fgr_state = msg.error_or_state
-            node.state = ConnectionState.STOPPED
+            node.state = ConnectionState.from_fgr_state(msg.error_or_state)
 
         elif ind_type == fgr.FGRIndRsp.FGR_IND_RSP_HEARTBEAT:
             node.heartbeat_count += 1
-            self.logger.info(f"Node {node.name} hearbeat updated {node.heartbeat_count}")
             node.last_heartbeat = time.time()
+            # Extract RSSI from message contents
+            if len(msg.contents) >= 1:
+                rssi = msg.contents[0]
+                if rssi > 127:
+                    rssi = rssi - 256
+                node.rssi = rssi
             if self.logger.isEnabledFor(logging.DEBUG):
-                self.logger.debug(f"[{node.name}] HEARTBEAT #{node.heartbeat_count}")
+                self.logger.debug(f"[{node.name}] HEARTBEAT #{node.heartbeat_count}, RSSI={node.rssi} dBm")
 
         elif ind_type > fgr.FGRIndRsp.FGR_IND_RSP_LAST:
             if self.logger.isEnabledFor(logging.DEBUG):
@@ -1078,7 +1188,7 @@ class Controller:
             if node:
                 # Update state immediately - node confirmed it started
                 node.fgr_state = fgr.FGRState.FGR_STATE_STARTED
-                node.state = ConnectionState.STARTED
+                node.state = ConnectionState.from_fgr_state(fgr.FGRState.FGR_STATE_STARTED)
                 self.logger.info(f"Node {node_name} started (state updated)")
             return True
         else:
@@ -1094,7 +1204,7 @@ class Controller:
             if node:
                 # Update state immediately - node confirmed it stopped
                 node.fgr_state = fgr.FGRState.FGR_STATE_STOPPED
-                node.state = ConnectionState.STOPPED
+                node.state = ConnectionState.from_fgr_state(fgr.FGRState.FGR_STATE_STOPPED)
                 self.logger.info(f"Node {node_name} stopped (state updated)")
             return True
         else:
@@ -1128,13 +1238,7 @@ class Controller:
                 node = self.nodes.get(node_name)
                 if node:
                     node.fgr_state = state_value
-                    # Also update ConnectionState if needed
-                    if state_value == fgr.FGRState.FGR_STATE_STARTED:
-                        node.state = ConnectionState.STARTED
-                    elif state_value == fgr.FGRState.FGR_STATE_STOPPED:
-                        node.state = ConnectionState.STOPPED
-                    elif state_value == fgr.FGRState.FGR_STATE_NEEDS_CFG:
-                        node.state = ConnectionState.NEEDS_CFG
+                    node.state = ConnectionState.from_fgr_state(state_value)
                 self.logger.info(f"Node {node_name} state: {state_value}")
                 return state_value
 

@@ -75,9 +75,6 @@ CONTROLLER_IP_DEFAULT = "10.10.3.1"
 # Max log entries to keep
 MAX_LOG_ENTRIES = 500
 
-# Water reservoir constant (mm from top to full)
-RESERVOIR_DEPTH = 1000
-
 # Journal identifier for log_server.py
 JOURNAL_IDENTIFIER = 'fgr-log-server'
 
@@ -86,6 +83,9 @@ NODE_GRID_CONFIG = Path(__file__).parent / "node_grid_layout.json"
 
 # Nodes per page (2 rows x 4 columns)
 NODES_PER_PAGE = 8
+
+# Log level names
+LOG_LEVEL_NAMES = ['DEBUG', 'INFO', 'WARN', 'ERROR']
 
 
 def format_fgr_state(state):
@@ -127,6 +127,38 @@ def format_fgr_message(msg_type, is_response=True):
         name = name.replace('IND_RSP', 'IND')
     # Replace underscores with spaces
     return name.replace('_', ' ')
+
+
+def format_connection_duration(node: Node) -> str:
+    """Format connection duration with datetime"""
+    if node.sock and hasattr(node, 'connection_time') and node.connection_time:
+        duration = time.time() - node.connection_time
+        days = int(duration // 86400)
+        hours = int((duration % 86400) // 3600)
+        minutes = int((duration % 3600) // 60)
+
+        # Format the "since" part
+        dt = datetime.fromtimestamp(node.connection_time)
+        since_str = dt.strftime("%H:%M:%S %d-%m-%Y")  # Changed format
+
+        if days > 0:
+            return f"{days}d {hours}h (since {since_str})"
+        elif hours > 0:
+            return f"{hours}h {minutes}m (since {since_str})"
+        elif minutes > 0:
+            return f"{minutes}m (since {since_str})"
+        else:
+            return f"<1m (since {since_str})"
+    elif not node.sock and hasattr(node, 'last_seen') and node.last_seen:
+        duration = time.time() - node.last_seen
+        dt = datetime.fromtimestamp(node.last_seen)
+        since_str = dt.strftime("%H:%M:%S %d-%m-%Y")  # Changed format
+        if duration < 3600:
+            return f"disconnected {int(duration // 60)}m ago (since {since_str})"
+        else:
+            return f"disconnected {int(duration // 3600)}h ago (since {since_str})"
+    return ""
+
 
 class WebController(Controller):
     """Web-enabled FGR Controller with journal log reading"""
@@ -428,44 +460,30 @@ class WebController(Controller):
             notification = self.node_notifications.get(name)
             custom_html = self.node_card_html.get(name, '')
 
-            # Calculate connection duration
-            connection_duration = None
-            if node.sock and hasattr(node, 'connection_time') and node.connection_time:
-                duration = time.time() - node.connection_time
-                days = int(duration // 86400)
-                hours = int((duration % 86400) // 3600)
-                minutes = int((duration % 3600) // 60)
-                seconds = int(duration % 60)
-
-                if days > 0:
-                    connection_duration = f"{days}d {hours}h {minutes}m"
-                elif hours > 0:
-                    connection_duration = f"{hours}h {minutes}m"
-                elif minutes > 0:
-                    connection_duration = f"{minutes}m {seconds}s"
-                else:
-                    connection_duration = f"{seconds}s"
-            elif not node.sock and hasattr(node, 'last_seen') and node.last_seen:
-                # Show when it was last seen if disconnected
-                duration = time.time() - node.last_seen
-                if duration < 3600:
-                    connection_duration = f"disconnected {int(duration // 60)}m ago"
-                else:
-                    connection_duration = f"disconnected {int(duration // 3600)}h ago"
+            # Calculate connection duration with datetime
+            connection_duration = format_connection_duration(node)
 
             # Determine display state with formatted name
             if node.sock:
-                if node.state == ConnectionState.STARTED:
-                    display_state = "STARTED"
-                elif node.state == ConnectionState.READY:
-                    display_state = "READY"
-                elif node.state == ConnectionState.NEEDS_CFG:
-                    display_state = "NEEDS CONFIG"
+                display_state = node.state.name if isinstance(node.state, ConnectionState) else str(node.state)
+                # Handle local vs FGR states
+                if display_state.startswith('FGR_'):
+                    display_state = display_state[4:].replace('_', ' ').lower()
                 else:
-                    display_state = node.state.name if isinstance(node.state, ConnectionState) else str(node.state)
-                display_state = format_fgr_state(display_state).lower()
+                    display_state = display_state.lower()
             else:
                 display_state = "disconnected"
+
+            # Format status text
+            if node.log_on is None or node.log_level is None:
+                log_status = ""
+            else:
+                log_status = f"{'ON' if node.log_on else 'OFF'}/{LOG_LEVEL_NAMES[node.log_level] if node.log_level < 4 else '?'}"
+
+            if node.led_on is None or node.led_breathe_on is None:
+                led_status = ""
+            else:
+                led_status = f"{'ON' if node.led_on else 'OFF'} / {'ON' if node.led_breathe_on else 'OFF'}"
 
             nodes_status.append({
                 'name': name,
@@ -479,7 +497,13 @@ class WebController(Controller):
                 'heartbeat_count': node.heartbeat_count,
                 'custom_data': custom_data,
                 'notification': notification,
-                'custom_html': custom_html  # Include custom HTML for the card
+                'custom_html': custom_html,
+                'log_on': node.log_on,
+                'log_level': node.log_level,
+                'log_status': log_status,
+                'led_on': node.led_on,
+                'led_breathe_on': node.led_breathe_on,
+                'rssi': node.rssi if node.rssi is not None else '?'
             })
 
         return {
@@ -494,7 +518,8 @@ class WebController(Controller):
             'journal_enabled': HAS_SYSTEMD,
             'grid_columns': self.node_grid_layout.get('columns', 4),
             'grid_rows': self.node_grid_layout.get('rows', 2),
-            'nodes_per_page': NODES_PER_PAGE
+            'nodes_per_page': NODES_PER_PAGE,
+            'log_level_names': LOG_LEVEL_NAMES
         }
 
     async def _broadcast_status(self):
@@ -699,14 +724,19 @@ class WebController(Controller):
                     result['message'] = f"Node {node_name} not connected"
                     self.set_node_notification(node_name, "Node not connected", True, False)
                 else:
-                    cnf = self.send_request_to_node(node_name, fgr.FGRReqCnf.FGR_REQ_CNF_LOG_START, b"", timeout=3.0)
-                    if cnf and cnf.error_or_state == fgr.FGRError.FGR_ERROR_NONE:
-                        result['message'] = f"Logging started on {node_name}"
-                        self.set_node_notification(node_name, "LOG START", True, True)
+                    node = self.nodes.get(node_name)
+                    if node and node.handler:
+                        if node.handler.start_logging():
+                            result['message'] = f"Logging started on {node_name}"
+                            self.set_node_notification(node_name, "LOG START", True, True)
+                        else:
+                            result['status'] = 'error'
+                            result['message'] = f"Failed to start logging on {node_name}"
+                            self.set_node_notification(node_name, "LOG START failed", True, False)
                     else:
                         result['status'] = 'error'
-                        result['message'] = f"Failed to start logging on {node_name}"
-                        self.set_node_notification(node_name, "LOG START failed", True, False)
+                        result['message'] = f"No handler for {node_name}"
+                        self.set_node_notification(node_name, "No handler", True, False)
 
             elif command == 'log_stop':
                 if not self.nodes.get(node_name, {}).sock:
@@ -714,14 +744,19 @@ class WebController(Controller):
                     result['message'] = f"Node {node_name} not connected"
                     self.set_node_notification(node_name, "Node not connected", True, False)
                 else:
-                    cnf = self.send_request_to_node(node_name, fgr.FGRReqCnf.FGR_REQ_CNF_LOG_STOP, b"", timeout=3.0)
-                    if cnf and cnf.error_or_state == fgr.FGRError.FGR_ERROR_NONE:
-                        result['message'] = f"Logging stopped on {node_name}"
-                        self.set_node_notification(node_name, "LOG STOP", True, True)
+                    node = self.nodes.get(node_name)
+                    if node and node.handler:
+                        if node.handler.stop_logging():
+                            result['message'] = f"Logging stopped on {node_name}"
+                            self.set_node_notification(node_name, "LOG STOP", True, True)
+                        else:
+                            result['status'] = 'error'
+                            result['message'] = f"Failed to stop logging on {node_name}"
+                            self.set_node_notification(node_name, "LOG STOP failed", True, False)
                     else:
                         result['status'] = 'error'
-                        result['message'] = f"Failed to stop logging on {node_name}"
-                        self.set_node_notification(node_name, "LOG STOP failed", True, False)
+                        result['message'] = f"No handler for {node_name}"
+                        self.set_node_notification(node_name, "No handler", True, False)
 
             elif command == 'log_level':
                 if not self.nodes.get(node_name, {}).sock:
@@ -732,15 +767,99 @@ class WebController(Controller):
                     level = params.get('level', 1)
                     if level < 0 or level > 3:
                         level = 1
-                    cnf = self.send_request_to_node(node_name, fgr.FGRReqCnf.FGR_REQ_CNF_LOG_LEVEL, bytes([level]), timeout=3.0)
-                    if cnf and cnf.error_or_state == fgr.FGRError.FGR_ERROR_NONE:
-                        level_names = ['DEBUG', 'INFO', 'WARN', 'ERROR']
-                        result['message'] = f"Log level set to {level_names[level]} on {node_name}"
-                        self.set_node_notification(node_name, f"LOG LEVEL {level_names[level]}", True, True)
+                    node = self.nodes.get(node_name)
+                    if node and node.handler:
+                        if node.handler.set_log_level(level):
+                            result['message'] = f"Log level set to {LOG_LEVEL_NAMES[level]} on {node_name}"
+                            self.set_node_notification(node_name, f"LOG LEVEL {LOG_LEVEL_NAMES[level]}", True, True)
+                        else:
+                            result['status'] = 'error'
+                            result['message'] = f"Failed to set log level on {node_name}"
+                            self.set_node_notification(node_name, "LOG LEVEL failed", True, False)
                     else:
                         result['status'] = 'error'
-                        result['message'] = f"Failed to set log level on {node_name}"
-                        self.set_node_notification(node_name, "LOG LEVEL failed", True, False)
+                        result['message'] = f"No handler for {node_name}"
+                        self.set_node_notification(node_name, "No handler", True, False)
+
+            elif command == 'led_on':
+                if not self.nodes.get(node_name, {}).sock:
+                    result['status'] = 'error'
+                    result['message'] = f"Node {node_name} not connected"
+                    self.set_node_notification(node_name, "Node not connected", True, False)
+                else:
+                    node = self.nodes.get(node_name)
+                    if node and node.handler:
+                        if node.handler.led_on():
+                            result['message'] = f"LED enabled on {node_name}"
+                            self.set_node_notification(node_name, "LED ON", True, True)
+                        else:
+                            result['status'] = 'error'
+                            result['message'] = f"Failed to enable LED on {node_name}"
+                            self.set_node_notification(node_name, "LED ON failed", True, False)
+                    else:
+                        result['status'] = 'error'
+                        result['message'] = f"No handler for {node_name}"
+                        self.set_node_notification(node_name, "No handler", True, False)
+
+            elif command == 'led_off':
+                if not self.nodes.get(node_name, {}).sock:
+                    result['status'] = 'error'
+                    result['message'] = f"Node {node_name} not connected"
+                    self.set_node_notification(node_name, "Node not connected", True, False)
+                else:
+                    node = self.nodes.get(node_name)
+                    if node and node.handler:
+                        if node.handler.led_off():
+                            result['message'] = f"LED disabled on {node_name}"
+                            self.set_node_notification(node_name, "LED OFF", True, True)
+                        else:
+                            result['status'] = 'error'
+                            result['message'] = f"Failed to disable LED on {node_name}"
+                            self.set_node_notification(node_name, "LED OFF failed", True, False)
+                    else:
+                        result['status'] = 'error'
+                        result['message'] = f"No handler for {node_name}"
+                        self.set_node_notification(node_name, "No handler", True, False)
+
+            elif command == 'led_breathe_on':
+                if not self.nodes.get(node_name, {}).sock:
+                    result['status'] = 'error'
+                    result['message'] = f"Node {node_name} not connected"
+                    self.set_node_notification(node_name, "Node not connected", True, False)
+                else:
+                    node = self.nodes.get(node_name)
+                    if node and node.handler:
+                        if node.handler.led_breathe_on():
+                            result['message'] = f"LED breathe enabled on {node_name}"
+                            self.set_node_notification(node_name, "LED BREATHE ON", True, True)
+                        else:
+                            result['status'] = 'error'
+                            result['message'] = f"Failed to enable LED breathe on {node_name}"
+                            self.set_node_notification(node_name, "LED BREATHE ON failed", True, False)
+                    else:
+                        result['status'] = 'error'
+                        result['message'] = f"No handler for {node_name}"
+                        self.set_node_notification(node_name, "No handler", True, False)
+
+            elif command == 'led_breathe_off':
+                if not self.nodes.get(node_name, {}).sock:
+                    result['status'] = 'error'
+                    result['message'] = f"Node {node_name} not connected"
+                    self.set_node_notification(node_name, "Node not connected", True, False)
+                else:
+                    node = self.nodes.get(node_name)
+                    if node and node.handler:
+                        if node.handler.led_breathe_off():
+                            result['message'] = f"LED breathe disabled on {node_name}"
+                            self.set_node_notification(node_name, "LED BREATHE OFF", True, True)
+                        else:
+                            result['status'] = 'error'
+                            result['message'] = f"Failed to disable LED breathe on {node_name}"
+                            self.set_node_notification(node_name, "LED BREATHE OFF failed", True, False)
+                    else:
+                        result['status'] = 'error'
+                        result['message'] = f"No handler for {node_name}"
+                        self.set_node_notification(node_name, "No handler", True, False)
 
             else:
                 result['status'] = 'error'
@@ -791,28 +910,7 @@ class WebController(Controller):
             return web.json_response({'status': 'error', 'message': 'Node not found'})
 
         # Calculate connection duration
-        connection_duration = None
-        if node.sock and hasattr(node, 'connection_time') and node.connection_time:
-            duration = time.time() - node.connection_time
-            days = int(duration // 86400)
-            hours = int((duration % 86400) // 3600)
-            minutes = int((duration % 3600) // 60)
-            seconds = int(duration % 60)
-
-            if days > 0:
-                connection_duration = f"{days}d {hours}h {minutes}m"
-            elif hours > 0:
-                connection_duration = f"{hours}h {minutes}m"
-            elif minutes > 0:
-                connection_duration = f"{minutes}m {seconds}s"
-            else:
-                connection_duration = f"{seconds}s"
-        elif not node.sock and hasattr(node, 'last_seen') and node.last_seen:
-            duration = time.time() - node.last_seen
-            if duration < 3600:
-                connection_duration = f"disconnected {int(duration // 60)}m ago"
-            else:
-                connection_duration = f"disconnected {int(duration // 3600)}h ago"
+        connection_duration = format_connection_duration(node)
 
         node_data = {
             'name': node_name,
@@ -823,7 +921,12 @@ class WebController(Controller):
             'custom_data': self.node_custom_data.get(node_name, {}),
             'message_count': node.message_count,
             'heartbeat_count': node.heartbeat_count,
-            'connection_duration': connection_duration
+            'connection_duration': connection_duration,
+            'log_on': node.log_on,
+            'log_level': node.log_level,
+            'led_on': node.led_on,
+            'led_breathe_on': node.led_breathe_on,
+            'rssi': node.rssi if node.rssi is not None else '?'
         }
 
         return web.json_response({'status': 'ok', 'data': node_data})
@@ -837,11 +940,10 @@ class WebController(Controller):
         if not node:
             return web.json_response({'status': 'error', 'message': 'Node not found'})
 
-        # Get node-specific content from handler
+        # Get node-specific content from handler (this goes in the middle)
         node_specific_html = ""
         if node.handler and hasattr(node.handler, 'get_expanded_html'):
             try:
-                # Prepare minimal node data
                 node_data = {
                     'name': node_name,
                     'custom_data': self.node_custom_data.get(node_name, {}),
@@ -858,17 +960,115 @@ class WebController(Controller):
                 </div>
             '''
 
-        # Build complete expanded view - ONLY node-specific content
-        # The footer (status, metrics, buttons) is already in the card and updated by status stream
+        # Determine online state for display
+        is_online = node.sock is not None
+        state_text = node.state.name if hasattr(node.state, 'name') else str(node.state)
+        if state_text.startswith('FGR_'):
+            state_text = state_text[4:].replace('_', ' ').lower()
+        else:
+            state_text = state_text.lower()
+
+        # Handle None values safely for display
+        log_level_names = ['DEBUG', 'INFO', 'WARN', 'ERROR']
+
+        if node.log_on is None:
+            log_on_str = "?"
+            log_level_str = "?"
+        else:
+            log_on_str = "ON" if node.log_on else "OFF"
+            log_level_str = log_level_names[node.log_level] if node.log_level is not None and node.log_level < 4 else "?"
+
+        log_status_text = f"{log_on_str}/{log_level_str}"
+
+        # LED status with question marks for unknown
+        if node.led_on is None:
+            led_status_text = "?"
+        else:
+            led_status_text = "ON" if node.led_on else "OFF"
+
+        if node.led_breathe_on is None:
+            breathe_status_text = "?"
+        else:
+            breathe_status_text = "ON" if node.led_breathe_on else "OFF"
+
+        # Combined debug status text
+        debug_status_text = f"LED: {led_status_text} / Breathe: {breathe_status_text}"
+
+        # Format connection duration for display
+        connection_duration = format_connection_duration(node)
+
+        # Build the complete expanded footer with all rows
+        expanded_footer_html = f'''
+            <div class="expanded-footer">
+                <!-- Row 1: Status line (state + notification) -->
+                <div class="node-status-line">
+                    <div class="node-state {'online' if is_online else 'offline'}">
+                        <span class="state-text">{'● online' if is_online else '○ offline'} - {state_text}</span>
+                    </div>
+                    <div class="notification-placeholder"></div>
+                </div>
+
+                <!-- Row 2: Metrics line (connection duration + RSSI + message/heartbeat) -->
+                <div class="node-metrics">
+                    <span class="connection-duration">{connection_duration if connection_duration else ''}</span>
+                    <div class="rssi-display" style="display: inline-flex; align-items: center; gap: 3px;">
+                        <span class="rssi-icon">📶</span>
+                            <span class="rssi-value" data-dynamic="rssi">{node.rssi if node.rssi is not None else "?"} dBm</span>
+                    </div>
+                    <span>📨 {node.message_count} 💓 {node.heartbeat_count}</span>
+                </div>
+
+                <!-- Row 3: Node actions (Ping, Start, Stop, Reboot) -->
+                <div class="node-actions">
+                    <button class="btn-query" onclick="sendCommand('{node_name}', 'query_state')">Ping</button>
+                    <button class="btn-start" onclick="sendCommand('{node_name}', 'start')">Start</button>
+                    <button class="btn-stop" onclick="sendCommand('{node_name}', 'stop')">Stop</button>
+                    <button class="btn-reboot" onclick="sendCommand('{node_name}', 'reboot')">Reboot</button>
+                </div>
+
+                <!-- Row 4: Two-column layout (replaces original logging row) -->
+                <div style="display: flex; gap: 10px; margin-top: 3px;">
+                    <!-- Left column: Log Controls -->
+                    <div style="flex: 1;">
+                        <div class="expanded-footer-row-log">
+                            <button class="btn-log-start" onclick="sendCommand('{node_name}', 'log_start')">Log On</button>
+                            <button class="btn-log-stop" onclick="sendCommand('{node_name}', 'log_stop')">Log Off</button>
+                            <select class="expanded-log-level-select" data-node-name="{node_name}">
+                                <option value="0">DEBUG</option>
+                                <option value="1" selected>INFO</option>
+                                <option value="2">WARN</option>
+                                <option value="3">ERROR</option>
+                            </select>
+                            <button class="btn-apply-level" onclick="sendCommand('{node_name}', 'log_level', {{level: parseInt(this.previousElementSibling.value)}})">Apply</button>
+                            <div class="expanded-footer-status" data-dynamic="log_status">{log_status_text}</div>
+                        </div>
+                    </div>
+
+                    <!-- Right column: Debug Controls -->
+                    <div style="flex: 1;">
+                        <div class="expanded-footer-row-debug">
+                            <button class="btn-led-on" onclick="sendCommand('{node_name}', 'led_on')">LED On</button>
+                            <button class="btn-led-off" onclick="sendCommand('{node_name}', 'led_off')">LED Off</button>
+                            <button class="btn-breathe-on" onclick="sendCommand('{node_name}', 'led_breathe_on')">Breathe On</button>
+                            <button class="btn-breathe-off" onclick="sendCommand('{node_name}', 'led_breathe_off')">Breathe Off</button>
+                            <div class="expanded-footer-status" data-dynamic="debug_status">{debug_status_text}</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        '''
+
+        # Build complete expanded view - node content in middle, footer at bottom
         complete_html = f'''
             <div class="expanded-node">
                 <div class="expanded-header">
-                    <h3>{node_name}</h3>
+                    <h3>{node_name} <span class="expanded-nav-hint">← → use arrow keys or page buttons</span></h3>
                     <button class="collapse-btn">✕ Collapse</button>
                 </div>
                 <div class="expanded-content">
                     {node_specific_html}
                 </div>
+                {expanded_footer_html}
             </div>
         '''
 
@@ -953,7 +1153,7 @@ class WebController(Controller):
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
         :root {
-            --card-height: 250px;      /* Change this to adjust card height */
+            --card-height: 260px;      /* Slightly taller to accommodate RSSI */
             --grid-gap: 12px;          /* Gap between cards */
             --grid-rows: 2;            /* Number of rows per page */
             --grid-columns: 4;         /* Number of columns per page */
@@ -964,7 +1164,7 @@ class WebController(Controller):
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
             max-width: 1600px;
             margin: 0 auto;
-            padding: 12px;
+            padding: 4px 12px 12px 12px;
             background: #f5f5f5;
             display: flex;
             flex-direction: column;
@@ -972,16 +1172,17 @@ class WebController(Controller):
         }
         h1 {
             margin: 0;
-            font-size: 22px;
+            font-size: 20px;
             color: #333;
+            line-height: 1.2;
         }
         .header {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            margin-bottom: 12px;
+            margin-bottom: 15px;
             flex-wrap: wrap;
-            gap: 12px;
+            gap: 6px;
             flex-shrink: 0;
         }
         .title-section h1 { margin: 0; }
@@ -990,7 +1191,7 @@ class WebController(Controller):
         .status-banner {
             background: #fff3e0;
             border-left: 4px solid #ffc107;
-            padding: 5px 10px;
+            padding: 2px 8px;
             border-radius: 6px;
             display: flex;
             align-items: center;
@@ -1006,7 +1207,7 @@ class WebController(Controller):
         /* Main grid wrapper with margin buttons */
         .grid-wrapper {
             position: relative;
-            margin: 0 50px;
+            margin: 0 50px 10px 50px;
             flex-shrink: 0;
             display: flex;
             flex-direction: column;
@@ -1015,9 +1216,16 @@ class WebController(Controller):
         /* Grid container - uses CSS variable for height calculation */
         .grid-container {
             position: relative;
-            margin-bottom: 5px;
+            margin-bottom: 2px;
+            margin-top: 0;
             height: calc(var(--card-height) * var(--grid-rows) + var(--grid-gap));
             overflow-y: visible;
+            min-height: auto;
+        }
+
+        /* Make sure the page has enough scroll space */
+        html {
+            overflow-y: auto;
         }
 
         .node-grid {
@@ -1028,6 +1236,7 @@ class WebController(Controller):
             height: 100%;
             align-content: start;
             transition: all 0.3s ease;
+            margin-top: 0;
         }
 
         /* Expanded card mode - single card takes full width */
@@ -1052,6 +1261,18 @@ class WebController(Controller):
             z-index: 10;
         }
 
+        /* When card is expanded, hide the original footer */
+        .node-card.expanded-card .node-footer {
+            display: none;
+        }
+
+        /* Expanded footer - shown only when expanded */
+        .node-card.expanded-card .expanded-footer {
+            display: block;
+            margin-top: auto;
+            flex-shrink: 0;
+        }
+
         .node-grid.has-more {
             grid-template-columns: repeat(auto-fill, minmax(280px, 320px));
         }
@@ -1065,14 +1286,13 @@ class WebController(Controller):
             -webkit-user-select: none;
             -moz-user-select: none;
             -ms-user-select: none;
-            user-select: none;  /* Prevents selection on double-click */
+            user-select: none;
             height: var(--card-height);
             display: flex;
             flex-direction: column;
             overflow: hidden;
             cursor: pointer;
         }
-
 
         .node-card.expanded-card {
             cursor: default;
@@ -1223,6 +1443,15 @@ class WebController(Controller):
         .node-state.online { color: #4caf50; }
         .node-state.offline { color: #f44336; }
         .state-text { text-transform: capitalize; }
+        .rssi-display {
+            display: inline-flex;
+            align-items: center;
+            gap: 3px;
+            font-size: 9px;
+            color: #666;
+        }
+        .rssi-icon { font-size: 10px; }
+        .rssi-value { font-family: monospace; }
         .notification {
             font-size: 8px;
             padding: 1px 4px;
@@ -1250,6 +1479,9 @@ class WebController(Controller):
             padding-top: 4px;
             display: flex;
             justify-content: space-between;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: wrap;
         }
 
         /* Custom area - gets maximum space, supports custom HTML */
@@ -1287,6 +1519,57 @@ class WebController(Controller):
             margin-top: 2px;
         }
 
+        /* Button grid */
+        .node-actions {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 4px;
+            margin-top: 4px;
+            margin-bottom: 3px;
+        }
+        .node-actions-group {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 4px;
+            margin-top: 3px;
+        }
+        button, .log-level-select {
+            padding: 3px 2px;
+            font-size: 8px;
+            border: none;
+            border-radius: 3px;
+            cursor: pointer;
+            transition: all 0.2s;
+            text-align: center;
+            width: 100%;
+        }
+        button:hover { opacity: 0.8; transform: translateY(-1px); }
+        .btn-query { background: #2196f3; color: white; }
+        .btn-start { background: #4caf50; color: white; }
+        .btn-stop { background: #ff9800; color: white; }
+        .btn-reboot { background: #f44336; color: white; }
+        .btn-log-start { background: #009688; color: white; }
+        .btn-log-stop { background: #607d8b; color: white; }
+        .btn-led-on, .btn-breathe-on { background: #4caf50; color: white; }
+        .btn-led-off, .btn-breathe-off { background: #f44336; color: white; }
+        .log-level-select {
+            background: #e0e0e0;
+            cursor: pointer;
+            font-size: 7px;
+        }
+        .log-status-text {
+            font-size: 7px;
+            background: #e8f5e9;
+            padding: 3px 2px;
+            border-radius: 3px;
+            text-align: center;
+            color: #2e7d32;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        /* Expanded view styles */
         .expanded-node {
             padding: 5px;
             display: flex;
@@ -1380,27 +1663,25 @@ class WebController(Controller):
             margin: 0;
         }
 
-        /* Ensure the footer stays at bottom of expanded card */
-        .node-card.expanded-card .node-footer {
-            margin-top: auto;
-            flex-shrink: 0;
-        }
-
-        /* Button grid */
-        .node-actions {
+        /* Expanded footer button rows */
+        .expanded-footer-row-log {
             display: grid;
-            grid-template-columns: repeat(4, 1fr);
-            gap: 4px;
-            margin-top: 4px;
-            margin-bottom: 3px;
-        }
-        .node-actions-group {
-            display: grid;
-            grid-template-columns: repeat(4, 1fr);
+            grid-template-columns: repeat(5, 1fr);
             gap: 4px;
             margin-top: 3px;
         }
-        button, .log-level-select {
+
+        .expanded-footer-row-debug {
+            display: grid;
+            grid-template-columns: repeat(5, 1fr);
+            gap: 4px;
+            margin-top: 3px;
+        }
+
+        .expanded-footer-row-log button,
+        .expanded-footer-row-debug button,
+        .expanded-footer-row-log select,
+        .expanded-footer-row-debug select {
             padding: 3px 2px;
             font-size: 8px;
             border: none;
@@ -1410,20 +1691,197 @@ class WebController(Controller):
             text-align: center;
             width: 100%;
         }
-        button:hover { opacity: 0.8; transform: translateY(-1px); }
-        .btn-query { background: #2196f3; color: white; }
-        .btn-start { background: #4caf50; color: white; }
-        .btn-stop { background: #ff9800; color: white; }
-        .btn-reboot { background: #f44336; color: white; }
-        .btn-log-start { background: #009688; color: white; }
-        .btn-log-stop { background: #607d8b; color: white; }
-        .log-level-select {
-            background: #e0e0e0;
-            cursor: pointer;
-            font-size: 7px;
+
+        .expanded-footer-row-log button:hover,
+        .expanded-footer-row-debug button:hover {
+            opacity: 0.8;
+            transform: translateY(-1px);
         }
 
-        /* Side navigation buttons */
+        .expanded-footer-status {
+            font-size: 7px;
+            background: #e8f5e9;
+            padding: 3px 2px;
+            border-radius: 3px;
+            text-align: center;
+            color: #2e7d32;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .expanded-log-level-select {
+            background: #e0e0e0;
+            border: none;
+            border-radius: 3px;
+            padding: 3px 2px;
+            font-size: 7px;
+            cursor: pointer;
+            text-align: center;
+            width: 100%;
+        }
+
+        /* Debug panel - fixed position with margins */
+        .debug-panel {
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 -2px 10px rgba(0,0,0,0.15);
+            position: fixed;
+            bottom: 10px;
+            left: 10px;
+            right: 10px;
+            z-index: 1000;
+            display: flex;
+            flex-direction: column;
+            transition: height 0.1s ease;
+            border: 1px solid #ddd;
+            min-height: 40px;
+        }
+
+        /* Resize handle at the top edge of the panel */
+        .debug-panel-resize-handle {
+            position: absolute;
+            top: -6px;
+            left: 20px;
+            right: 20px;
+            height: 12px;
+            cursor: ns-resize;
+            background: #007bff;
+            border-radius: 6px 6px 0 0;
+            z-index: 1001;
+            opacity: 0.6;
+            transition: opacity 0.2s;
+        }
+
+        .debug-panel-resize-handle:hover {
+            opacity: 1;
+            background: #0056b3;
+        }
+
+        .debug-panel-resize-handle:active {
+            opacity: 1;
+            background: #004099;
+        }
+
+        /* Collapsed state */
+        .debug-panel.collapsed {
+            height: 42px !important;
+            min-height: 42px;
+            cursor: pointer;
+        }
+
+        .debug-panel.collapsed .debug-header {
+            cursor: pointer;
+            border-radius: 6px;
+        }
+
+        .debug-panel.collapsed .debug-window,
+        .debug-panel.collapsed .debug-buttons {
+            display: none;
+        }
+
+        .debug-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: nowrap;
+            gap: 12px;
+            padding: 8px 15px;
+            background: #f0f0f0;
+            border-radius: 6px 6px 0 0;
+            flex-shrink: 0;
+            user-select: none;
+            border-bottom: 1px solid #ddd;
+        }
+
+        .debug-header h2 {
+            margin: 0;
+            font-size: 13px;
+            color: #333;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-shrink: 0;
+            white-space: nowrap;
+        }
+
+        .debug-buttons {
+            display: flex;
+            gap: 6px;
+            flex-shrink: 0;
+        }
+
+        .debug-buttons button {
+            padding: 4px 8px;
+            font-size: 10px;
+            white-space: nowrap;
+        }
+
+        /* Dock button */
+        .debug-dock-btn {
+            background: #6c757d;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            padding: 2px 8px;
+            font-size: 10px;
+            cursor: pointer;
+        }
+
+        .debug-dock-btn:hover {
+            background: #5a6268;
+        }
+
+        /* Toggle button */
+        .debug-toggle-btn {
+            background: #007bff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            padding: 2px 8px;
+            font-size: 10px;
+            cursor: pointer;
+        }
+
+        .debug-toggle-btn:hover {
+            background: #0056b3;
+        }
+
+        /* Debug window log area */
+        .debug-window {
+            background: #1e1e1e;
+            color: #d4d4d4;
+            font-family: 'Courier New', 'SF Mono', 'Monaco', 'Menlo', monospace;
+            font-size: 11px;
+            padding: 10px;
+            flex: 1;
+            overflow-y: auto;
+            min-height: 100px;
+            line-height: 1.4;
+            border-radius: 0 0 6px 6px;
+        }
+
+        .debug-window .log-ctrl {
+            color: #4ec9b0;
+        }
+
+        .debug-window .log-node {
+            color: #9cdcfe;
+        }
+
+        .footer {
+            text-align: center;
+            color: #999;
+            font-size: 8px;
+            margin-top: 4px;
+            margin-bottom: 80px;
+            flex-shrink: 0;
+        }
+
+        .badge-success { background: #4caf50; color: white; padding: 2px 5px; border-radius: 4px; font-size: 8px; }
+        .badge-warning { background: #ff9800; color: white; padding: 2px 5px; border-radius: 4px; font-size: 8px; }
+
+        /* Navigation buttons */
         .nav-btn {
             position: absolute;
             top: 50%;
@@ -1432,8 +1890,8 @@ class WebController(Controller):
             color: white;
             border: none;
             border-radius: 50%;
-            width: 36px;
-            height: 36px;
+            width: 40px;
+            height: 40px;
             cursor: pointer;
             transition: all 0.2s;
             display: flex;
@@ -1441,109 +1899,35 @@ class WebController(Controller):
             justify-content: center;
             box-shadow: 0 2px 6px rgba(0,0,0,0.2);
             z-index: 10;
-            font-family: Arial, Helvetica, sans-serif;
-            font-size: 16px;
-            font-weight: normal;
-            line-height: 1;
+            font-size: 18px;
+            font-weight: bold;
             padding: 0;
-            text-align: center;
         }
-        .nav-prev {
-            left: -46px;
-        }
-        .nav-prev::before {
-            content: "◀";
-            display: inline-block;
-            position: relative;
-            top: -1px;
-        }
-        .nav-next {
-            right: -46px;
-        }
-        .nav-next::before {
-            content: "▶";
-            display: inline-block;
-            position: relative;
-            top: -1px;
-        }
+
         .nav-btn span {
-            display: none;
+            display: inline-block;
+            line-height: 1;
         }
+
+        .nav-prev {
+            left: -50px;
+        }
+
+        .nav-next {
+            right: -50px;
+        }
+
         .nav-btn:hover:not(:disabled) {
             background: #0056b3;
             transform: translateY(-50%) scale(1.05);
         }
+
         .nav-btn:disabled {
             background: #cccccc;
             cursor: not-allowed;
             opacity: 0.5;
+            transform: translateY(-50%);
         }
-
-        /* Page indicator */
-        .page-indicator {
-            text-align: center;
-            margin-top: 2px;
-            margin-bottom: 8px;
-            font-size: 10px;
-            color: #888;
-            background: rgba(255,255,255,0.8);
-            display: block;
-            padding: 2px 8px;
-            border-radius: 20px;
-            width: fit-content;
-            margin-left: auto;
-            margin-right: auto;
-        }
-        .page-indicator span {
-            font-weight: bold;
-            color: #007bff;
-        }
-
-        /* Debug panel */
-        .debug-panel {
-            background: white;
-            border-radius: 6px;
-            padding: 10px;
-            margin-top: 0;
-            margin-bottom: 0;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-            flex-shrink: 0;
-        }
-        .debug-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 6px;
-            flex-wrap: wrap;
-            gap: 6px;
-        }
-        .debug-header h2 { margin: 0; font-size: 12px; color: #555; }
-        .debug-buttons { display: flex; gap: 4px; }
-        .debug-buttons button {
-            padding: 3px 6px;
-            font-size: 9px;
-        }
-        .debug-window {
-            background: #1e1e1e;
-            color: #d4d4d4;
-            font-family: 'Courier New', monospace;
-            font-size: 9px;
-            padding: 6px;
-            border-radius: 4px;
-            height: 150px;
-            overflow-y: auto;
-        }
-        .debug-window .log-ctrl { color: #4ec9b0; }
-        .debug-window .log-node { color: #9cdcfe; }
-        .footer {
-            text-align: center;
-            color: #999;
-            font-size: 8px;
-            margin-top: 8px;
-            flex-shrink: 0;
-        }
-        .badge-success { background: #4caf50; color: white; padding: 2px 5px; border-radius: 4px; font-size: 8px; }
-        .badge-warning { background: #ff9800; color: white; padding: 2px 5px; border-radius: 4px; font-size: 8px; }
 
         .scroll-hint {
             text-align: center;
@@ -1553,6 +1937,34 @@ class WebController(Controller):
             display: none;
         }
         .scroll-hint.show { display: block; }
+
+
+        /* 5-column layout for logging row with Apply button */
+        .node-actions-group-5col {
+            display: grid;
+            grid-template-columns: repeat(5, 1fr);
+            gap: 4px;
+            margin-top: 3px;
+        }
+
+        /* Style for Apply button */
+        .btn-apply-level {
+            background: #17a2b8;
+            color: white;
+            padding: 3px 2px;
+            font-size: 7px;
+            border: none;
+            border-radius: 3px;
+            cursor: pointer;
+            transition: all 0.2s;
+            text-align: center;
+            width: 100%;
+        }
+
+        .btn-apply-level:hover {
+            opacity: 0.8;
+            transform: translateY(-1px);
+        }
 
         @media (max-width: 1200px) {
             .node-grid { grid-template-columns: repeat(4, minmax(260px, 1fr)); }
@@ -1612,7 +2024,7 @@ class WebController(Controller):
         <div id="debugWindow" class="debug-window">Waiting for logs...</div>
     </div>
 
-    <div class="footer">FGR Controller - Drag ⋮⋮ to reorder nodes | Double-click card to expand</div>
+    <div class="footer">FGR Controller - Drag ⋮⋮ to reorder nodes | Double-click card to expand | Drag blue bar above debug panel to resize | 📌 Dock returns to default size | Click header to collapse/expand</div>
 
     <script>
         let statusSource = null;
@@ -1628,6 +2040,7 @@ class WebController(Controller):
         let isExpanded = false;  // Track if a card is expanded
         let expandedNodeName = null;  // Track which node is expanded
         let expandedRefreshInterval = null;  // Refresh dynamic data for expanded view
+        let debugPanelCollapsed = false;  // Track debug panel collapsed state
 
         // Pagination variables
         let currentPage = 0;
@@ -1658,7 +2071,6 @@ class WebController(Controller):
 
         // Expand a card to full view
         async function expandCard(nodeName) {
-
             // Clear any existing text selection
             if (window.getSelection) {
                 window.getSelection().removeAllRanges();
@@ -1674,7 +2086,6 @@ class WebController(Controller):
 
             // If already expanded but different node, just swap the content
             if (isExpanded && expandedNodeName !== nodeName) {
-
                 // Swap to new node without changing grid layout
                 const currentCard = document.querySelector('.node-card.expanded-card');
                 if (currentCard) {
@@ -1738,7 +2149,6 @@ class WebController(Controller):
 
                             // Start refreshing dynamic data for the new node
                             startExpandedRefresh(nodeName);
-
                         } else {
                             console.error('Invalid API response:', result);
                             customContainer.innerHTML = `
@@ -1872,7 +2282,6 @@ class WebController(Controller):
 
                     // Start refreshing dynamic data
                     startExpandedRefresh(nodeName);
-
                 } else {
                     customContainer.innerHTML = originalHtml;
                     console.error('Failed to load expanded view:', result.message);
@@ -1936,6 +2345,164 @@ class WebController(Controller):
                     scrollTimeout = setTimeout(() => { autoScrollEnabled = true; }, 10000);
                 }
             });
+        }
+
+        // Setup floating debug panel with resize, collapse, and dock
+        function setupResizableDebugPanel() {
+            const debugPanel = document.querySelector('.debug-panel');
+            if (!debugPanel) return;
+
+            // Get header elements
+            const header = debugPanel.querySelector('.debug-header');
+            const title = header.querySelector('h2');
+            const buttonsDiv = header.querySelector('.debug-buttons');
+
+            // Clear existing extra buttons from h2 (remove any that were added before)
+            const existingBtns = title.querySelectorAll('button');
+            existingBtns.forEach(btn => btn.remove());
+
+            // Add dock button to h2
+            const dockBtn = document.createElement('button');
+            dockBtn.className = 'debug-dock-btn';
+            dockBtn.textContent = '📌 Dock';
+            dockBtn.onclick = function(e) {
+                e.stopPropagation();
+                dockDebugPanel();
+            };
+            title.appendChild(dockBtn);
+
+            // Add toggle button to h2
+            const toggleBtn = document.createElement('button');
+            toggleBtn.className = 'debug-toggle-btn';
+            toggleBtn.textContent = '▲ Collapse';
+            toggleBtn.onclick = function(e) {
+                e.stopPropagation();
+                toggleDebugPanel();
+            };
+            title.appendChild(toggleBtn);
+
+            // Store docked height
+            if (!debugPanel.getAttribute('data-docked-height')) {
+                debugPanel.setAttribute('data-docked-height', '250px');
+            }
+
+            // Create resize handle at the top edge
+            let resizeHandle = debugPanel.querySelector('.debug-panel-resize-handle');
+            if (!resizeHandle) {
+                resizeHandle = document.createElement('div');
+                resizeHandle.className = 'debug-panel-resize-handle';
+                debugPanel.insertBefore(resizeHandle, debugPanel.firstChild);
+            }
+
+            // Set initial docked height
+            if (!debugPanel.style.height || debugPanel.style.height === '40px' || debugPanel.style.height === '42px') {
+                debugPanel.style.height = debugPanel.getAttribute('data-docked-height');
+            }
+
+            let isResizing = false;
+            let startY = 0;
+            let startHeight = 0;
+
+            resizeHandle.addEventListener('mousedown', function(e) {
+                if (debugPanelCollapsed) return;
+                isResizing = true;
+                startY = e.clientY;
+                startHeight = debugPanel.offsetHeight;
+                document.body.style.userSelect = 'none';
+                document.body.style.cursor = 'ns-resize';
+                e.preventDefault();
+            });
+
+            document.addEventListener('mousemove', function(e) {
+                if (!isResizing) return;
+
+                // Calculate new height (dragging UP increases height)
+                const deltaY = startY - e.clientY;
+                let newHeight = startHeight + deltaY;
+
+                const minHeight = 100;
+                const maxHeight = window.innerHeight * 0.93;  // 93% of window height, just below header/banner
+
+                newHeight = Math.min(maxHeight, Math.max(minHeight, newHeight));
+
+                debugPanel.style.height = newHeight + 'px';
+            });
+
+            document.addEventListener('mouseup', function() {
+                if (isResizing) {
+                    isResizing = false;
+                    document.body.style.userSelect = '';
+                    document.body.style.cursor = '';
+                }
+            });
+
+            // Make the whole header clickable to toggle (but not buttons)
+            header.addEventListener('click', function(e) {
+                // Don't toggle if clicking on buttons
+                if (e.target.tagName === 'BUTTON') return;
+                toggleDebugPanel();
+            });
+        }
+
+        function dockDebugPanel() {
+            const debugPanel = document.querySelector('.debug-panel');
+            const dockBtn = document.querySelector('.debug-dock-btn');
+
+            if (!debugPanel) return;
+
+            const dockedHeight = debugPanel.getAttribute('data-docked-height') || '250px';
+
+            // If already docked, do nothing
+            if (debugPanel.style.height === dockedHeight && !debugPanelCollapsed) {
+                // Flash feedback to show it's already docked
+                dockBtn.style.background = '#28a745';
+                setTimeout(() => {
+                    dockBtn.style.background = '#6c757d';
+                }, 500);
+                return;
+            }
+
+            // Ensure not collapsed
+            if (debugPanelCollapsed) {
+                toggleDebugPanel();
+            }
+
+            // Set to docked height
+            debugPanel.style.height = dockedHeight;
+
+            // Flash feedback
+            dockBtn.style.background = '#28a745';
+            setTimeout(() => {
+                dockBtn.style.background = '#6c757d';
+            }, 500);
+        }
+
+        function toggleDebugPanel() {
+            const debugPanel = document.querySelector('.debug-panel');
+            const toggleBtn = document.querySelector('.debug-toggle-btn');
+
+            if (!debugPanel) return;
+
+            debugPanelCollapsed = !debugPanelCollapsed;
+
+            if (debugPanelCollapsed) {
+                // Save current height before collapsing
+                const currentHeight = debugPanel.style.height;
+                if (currentHeight && currentHeight !== '40px' && currentHeight !== '42px') {
+                    debugPanel.setAttribute('data-expanded-height', currentHeight);
+                }
+                debugPanel.classList.add('collapsed');
+                if (toggleBtn) toggleBtn.textContent = '▼ Expand';
+            } else {
+                debugPanel.classList.remove('collapsed');
+                const savedHeight = debugPanel.getAttribute('data-expanded-height');
+                if (savedHeight) {
+                    debugPanel.style.height = savedHeight;
+                } else if (debugPanel.style.height === '40px' || debugPanel.style.height === '42px') {
+                    debugPanel.style.height = debugPanel.getAttribute('data-docked-height') || '250px';
+                }
+                if (toggleBtn) toggleBtn.textContent = '▲ Collapse';
+            }
         }
 
         function selectAllLogs() {
@@ -2167,7 +2734,6 @@ class WebController(Controller):
             window.dragMouseY = e.clientY;
         });
 
-
         document.addEventListener('keydown', function(e) {
             if (isExpanded) {
                 if (e.key === 'ArrowLeft') {
@@ -2264,6 +2830,9 @@ class WebController(Controller):
                 const isOnline = node.connected;
                 const essentialClass = node.essential ? 'essential' : 'non-essential';
                 const customHtml = node.custom_html || '';
+                const logStatusText = node.log_status || '?';
+                const rssi = node.rssi !== undefined && node.rssi !== null ? node.rssi : '?';
+                const rssiIcon = (rssi !== '?' && rssi > -50) ? '📶' : '📶';  // Keep icon simple for unknown
 
                 html += `
                     <div class="node-card ${isOnline ? 'online' : 'offline'} ${essentialClass}"
@@ -2299,26 +2868,31 @@ class WebController(Controller):
                                 </div>
                                 <div id="notification-${node.name.replace(/[^a-zA-Z0-9]/g, '_')}" class="notification-placeholder"></div>
                             </div>
-                            <div class="node-metrics">
-                                <span class="connection-duration">${node.connection_duration ? '📡 ' + node.connection_duration : ''}</span>
-                                <span>📨 <span class="message-count">${node.message_count}</span> 💓 <span class="heartbeat-count">${node.heartbeat_count}</span></span>
-                            </div>
+                                <div class="node-metrics">
+                                    <span class="connection-duration">${node.connection_duration ? '📡 ' + node.connection_duration : ''}</span>
+                                    <div class="rssi-display" style="display: inline-flex; align-items: center; gap: 3px;">
+                                        <span class="rssi-icon">${rssiIcon}</span>
+                                        <span class="rssi-value">${rssi} dBm</span>
+                                    </div>
+                                    <span>📨 <span class="message-count">${node.message_count}</span> 💓 <span class="heartbeat-count">${node.heartbeat_count}</span></span>
+                                </div>
                             <div class="node-actions">
                                 <button class="btn-query" onclick="sendCommand('${node.name}', 'query_state')">Ping</button>
                                 <button class="btn-start" onclick="sendCommand('${node.name}', 'start')">Start</button>
                                 <button class="btn-stop" onclick="sendCommand('${node.name}', 'stop')">Stop</button>
                                 <button class="btn-reboot" onclick="sendCommand('${node.name}', 'reboot')">Reboot</button>
                             </div>
-                            <div class="node-actions-group">
+                            <div class="node-actions-group-5col">
                                 <button class="btn-log-start" onclick="sendCommand('${node.name}', 'log_start')">Log On</button>
                                 <button class="btn-log-stop" onclick="sendCommand('${node.name}', 'log_stop')">Log Off</button>
                                 <select class="log-level-select" data-node-name="${node.name}">
                                     <option value="0">DEBUG</option>
-                                    <option value="1" selected>INFO</option>
+                                    <option value="1">INFO</option>
                                     <option value="2">WARN</option>
                                     <option value="3">ERROR</option>
                                 </select>
-                                <button class="btn-query" onclick="setLogLevelFromSelect('${node.name}')">Set</button>
+                                <button class="btn-apply-level" onclick="sendCommand('${node.name}', 'log_level', {level: parseInt(this.previousElementSibling.value)})">Apply</button>
+                                <div class="log-status-text">${logStatusText}</div>
                             </div>
                         </div>
                     </div>
@@ -2330,15 +2904,6 @@ class WebController(Controller):
             for (const nodeName of pageNodes) {
                 updateNodeCustomData(nodesData[nodeName]);
             }
-
-            document.querySelectorAll('.log-level-select').forEach(select => {
-                select.addEventListener('change', function(e) {
-                    e.stopPropagation();
-                    const nodeName = this.getAttribute('data-node-name');
-                    const level = parseInt(this.value);
-                    setLogLevel(nodeName, level);
-                });
-            });
 
             gridBuilt = true;
         }
@@ -2398,8 +2963,6 @@ class WebController(Controller):
                 const stateSpan = card.querySelector('.state-text');
                 if (stateSpan) {
                     stateSpan.textContent = `${isOnline ? '● online' : '○ offline'} - ${node.state}`;
-                } else {
-                    console.log('  WARNING: state-text not found');
                 }
 
                 // Update node-state div class
@@ -2412,6 +2975,13 @@ class WebController(Controller):
                         nodeStateDiv.classList.add('offline');
                         nodeStateDiv.classList.remove('online');
                     }
+                }
+
+                // Update RSSI display
+                const rssiSpan = card.querySelector('.rssi-value');
+                if (rssiSpan) {
+                    const rssiValue = (node.rssi === null || node.rssi === undefined) ? '?' : node.rssi;
+                    rssiSpan.textContent = rssiValue + ' dBm';
                 }
 
                 // Update notification (toast)
@@ -2445,27 +3015,23 @@ class WebController(Controller):
                 // Update metrics (connection duration, message count, heartbeat count)
                 const durationSpan = card.querySelector('.connection-duration');
                 if (durationSpan) {
-                    const oldValue = durationSpan.textContent;
-                    const newValue = node.connection_duration ? '📡 ' + node.connection_duration : '';
-                    durationSpan.textContent = newValue;
-                } else {
-                    console.log('  WARNING: .connection-duration element not found');
+                    durationSpan.textContent = node.connection_duration ? '📡 ' + node.connection_duration : '';
                 }
 
                 const messageCountSpan = card.querySelector('.message-count');
                 if (messageCountSpan) {
-                    const oldValue = messageCountSpan.textContent;
                     messageCountSpan.textContent = node.message_count;
-                } else {
-                    console.log('  WARNING: .message-count element not found');
                 }
 
                 const heartbeatCountSpan = card.querySelector('.heartbeat-count');
                 if (heartbeatCountSpan) {
-                    const oldValue = heartbeatCountSpan.textContent;
                     heartbeatCountSpan.textContent = node.heartbeat_count;
-                } else {
-                    console.log('  WARNING: .heartbeat-count element not found');
+                }
+
+                // Update log status text
+                const logStatusSpan = card.querySelector('.log-status-text');
+                if (logStatusSpan && node.log_status) {
+                    logStatusSpan.textContent = node.log_status;
                 }
 
                 // Update custom data (the card's center area - only if not expanded or if it's a different node)
@@ -2486,12 +3052,18 @@ class WebController(Controller):
             }
         }
 
-        function setLogLevelFromSelect(nodeName) {
-            const select = document.querySelector(`.log-level-select[data-node-name="${nodeName}"]`);
-            if (select) {
-                const level = parseInt(select.value);
-                setLogLevel(nodeName, level);
-            }
+        async function sendCommand(nodeName, command, params = {}) {
+            try {
+                const response = await fetch('/api/command', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({node: nodeName, command: command, params: params})
+                });
+                const result = await response.json();
+                if (result.status === 'error') {
+                    console.error(`[ERROR] ${result.message}`);
+                }
+            } catch (e) { console.error(`[ERROR] ${e.message}`); }
         }
 
         function updateUI(status) {
@@ -2581,49 +3153,6 @@ class WebController(Controller):
             }
         }
 
-        async function sendCommand(nodeName, command) {
-            try {
-                const response = await fetch('/api/command', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({node: nodeName, command: command})
-                });
-                const result = await response.json();
-                if (result.status === 'error') {
-                    console.error(`[ERROR] ${result.message}`);
-                }
-            } catch (e) { console.error(`[ERROR] ${e.message}`); }
-        }
-
-        async function setLogLevel(nodeName, level) {
-            try {
-                const response = await fetch('/api/command', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({node: nodeName, command: 'log_level', params: {level: parseInt(level)}})
-                });
-                const result = await response.json();
-                if (result.status === 'error') {
-                    console.error(`[ERROR] ${result.message}`);
-                }
-            } catch (e) { console.error(`[ERROR] ${e.message}`); }
-        }
-
-        function setupStatusStream() {
-            if (statusSource) statusSource.close();
-            const source = new EventSource('/api/status/stream');
-            source.onmessage = (event) => {
-                try { updateUI(JSON.parse(event.data)); }
-                catch (e) { console.error("Error parsing status:", e); }
-            };
-            source.onerror = () => {
-                console.log('Status stream error, reconnecting...');
-                source.close();
-                setTimeout(setupStatusStream, 5000);
-            };
-            statusSource = source;
-        }
-
         function startExpandedRefresh(nodeName) {
             // Clear existing interval
             if (expandedRefreshInterval) {
@@ -2666,42 +3195,100 @@ class WebController(Controller):
             const expandedCard = document.querySelector('.node-card.expanded-card');
             if (!expandedCard) return;
 
-            const customContainer = expandedCard.querySelector('.node-custom-container');
-            if (!customContainer) return;
+            const expandedFooter = expandedCard.querySelector('.expanded-footer');
+            if (!expandedFooter) return;
 
             const customData = nodeData.custom_data || {};
 
-            // Only update node-specific dynamic elements
-            const dynamicElements = customContainer.querySelectorAll('[data-dynamic]');
-
-            dynamicElements.forEach(el => {
-                const field = el.getAttribute('data-dynamic');
-                let newValue = null;
-
-                if (field === 'value') {
-                    newValue = customData.value !== undefined ? customData.value : 'N/A';
-                } else if (field === 'last_update') {
-                    newValue = customData.last_update || 'N/A';
-                } else if (field === 'water_height') {
-                    newValue = customData.water_height !== undefined ? customData.water_height : 'N/A';
-                } else if (field === 'level') {
-                    newValue = customData.level !== undefined ? customData.level : 'N/A';
-                } else if (field === 'percentage') {
-                    newValue = customData.percentage !== undefined ? customData.percentage.toFixed(1) : 'N/A';
-                } else if (customData[field] !== undefined) {
-                    newValue = customData[field];
+            // Update log status - nodeData.log_status is at top level
+            const logStatusSpan = expandedFooter.querySelector('[data-dynamic="log_status"]');
+            if (logStatusSpan) {
+                // Construct log status from individual fields if log_status not directly available
+                let logStatusText = nodeData.log_status;
+                if (!logStatusText && nodeData.log_on !== undefined && nodeData.log_level !== undefined) {
+                    const logOnStr = nodeData.log_on ? 'ON' : 'OFF';
+                    const levelNames = ['DEBUG', 'INFO', 'WARN', 'ERROR'];
+                    const levelStr = levelNames[nodeData.log_level] || '?';
+                    logStatusText = `${logOnStr}/${levelStr}`;
                 }
-
-                if (newValue !== null && el.textContent != newValue) {
-                    el.textContent = newValue;
-                    // Optional: flash effect
-                    const originalBg = el.style.backgroundColor;
-                    el.style.backgroundColor = '#90ee90';
+                if (logStatusText && logStatusSpan.textContent !== logStatusText) {
+                    logStatusSpan.textContent = logStatusText;
+                    // Flash effect
+                    const originalBg = logStatusSpan.style.backgroundColor;
+                    logStatusSpan.style.backgroundColor = '#90ee90';
                     setTimeout(() => {
-                        el.style.backgroundColor = originalBg;
+                        logStatusSpan.style.backgroundColor = originalBg;
                     }, 200);
                 }
-            });
+            }
+
+            // Update debug status (combined LED + Breathe)
+            const debugStatusSpan = expandedFooter.querySelector('[data-dynamic="debug_status"]');
+            if (debugStatusSpan) {
+                let ledText = '?';
+                let breatheText = '?';
+
+                if (nodeData.led_on !== undefined && nodeData.led_on !== null) {
+                    ledText = nodeData.led_on ? 'ON' : 'OFF';
+                }
+                if (nodeData.led_breathe_on !== undefined && nodeData.led_breathe_on !== null) {
+                    breatheText = nodeData.led_breathe_on ? 'ON' : 'OFF';
+                }
+
+                const newStatusText = `LED: ${ledText} / Breathe: ${breatheText}`;
+                if (debugStatusSpan.textContent !== newStatusText) {
+                    debugStatusSpan.textContent = newStatusText;
+                    // Flash effect
+                    const originalBg = debugStatusSpan.style.backgroundColor;
+                    debugStatusSpan.style.backgroundColor = '#90ee90';
+                    setTimeout(() => {
+                        debugStatusSpan.style.backgroundColor = originalBg;
+                    }, 200);
+                }
+            }
+
+            // Update RSSI in metrics row
+            const rssiValueSpan = expandedFooter.querySelector('.rssi-value');
+            if (rssiValueSpan && nodeData.rssi !== undefined) {
+                let rssiValue = nodeData.rssi;
+                if (rssiValue === null || rssiValue === '?' || rssiValue === 'null' || rssiValue === 0) {
+                    rssiValue = '?';
+                }
+                rssiValueSpan.textContent = rssiValue + ' dBm';
+            }
+
+            // Update node-specific dynamic elements in custom container
+            const customContainer = expandedCard.querySelector('.node-custom-container');
+            if (customContainer) {
+                const dynamicElements = customContainer.querySelectorAll('[data-dynamic]');
+                dynamicElements.forEach(el => {
+                    const field = el.getAttribute('data-dynamic');
+                    let newValue = null;
+
+                    if (field === 'value') {
+                        newValue = customData.value !== undefined ? customData.value : 'N/A';
+                    } else if (field === 'last_update') {
+                        newValue = customData.last_update || 'N/A';
+                    } else if (field === 'water_height') {
+                        newValue = customData.water_height !== undefined ? customData.water_height : 'N/A';
+                    } else if (field === 'level') {
+                        newValue = customData.level !== undefined ? customData.level : 'N/A';
+                    } else if (field === 'percentage') {
+                        newValue = customData.percentage !== undefined ? customData.percentage.toFixed(1) : 'N/A';
+                    } else if (customData[field] !== undefined) {
+                        newValue = customData[field];
+                    }
+
+                    if (newValue !== null && el.textContent != newValue) {
+                        el.textContent = newValue;
+                        const originalBg = el.style.backgroundColor;
+                        el.style.backgroundColor = '#90ee90';
+                        setTimeout(() => {
+                            el.style.backgroundColor = originalBg;
+                        }, 200);
+                    }
+                });
+            }
         }
 
         function stopExpandedRefresh() {
@@ -2709,6 +3296,21 @@ class WebController(Controller):
                 clearInterval(expandedRefreshInterval);
                 expandedRefreshInterval = null;
             }
+        }
+
+        function setupStatusStream() {
+            if (statusSource) statusSource.close();
+            const source = new EventSource('/api/status/stream');
+            source.onmessage = (event) => {
+                try { updateUI(JSON.parse(event.data)); }
+                catch (e) { console.error("Error parsing status:", e); }
+            };
+            source.onerror = () => {
+                console.log('Status stream error, reconnecting...');
+                source.close();
+                setTimeout(setupStatusStream, 5000);
+            };
+            statusSource = source;
         }
 
         function setupLogsStream() {
@@ -2747,11 +3349,13 @@ class WebController(Controller):
         }
 
         setupDebugWindow();
+        setupResizableDebugPanel();
         setupStatusStream();
         setupLogsStream();
     </script>
 </body>
 </html>'''
+
 
 def main():
     parser = argparse.ArgumentParser(description="FGR Controller with Web Interface")

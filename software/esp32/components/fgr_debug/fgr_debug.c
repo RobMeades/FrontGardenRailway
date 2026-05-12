@@ -492,8 +492,7 @@ static void update_breathe_colour(context_t *context)
     if (context->cb) {
         state = context->cb(context->cb_param);
     }
-    if (state <= FGR_STATE_LAST) {
-        breathe_state->enabled = true;
+    if (state <= FGR_STATE_LAST && (breathe_state->enabled)) {
         breathe_state->colour = fgr_state_to_colour(state);
         breathe_state->period_steps = LED_UPDATE_BREATHE_PERIOD_STEPS;
     }
@@ -606,10 +605,6 @@ static void task_led(void *param)
                     } else {
                         breathe_state->use_cb = false;
                     }
-                    if (!breathe_state->enabled) {
-                        nvs_led_breathe_enabled_set(true);
-                    }
-                    breathe_state->enabled = true;
                     breathe_state->colour = cmd.colour;
                     breathe_state->period_steps = cmd.breathe_period_steps;
                     breathe_state->step_counter = 0;
@@ -630,9 +625,6 @@ static void task_led(void *param)
                     break;
 
                 case FGR_LED_MODE_OFF:
-                    if (breathe_state->enabled) {
-                        nvs_led_breathe_enabled_set(false);
-                    }
                     breathe_state->enabled = false;
                     flash_state->active = false;
                     break;
@@ -692,8 +684,9 @@ void led_breathe_enabled(context_t *context, bool enabled)
 
         if (context->running) {
 
+            context->breathe_state.enabled = enabled;
+            nvs_led_breathe_enabled_set(enabled);
             led_cmd_t cmd;
-
             if (enabled) {
                 // Resume breathing with last colour
                 cmd.mode = FGR_LED_MODE_BREATHE;
@@ -835,11 +828,14 @@ void fgr_debug_deinit()
 #  if defined(CONFIG_FGR_DEBUG_LED_SPI_NUM) && (CONFIG_FGR_DEBUG_LED_SPI_NUM > 1) // SPIs 0 and 1 are used internally
     if (g_context.lock) {
 
+        g_context.running = false;
+
         CONTEXT_LOCK(g_context.lock, "fgr_debug_deinit()");
 
-        // Let the LED task exit
-        g_context.running = false;
-        vTaskDelay(1000);
+        if (g_context.task_handle) {
+            // Let the LED task exit
+            vTaskDelay(100);
+        }
 
         if (g_context.queue) {
             vQueueDelete(g_context.queue);
@@ -847,6 +843,7 @@ void fgr_debug_deinit()
         }
 
         if (g_context.spi) {
+            spi_bus_remove_device(g_context.spi);
             spi_bus_free(CONFIG_FGR_DEBUG_LED_SPI_NUM);
             g_context.spi = NULL;
         }
@@ -915,7 +912,8 @@ void fgr_debug_led_breathe_set(fgr_debug_colour_t colour)
 
         CONTEXT_LOCK(g_context.lock, "fgr_debug_set_breathe()");
 
-        if (g_context.running && !g_context.led_masked_off) {
+        if (g_context.running && !g_context.led_masked_off &&
+            g_context.breathe_state.enabled) {
             led_cmd_t cmd = {
                 .mode = FGR_LED_MODE_BREATHE,
                 .colour = colour,
@@ -923,6 +921,7 @@ void fgr_debug_led_breathe_set(fgr_debug_colour_t colour)
                 .flash_duration_steps = 0
             };
             xQueueSend(g_context.queue, &cmd, portMAX_DELAY);
+
         }
 
         CONTEXT_UNLOCK(g_context.lock, "fgr_debug_set_breathe()");

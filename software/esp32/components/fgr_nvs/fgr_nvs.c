@@ -102,7 +102,7 @@ int32_t fgr_nvs_get(const char *name, uint32_t *value)
         if (err == ESP_OK) {
             err = nvs_get_u32(nvs_handle, name, value);
             if (err == ESP_OK)  {
-                ESP_LOGD(TAG, "value %d read from storage %s",
+                ESP_LOGD(TAG, "Value %d read from storage for \"%s\"",
                          *value, name);
             } else {
                 ESP_LOGW(TAG, "Unable to read \"%s\" from NVS:"
@@ -133,7 +133,7 @@ int32_t fgr_nvs_set(const char *name, uint32_t value)
             if (err == ESP_OK) {
                 err = nvs_commit(nvs_handle);
                 if (err == ESP_OK)  {
-                    ESP_LOGD(TAG, "value %d commited to storage %s",
+                    ESP_LOGD(TAG, "Value %d commited to storage for \"%s\"",
                              value, name);
                 } else {
                     ESP_LOGW(TAG, "Unable to commit changes to NVS:"

@@ -71,6 +71,7 @@ typedef enum {
 
 // Request/confirmation messages; note that the top four bits must
 // be zero as they will be ORed with fgr_msg_type_t.
+// IF YOU ADD A MESSAGE HERE don't forget to add it to the printable list in fgr_msg.c
 typedef enum {
     FGR_REQ_CNF_NULL                   = 0x0000,
     FGR_REQ_CNF_CFG                    = 0x0001, // Configure a node; the message contents are node specific
@@ -113,6 +114,7 @@ typedef enum {
 } fgr_log_level_t;
 
 // Error codes.
+// IF YOU ADD AN ERROR CODE HERE don't forget to add it to the printable list in fgr_msg.c
 typedef enum {
     FGR_ERROR_NONE              = 0,
     FGR_ERROR_GENERIC           = 1,
@@ -131,6 +133,8 @@ typedef enum {
 // has connected, been configured, has stopped for some reason or has ended up in
 // a bad global state e.g. (disconnected).  Any more details states should be signalled
 // in another way.
+// IF YOU ADD A STATUS HERE don't forget to add it to the printable list in fgr_msg.c
+// AND to the ConnectionState class in controller.py
 typedef enum {
     FGR_STATE_NOT_POPULATED    = 0,
     FGR_STATE_NEEDS_CFG        = 1,   // Matches FGR_IND_RSP_NEEDS_CFG

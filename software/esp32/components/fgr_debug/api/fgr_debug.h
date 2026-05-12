@@ -268,6 +268,11 @@ void fgr_debug_led_on(void);
  * effect only runs if you are using a WS2812 debug LED
  * (i.e. CONFIG_FGR_DEBUG_LED_SPI_NUM is defined).
  *
+ * Note: LED breathing is by default on but this will do nothing
+ * if fgr_debug_led_breathe_off() was previously called, or if
+ * non-volatile storage is in play and fgr_debug_led_breathe_off()
+ * was called in a previous boot.
+ *
  * @param colour the LED colour.
  */
 void fgr_debug_led_breathe_set(fgr_debug_colour_t colour);

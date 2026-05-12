@@ -555,7 +555,7 @@ int32_t fgr_socket_connect_is_complete(void **context, int32_t timeout_ms)
 {
     int32_t err = -ESP_ERR_INVALID_ARG;
 
-    if (fgr_util_is_valid_ptr_to_ptr(context, TAG, "socket context") &&
+    if (fgr_util_is_valid_ptr_to_ptr(context, TAG, "socket context", __FILE__, __LINE__) &&
         context && *context) {
 
         err = -ESP_ERR_NOT_FINISHED;
@@ -612,7 +612,7 @@ int32_t fgr_socket_connect_is_complete(void **context, int32_t timeout_ms)
 // Stop connecting a non-blocking socket.
 void fgr_socket_connect_stop(void **context)
 {
-    if (fgr_util_is_valid_ptr_to_ptr(context, TAG, "socket context") &&
+    if (fgr_util_is_valid_ptr_to_ptr(context, TAG, "socket context", __FILE__, __LINE__) &&
         context) {
 
         free(*context);
@@ -685,7 +685,7 @@ int32_t fgr_socket_channel_maintain(void **context,
 {
     int32_t err = -ESP_ERR_INVALID_ARG;
 
-    if (fgr_util_is_valid_ptr_to_ptr(context, TAG, "channel context") &&
+    if (fgr_util_is_valid_ptr_to_ptr(context, TAG, "channel context", __FILE__, __LINE__) &&
         context && *context &&
         ((heartbeat_seconds == 0) || (heartbeat_cb != NULL))) {
 
@@ -727,7 +727,7 @@ int32_t fgr_socket_channel_maintain(void **context,
 // Log activity on a channel.
 void fgr_socket_channel_activity(void **context)
 {
-    if (fgr_util_is_valid_ptr_to_ptr(context, TAG, "channel context") &&
+    if (fgr_util_is_valid_ptr_to_ptr(context, TAG, "channel context", __FILE__, __LINE__) &&
         context && *context) {
 
         context_channel_t *context_channel = (context_channel_t *) *context;
@@ -743,7 +743,7 @@ void fgr_socket_channel_activity(void **context)
 // Trigger a reconnection attempt.
 void fgr_socket_channel_failed(void **context)
 {
-    if (fgr_util_is_valid_ptr_to_ptr(context, TAG, "channel context") &&
+    if (fgr_util_is_valid_ptr_to_ptr(context, TAG, "channel context", __FILE__, __LINE__) &&
         context && *context) {
 
         context_channel_t *context_channel = (context_channel_t *) *context;
@@ -759,17 +759,21 @@ void fgr_socket_channel_failed(void **context)
 // Stop a socket connection that was started by fgr_socket_start().
 void fgr_socket_channel_stop(void **context)
 {
-    if (fgr_util_is_valid_ptr_to_ptr(context, TAG, "channel context") &&
+    if (fgr_util_is_valid_ptr_to_ptr(context, TAG, "channel context", __FILE__, __LINE__) &&
         context && *context) {
 
         context_channel_t *context_channel = (context_channel_t *) *context;
 
         if (context_channel->lock) {
+
+            context_channel->running = false;
+
             CONTEXT_LOCK(context_channel->lock, "fgr_socket_stop()");
 
-            // Let the reconnect task exit
-            context_channel->running = false;
-            vTaskDelay(1000);
+            if (context_channel->task_handle) {
+                // Let the reconnect task exit
+                vTaskDelay(1000);
+            }
 
             // Lose the socket
             fgr_socket_destroy(&context_channel->sock);
@@ -871,8 +875,10 @@ void fgr_socket_receive_stop(void **context)
         context_rx_t *context_rx = (context_rx_t *) *context;
         if (context_rx && context_rx->running) {
             context_rx->running = false;
-            // Wait for existing rx task to exit
-            vTaskDelay(pdMS_TO_TICKS(1000));
+            if (context_rx->task_handle) {
+                // Wait for existing rx task to exit
+                vTaskDelay(pdMS_TO_TICKS(1000));
+            }
             free(*context);
             *context = NULL;
         }

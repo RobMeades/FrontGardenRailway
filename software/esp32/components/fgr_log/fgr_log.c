@@ -26,6 +26,7 @@
 #include <string.h>
 #include <inttypes.h>
 #include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "freertos/queue.h"
 #include "esp_system.h"
 #include "esp_task_wdt.h"
@@ -46,6 +47,15 @@
 // Logging prefix
 #define TAG "log"
 
+#ifndef FGR_MSG_TASK_LOG_STACK_SIZE
+#  define FGR_MSG_TASK_LOG_STACK_SIZE (1024 * 4)
+#endif
+
+#ifndef LOG_QUEUE_LENGTH
+// How many messages to hold in the queue, each of size queue_msg_t.
+#  define LOG_QUEUE_LENGTH 100
+#endif
+
 #ifndef NVS_NAME_LOG_ON_NOT_OFF
 // A name for the logging on/off field in NV storage.
 #  define NVS_NAME_LOG_ON_NOT_OFF "log_on_not_off"
@@ -60,14 +70,24 @@
  * TYPES
  * -------------------------------------------------------------- */
 
+// A message to be forwarded on the logging queue.
+typedef struct {
+    fgr_msg_header_log_t header;
+    size_t body_length; // Need this since the length inside body is htonl() encoded, includes the length field itself
+    fgr_msg_body_t *body;
+} queue_msg_t;
+
 // Context.
 typedef struct {
+    fgr_log_level_t level_min;  // Minimum level to forward
+    bool on_not_off;
     int sock;
     void *context_sock;
     bool connected;
     SemaphoreHandle_t lock;
-    fgr_log_level_t level_min;  // Minimum level to forward
-    bool on_not_off;
+    TaskHandle_t task;
+    QueueHandle_t queue;
+    bool running;
 } context_t;
 
 /* ----------------------------------------------------------------
@@ -133,7 +153,28 @@ static void clean_up()
 
         ESP_LOGI(TAG, "Stopping log forwarding.");
 
+        g_context.running = false;
+
         CONTEXT_LOCK(g_context.lock, "clean_up() log");
+
+        g_context.connected = false;
+
+        if (g_context.task) {
+            // Wait for the log task to exit
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            g_context.task = NULL;
+        }
+
+        if (g_context.queue) {
+            queue_msg_t msg;
+            while (xQueueReceive(g_context.queue, &msg, 0) == pdTRUE) {
+                free(msg.body);
+                vTaskDelay(pdMS_TO_TICKS(FGR_UTIL_WATCHDOG_FEED_TIME_MS));
+                esp_task_wdt_reset();
+            }
+            vQueueDelete(g_context.queue);
+            g_context.queue = NULL;
+        }
 
         // Lose the socket
         fgr_socket_channel_stop(&g_context.context_sock);
@@ -187,23 +228,69 @@ static int32_t nvs_level_min_get(fgr_log_level_t *log_level_min)
 }
 
 // Set the minimum logging level in NVS.
-static int32_t nvs_level_min_set(bool log_level_min)
+static int32_t nvs_level_min_set(fgr_log_level_t log_level_min)
 {
     return fgr_nvs_set(NVS_NAME_LOG_LEVEL_MIN, log_level_min);
+}
+
+/* ----------------------------------------------------------------
+ * STATIC FUNCTIONS: TASK
+ * -------------------------------------------------------------- */
+
+// Log task.
+static void task_log(void *param)
+{
+    context_t *context = (context_t *) param;
+    fgr_msg_t log_msg;
+    queue_msg_t queue_msg;
+
+    esp_task_wdt_add(NULL);
+
+    while (context->running) {
+
+        CONTEXT_LOCK(context->lock, "task_log()");
+
+        // Process all pending messages (non-blocking)
+        while (xQueueReceive(context->queue, &queue_msg, 0) == pdTRUE) {
+
+            if (context->connected) {
+                log_msg.header.log = queue_msg.header;
+                memcpy(&log_msg.body, queue_msg.body, queue_msg.body_length);
+                if (fgr_socket_send(context->sock, &log_msg,
+                                    sizeof(log_msg.header) + queue_msg.body_length, 0) == ESP_OK) {
+                    fgr_socket_channel_activity(&context->context_sock);
+                } else {
+                    fgr_socket_channel_failed(&context->context_sock);
+                    context->connected = false;
+                }
+            }
+
+            free(queue_msg.body);
+        }
+
+        CONTEXT_UNLOCK(context->lock, "task_log()");
+
+        vTaskDelay(pdMS_TO_TICKS(FGR_UTIL_WATCHDOG_FEED_TIME_MS));
+        esp_task_wdt_reset();
+    }
+
+    ESP_LOGI(TAG, "Log task exiting.");
+    esp_task_wdt_delete(NULL);
+    vTaskDelete(NULL);
 }
 
 /* ----------------------------------------------------------------
  * STATIC FUNCTIONS: CALLBACKS
  * -------------------------------------------------------------- */
 
-// Custom vprintf handler with level filtering
+// Custom vprintf handler with level filtering.
 static int tcp_log_vprintf(const char *fmt, va_list args)
 {
-    fgr_msg_t log_msg;
-    fgr_msg_header_log_t *header = &(log_msg.header.log);
-    fgr_msg_body_t *body = &(log_msg.body);
+    queue_msg_t queue_msg = {0};
+    fgr_msg_header_log_t *header = &queue_msg.header;
+    fgr_msg_body_t **body = &(queue_msg.body);
 
-    if (g_context.on_not_off) {
+    if (g_context.running && g_context.on_not_off) {
         // Parse the log level from format string
         // ESP-IDF logs start with level character: "I (123) TAG: message"
         esp_log_level_t esp_log_level = ESP_LOG_INFO;
@@ -222,37 +309,36 @@ static int tcp_log_vprintf(const char *fmt, va_list args)
         // Convert to protocol log level
         fgr_log_level_t fgr_log_level = esp_to_fgr_log_level(esp_log_level);
 
-        // Format the message
-        int32_t length = vsnprintf((char *) (body->contents), FGR_LOG_STRING_MAX_LEN, fmt, args);
+        if (fgr_log_level >= g_context.level_min) {
+            *body = (fgr_msg_body_t *) malloc(sizeof(**body));
+            if (*body) {
+                // Format the message
+                int32_t length = vsnprintf((char *) ((*body)->contents), FGR_LOG_STRING_MAX_LEN, fmt, args);
 
-        if (length > FGR_LOG_STRING_MAX_LEN) {
-            length = FGR_LOG_STRING_MAX_LEN;
-        }
-
-        // Strip off any trailing linefeed
-        if ((length > 0) && (body->contents[length - 1] == '\n')) {
-            length--;
-        }
-
-        // Forward if level meets minimum and we're connected
-        if ((length > 0) && g_context.connected && (fgr_log_level >= g_context.level_min)) {
-
-            if (xSemaphoreTake(g_context.lock, pdMS_TO_TICKS(100)) == pdTRUE) {
-
-                header->type = htons(((uint16_t) FGR_MSG_TYPE_LOG) << 12);
-                header->level = fgr_log_level;
-                body->length = htonl((uint32_t) length);
-                body->contents[length] = 0; // Ensure terminator
-
-                if (fgr_socket_send(g_context.sock, (const uint8_t *) &log_msg,
-                                    sizeof(log_msg.header) + sizeof(log_msg.body.length) + length, 0) == ESP_OK) {
-                    fgr_socket_channel_activity(&g_context.context_sock);
-                } else {
-                    fgr_socket_channel_failed(&g_context.context_sock);
-                    g_context.connected = false;
+                if (length > FGR_LOG_STRING_MAX_LEN) {
+                    length = FGR_LOG_STRING_MAX_LEN;
                 }
 
-                xSemaphoreGive(g_context.lock);
+                // Strip off any trailing linefeed
+                if ((length > 0) && ((*body)->contents[length - 1] == '\n')) {
+                    length--;
+                }
+
+                // Assemble and forward
+                header->type = htons(((uint16_t) FGR_MSG_TYPE_LOG) << 12);
+                header->level = fgr_log_level;
+                (*body)->length = htonl((uint32_t) length);
+                queue_msg.body_length = length + sizeof((*body)->length);
+                (*body)->contents[length] = 0; // Ensure terminator
+
+                // Should really lock the context here but if we do that
+                // and xQueueSend() blocks we're stuffed 'cos the log task
+                // won't be able to get the lock to send it.
+                // Just have to make sure we don't pull the rug out
+                // from under ourselves in clean_up()...?
+                if (xQueueSend(g_context.queue, &queue_msg, portMAX_DELAY) != pdPASS) {
+                    free(*body);
+                }
             }
         }
     }
@@ -309,10 +395,13 @@ int32_t fgr_log_init(const char *server_ip, uint16_t port,
             err = -ESP_ERR_NO_MEM;
             g_context.lock = xSemaphoreCreateMutex();
         }
+    }
 
-        if (g_context.lock) {
+    if (g_context.lock) {
 
-            CONTEXT_LOCK(g_context.lock, "fgr_log_init()");
+        CONTEXT_LOCK(g_context.lock, "fgr_log_init()");
+
+        if (!g_context.running) {
 
             g_context.level_min = level_min;
 
@@ -339,23 +428,43 @@ int32_t fgr_log_init(const char *server_ip, uint16_t port,
                                                   socket_reconnect_cb,
                                                   NULL,
                                                   &g_context);
-                if (err != ESP_OK) {
+                if (err == ESP_OK) {
+                    g_context.connected = true;
+                } else {
                     fgr_socket_channel_stop(&g_context.context_sock);
                     g_context.sock = -1;
                 }
             }
 
-            CONTEXT_UNLOCK(g_context.lock, "fgr_log_init()");
+            if (err == ESP_OK) {
+                err = -ESP_ERR_NO_MEM;
+                // Start logging queue and task
+                if (!g_context.queue) {
+                    g_context.queue = xQueueCreate(LOG_QUEUE_LENGTH, sizeof(queue_msg_t));
+                    if (g_context.queue) {
+                        g_context.running = true;
+                        if (xTaskCreate(&task_log, "log", FGR_MSG_TASK_LOG_STACK_SIZE,
+                                        &g_context, 5, &g_context.task) == pdPASS) {
+                            err = ESP_OK;
+                        } else {
+                            g_context.running = false;
+                            vQueueDelete(g_context.queue);
+                            g_context.queue = NULL;
+                        }
+                    }
+                }
+            }
 
             if (err == ESP_OK) {
                 // Set vprintf handler
-                g_context.connected = true;
                 esp_log_set_vprintf(tcp_log_vprintf);
                 ESP_LOGI(TAG, "Logs will be forwarded to %s:%d, log level %d.",
-                         server_ip, port, g_context.level_min);
+                        server_ip, port, g_context.level_min);
 
             }
         }
+
+        CONTEXT_UNLOCK(g_context.lock, "fgr_log_init()");
     }
 
     if (err != ESP_OK) {
