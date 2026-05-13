@@ -481,6 +481,21 @@ int32_t fgr_socket_enable_tcp_keep_alive(int sock,
     return err;
 }
 
+// Disable Nagle's algorithm on a log socket
+int32_t fgr_socket_enable_tcp_no_delay(int sock)
+{
+    int32_t err = ESP_OK;
+
+    // Enable keep-alive
+    int x = 1;
+    if (setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &x, sizeof(x)) != 0) {
+        ESP_LOGE(TAG, "Failed to set TCP_NODELAY: %d (%s)!", errno, strerror(errno));
+        err = ESP_FAIL;
+    }
+
+    return err;
+}
+
 // Connect a socket, blocking version
 int32_t fgr_socket_connect(int sock, const char *server_ip, uint16_t port)
 {

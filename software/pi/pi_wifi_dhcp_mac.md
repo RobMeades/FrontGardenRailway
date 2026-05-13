@@ -94,3 +94,4 @@ This is done within `dnsmasq` which is used by `nmcli` under the hood.
 - Check the new IP address allocations with:
 
   `sudo arp`
+

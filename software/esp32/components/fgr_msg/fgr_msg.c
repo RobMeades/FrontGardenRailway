@@ -513,6 +513,7 @@ static void socket_reconnect_cb(int sock, void *param)
     if (context->lock) {
 
         CONTEXT_LOCK(context->lock, "socket_reconnect_cb() msg");
+
         int32_t err = fgr_socket_enable_tcp_keep_alive(sock,
                                                        FGR_SOCKET_TCP_KEEP_ALIVE_IDLE_TIME_SECONDS,
                                                        FGR_SOCKET_TCP_KEEP_ALIVE_PROBE_INTERVAL_SECONDS,
@@ -520,10 +521,16 @@ static void socket_reconnect_cb(int sock, void *param)
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "fgr_socket_enable_tcp_keep_alive() returned error: %s.", esp_err_to_name(err));
         }
+        err = fgr_socket_enable_tcp_no_delay(sock);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "fgr_socket_enable_tcp_no_delay() returned error: %s.", esp_err_to_name(err));
+        }
+
         context->sock = sock;
         context->connected = true;
         // Set the debug LED back to normal
         fgr_debug_led_breathe_set(FGR_DEBUG_LED_COLOUR_NONE);
+
         CONTEXT_UNLOCK(context->lock, "socket_reconnect_cb() msg");
     }
 }

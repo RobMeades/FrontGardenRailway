@@ -139,6 +139,14 @@ int32_t fgr_socket_enable_tcp_keep_alive(int sock,
                                          int32_t tcp_keep_alive_probe_interval_seconds,
                                          size_t tcp_keep_alive_count);
 
+/** Disable Nagle's algorithm on the log socket; more likely
+ * to spot socket failures early this way.
+ *
+ * @param sock the socket.
+ * @return     ESP_OK on success, else a negative value from esp_err_t.
+ */
+int32_t fgr_socket_enable_tcp_no_delay(int sock);
+
 /** Connect a socket, blocking version, to be used on blocking sockets;
  * if you have called fgr_socket_set_non_blocking() on the socket you
  * MUST use fgr_socket_connect_start() instead.

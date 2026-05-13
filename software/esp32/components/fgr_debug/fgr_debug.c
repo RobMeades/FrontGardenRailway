@@ -91,7 +91,7 @@
 // the WS2812 encoded brightess range for each of R, G and B.
 #define INTENSITY_SCALE_MAX 255
 
-// The WS2812 RGB LED used for the CONFIG_FGR_DEBUG_LED_SPI_NUM case,
+// The WS2812 tri-colour LED used for the CONFIG_FGR_DEBUG_LED_SPI_NUM case,
 // see datasheet here:
 //
 // https://www.normandled.com/upload/201607/WS2812B%20Mini%203535%20LED%20Datasheet.pdf
@@ -103,6 +103,7 @@
 // One bit high for 800 ns +/- 150 ns
 // One bit low for 450 ns +/- 150 ns
 // Meaning of bits is 8 bits red then 8 bits green then 8 bits blue
+// or 8 bits green then 8 bits red then 8 bits blue if CONFIG_FGR_DEBUG_LED_WS2812_GRB
 // Order of transmission is MSB first, as is SPI
 // End of group timing is to go low for > 50000 ns
 //
@@ -137,11 +138,11 @@
 // The low time to add on the end to signal end of group
 #define WS2812_END_OF_GROUP_SPI_BITS_LOW (51000 / (1000000000 / SPI_SPEED_HZ))
 
-// The number of SPI bits per WS2812 RGB transaction: 3
+// The number of SPI bits per WS2812 RGB/GRB transaction: 3
 // WS2812 bytes plus the end of group low time
 #define SPI_BITS_PER_WS2812_TRANSACTION ((SPI_BITS_PER_WS2812_BYTE * 3) + WS2812_END_OF_GROUP_SPI_BITS_LOW)
 
-// The buffer size (in bytes) to hold a WS2812 RGB transaction
+// The buffer size (in bytes) to hold a WS2812 RGB/GRB transaction
 #define SPI_TRANSACTION_BUFFER_LENGTH_BYTES ((SPI_BITS_PER_WS2812_TRANSACTION / 8) + 1)
 
 /* ----------------------------------------------------------------
@@ -325,8 +326,13 @@ static size_t ws2812_spi_transaction(fgr_debug_colour_t *colour,
 
         uint8_t *buffer_ptr = buffer;
         // Encode the three bytes, order RGB
+#ifdef CONFIG_FGR_DEBUG_LED_WS2812_GRB
+        ws2812_encode_byte(colour->green, &buffer_ptr, &length);
+        ws2812_encode_byte(colour->red, &buffer_ptr, &length);
+#else
         ws2812_encode_byte(colour->red, &buffer_ptr, &length);
         ws2812_encode_byte(colour->green, &buffer_ptr, &length);
+#endif
         ws2812_encode_byte(colour->blue, &buffer_ptr, &length);
         encoded_length_bits = SPI_BITS_PER_WS2812_TRANSACTION;
     }
@@ -739,7 +745,7 @@ int32_t fgr_debug_init(fgr_debug_state_cb_t cb, void *cb_param)
 #if defined(CONFIG_FGR_DEBUG_LED_PIN) && (CONFIG_FGR_DEBUG_LED_PIN >= 0)
 #  if defined(CONFIG_FGR_DEBUG_LED_SPI_NUM) && (CONFIG_FGR_DEBUG_LED_SPI_NUM > 1) // SPIs 0 and 1 are used internally
 
-            // Use SPI to clock out the 24 bits of RGB to a WS2812 LED.
+            // Use SPI to clock out the 24 bits of RGB/GRB to a WS2812 LED.
             spi_bus_config_t bus_cfg = {
                 .mosi_io_num = CONFIG_FGR_DEBUG_LED_PIN,
                 .miso_io_num = -1,
@@ -771,6 +777,7 @@ int32_t fgr_debug_init(fgr_debug_state_cb_t cb, void *cb_param)
                             if (cb) {
                                 g_context.breathe_state.use_cb = true;
                             }
+                            ESP_LOGI(TAG, "If the LED breathes red when obviously connected, toggle CONFIG_FGR_DEBUG_LED_WS2812_GRB.");
                             err = ESP_OK;
                         } else {
                             g_context.running = false;

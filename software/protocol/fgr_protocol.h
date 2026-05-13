@@ -61,7 +61,7 @@ extern "C" {
 // The message type; this is OR'ed with the top nibble of the request/
 // confirmation/indication/response/log message. 
 typedef enum {
-    FGR_MSG_TYPE_NULL = 0,
+    FGR_MSG_TYPE_NULL = 0,   // Never to be transmitted intentionally, always to be ignored when received; may be used internally
     FGR_MSG_TYPE_REQ  = 1,   // Sent from a controller to a node to initiate an action
     FGR_MSG_TYPE_CNF  = 2,   // Sent from a node back to a controller confirming the action
     FGR_MSG_TYPE_IND  = 3,   // Sent from a node to a controller indicating that something has happened
@@ -73,7 +73,7 @@ typedef enum {
 // be zero as they will be ORed with fgr_msg_type_t.
 // IF YOU ADD A MESSAGE HERE don't forget to add it to the printable list in fgr_msg.c
 typedef enum {
-    FGR_REQ_CNF_NULL                   = 0x0000,
+    FGR_REQ_CNF_NULL                   = 0x0000, // Never to be transmitted intentionally, always to be ignored when received; may be used internally
     FGR_REQ_CNF_CFG                    = 0x0001, // Configure a node; the message contents are node specific
     FGR_REQ_CNF_START                  = 0x0002, // The node should start
     FGR_REQ_CNF_STOP                   = 0x0003, // The node should stop
@@ -94,8 +94,9 @@ typedef enum {
 
 // Indication/response messages; note that the top four bits must
 // be zero as they will be ORed with fgr_msg_type_t.
+// IF YOU ADD A MESSAGE HERE don't forget to add it to the printable list in fgr_msg.c
 typedef enum {
-    FGR_IND_RSP_NULL                   = 0x0000,
+    FGR_IND_RSP_NULL                   = 0x0000,  // Never to be transmitted intentionally, always to be ignored when received; may be used internally
     FGR_IND_RSP_NEEDS_CFG              = 0x0001,  // The node has begun but has not yet been configured and so has not started
                                                   // (matches FGR_REQ_CNF_CFG)
     FGR_IND_RSP_START                  = 0x0002,  // The node has started by itself (matches FGR_REQ_CNF_START)
