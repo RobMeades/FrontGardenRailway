@@ -159,70 +159,74 @@ class FGRLogServer:
                   f"[{level_name}] {message}")
 
     def _handle_client(self, client_socket: socket.socket,
-                       client_address: tuple) -> None:
+                    client_address: tuple) -> None:
         """Handle a connected client - runs in its own thread"""
         device_info = {
             'addr': client_address[0],
             'port': client_address[1]
         }
 
-        # Set socket to blocking mode with a timeout to allow checking running flag
         client_socket.settimeout(1.0)
-
         print(f"New connection from {client_address[0]}:{client_address[1]}")
 
         try:
             while self.running:
                 try:
-                    # Receive and parse FGR message
                     msg = receive_message(client_socket, timeout=1.0)
 
                     if msg is None:
-                        # Timeout or connection issue, continue loop to check running flag
+                        # No message received within timeout
+                        # Do a quick check to see if socket is still alive
+                        try:
+                            client_socket.setblocking(False)
+                            data = client_socket.recv(1, socket.MSG_PEEK)
+                            client_socket.setblocking(True)
+                            if not data:
+                                # Socket closed by remote
+                                print(f"Client {client_address[0]}:{client_address[1]} closed connection")
+                                break
+                        except (BlockingIOError, socket.timeout):
+                            # No data available, but socket still alive
+                            pass
+                        except (ConnectionResetError, BrokenPipeError, OSError):
+                            # Socket is dead
+                            print(f"Client {client_address[0]}:{client_address[1]} connection lost")
+                            break
+                        finally:
+                            client_socket.setblocking(True)
                         continue
 
-                    with self.lock:
-                        self.stats['bytes_received'] += len(msg.pack())
-
-                        # Check if this is a log message
-                        if msg.message_type == FGRMsgType.FGR_MSG_TYPE_LOG:
+                    # Process the message
+                    if msg.message_type == FGRMsgType.FGR_MSG_TYPE_LOG:
+                        with self.lock:
                             self.stats['log_messages'] += 1
-
-                            # Extract log message and level
                             log_text = msg.get_log_message()
-                            # Using the generic header structure, the error_or_state
-                            # field is in the position of what is actually the
-                            # log level for LOG messages
                             log_level = msg.reference
-
-                            # Write to journal with IP prepended
                             self._write_to_journal(log_text, log_level, device_info)
 
                 except socket.timeout:
-                    # Expected timeout, just continue to check running flag
                     continue
-                except ConnectionResetError:
-                    print(f"Connection reset by {client_address[0]}:{client_address[1]}")
-                    break
-                except BrokenPipeError:
-                    print(f"Broken pipe from {client_address[0]}:{client_address[1]}")
+                except (ConnectionResetError, BrokenPipeError) as e:
+                    print(f"Connection error from {client_address[0]}:{client_address[1]}: {e}")
                     break
                 except Exception as e:
                     with self.lock:
                         self.stats['errors'] += 1
                     print(f"Error handling client {client_address[0]}:{client_address[1]}: {e}")
-                    # Don't break on transient errors, continue trying
-                    time.sleep(0.1)
                     continue
 
         finally:
+            # Properly close the socket to prevent CLOSE-WAIT
+            try:
+                client_socket.shutdown(socket.SHUT_RDWR)
+            except:
+                pass
             try:
                 client_socket.close()
             except:
                 pass
 
             with self.lock:
-                # Remove thread from tracking
                 if client_socket in self.client_threads:
                     del self.client_threads[client_socket]
 

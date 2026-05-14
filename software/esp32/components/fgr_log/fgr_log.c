@@ -116,9 +116,8 @@ typedef struct {
     void *context_sock;
     bool connected;
     SemaphoreHandle_t lock;
-    TaskHandle_t task;
-    QueueHandle_t queue;
-    bool running;
+    TaskHandle_t task_handle;
+    QueueHandle_t queue_handle;
     buffer_t buffer;
     size_t queue_full_count;
 } context_t;
@@ -186,27 +185,24 @@ static void clean_up()
 
         ESP_LOGI(TAG, "Stopping log forwarding.");
 
-        g_context.running = false;
+        // Need to do this before taking the lock or we
+        // will lock-up the task exit
+        fgr_util_task_destroy(g_context.task_handle);
+        g_context.task_handle = NULL;
 
         CONTEXT_LOCK(g_context.lock, "clean_up() log");
 
         g_context.connected = false;
 
-        if (g_context.task) {
-            // Wait for the log task to exit
-            vTaskDelay(pdMS_TO_TICKS(1000));
-            g_context.task = NULL;
-        }
-
-        if (g_context.queue) {
+        if (g_context.queue_handle) {
             queue_msg_t msg;
-            while (xQueueReceive(g_context.queue, &msg, 0) == pdTRUE) {
+            while (xQueueReceive(g_context.queue_handle, &msg, 0) == pdTRUE) {
                 free(msg.body);
                 vTaskDelay(pdMS_TO_TICKS(FGR_UTIL_WATCHDOG_FEED_TIME_MS));
                 esp_task_wdt_reset();
             }
-            vQueueDelete(g_context.queue);
-            g_context.queue = NULL;
+            vQueueDelete(g_context.queue_handle);
+            g_context.queue_handle = NULL;
         }
 
         // Clean up the disconnect buffer
@@ -318,7 +314,7 @@ static int32_t log_buffer_init(buffer_t *buffer)
     return err;
 }
 
-// Add a message to the disconnect buffer (called from task_log).
+// Add a message to the disconnect buffer (called from task_log_cb()).
 // IMPORTANT: context should be locked before this is called.
 static void log_buffer_add(buffer_t *buffer,
                            fgr_msg_header_log_t *header,
@@ -488,80 +484,64 @@ static void log_buffer_replay(context_t *context,
 }
 
 /* ----------------------------------------------------------------
- * STATIC FUNCTIONS: TASK
+ * STATIC FUNCTIONS: CALLBACKS
  * -------------------------------------------------------------- */
 
-// Log task.
-static void task_log(void *param)
+// Log task callback.
+static void task_log_cb(void *param)
 {
     context_t *context = (context_t *) param;
     fgr_msg_t log_msg;
     queue_msg_t queue_msg;
     char marker_buffer[128];
 
-    esp_task_wdt_add(NULL);
+    CONTEXT_LOCK(context->lock, "task_log_cb()");
 
-    while (context->running) {
+    // Process all pending messages (non-blocking)
+    while (xQueueReceive(context->queue_handle, &queue_msg, 0) == pdTRUE) {
 
-        CONTEXT_LOCK(context->lock, "task_log()");
+        // Check if this is an FGR_MSG_TYPE_NULL message type (internal replay signal)
+        uint16_t msg_type = ntohs(queue_msg.header.type);
 
-        // Process all pending messages (non-blocking)
-        while (xQueueReceive(context->queue, &queue_msg, 0) == pdTRUE) {
-
-            // Check if this is an FGR_MSG_TYPE_NULL message type (internal replay signal)
-            uint16_t msg_type = ntohs(queue_msg.header.type);
-
-            if (msg_type == (FGR_MSG_TYPE_NULL << 12)) {
-                // This is a replay request - release lock and handle it
-                xSemaphoreGive(context->lock);
-                log_buffer_replay(context, marker_buffer, sizeof(marker_buffer));
-                xSemaphoreTake(context->lock, portMAX_DELAY);
-            } else {
-                if (context->connected) {
-                    log_msg.header.log = queue_msg.header;
-                    memcpy(&log_msg.body, queue_msg.body, queue_msg.body_length);
-                    if (fgr_socket_send_no_log(context->sock, &log_msg,
-                                               sizeof(log_msg.header) + queue_msg.body_length, 0) == ESP_OK) {
-                        fgr_socket_channel_activity(&context->context_sock);
-                    } else {
-                        fgr_socket_channel_failed(&context->context_sock);
-                        log_buffer_add(&context->buffer, &queue_msg.header,
-                                       queue_msg.body, queue_msg.body_length);
-                        context->connected = false;
-                    }
+        if (msg_type == (FGR_MSG_TYPE_NULL << 12)) {
+            // This is a replay request - release lock and handle it
+            xSemaphoreGive(context->lock);
+            log_buffer_replay(context, marker_buffer, sizeof(marker_buffer));
+            xSemaphoreTake(context->lock, portMAX_DELAY);
+        } else {
+            if (context->connected) {
+                log_msg.header.log = queue_msg.header;
+                memcpy(&log_msg.body, queue_msg.body, queue_msg.body_length);
+                if (fgr_socket_send_no_log(context->sock, &log_msg,
+                                            sizeof(log_msg.header) + queue_msg.body_length, 0) == ESP_OK) {
+                    fgr_socket_channel_activity(&context->context_sock);
                 } else {
-                    // Disconnected: buffer instead of dropping
+                    fgr_socket_channel_failed(&context->context_sock);
                     log_buffer_add(&context->buffer, &queue_msg.header,
-                                   queue_msg.body, queue_msg.body_length);
+                                    queue_msg.body, queue_msg.body_length);
+                    context->connected = false;
                 }
+            } else {
+                // Disconnected: buffer instead of dropping
+                log_buffer_add(&context->buffer, &queue_msg.header,
+                                queue_msg.body, queue_msg.body_length);
+            }
 
-                free(queue_msg.body);
+            free(queue_msg.body);
 
-                if (context->connected && (context->queue_full_count > 0)) {
-                    // Send a marker message with the count of queue full events
-                    snprintf(marker_buffer, sizeof(marker_buffer),
-                            "### Lost %d log message(s) due to queue full ###",
-                            context->queue_full_count);
-                    context->queue_full_count = 0;
-                    log_replay_marker(marker_buffer, context);
-                }
+            if (context->connected && (context->queue_full_count > 0)) {
+                // Send a marker message with the count of queue full events
+                snprintf(marker_buffer, sizeof(marker_buffer),
+                        "### Lost %d log message(s) due to queue full ###",
+                        context->queue_full_count);
+                context->queue_full_count = 0;
+                log_replay_marker(marker_buffer, context);
             }
         }
-
-        CONTEXT_UNLOCK(context->lock, "task_log()");
-
-        vTaskDelay(pdMS_TO_TICKS(FGR_UTIL_WATCHDOG_FEED_TIME_MS));
-        esp_task_wdt_reset();
     }
 
-    ESP_LOGI(TAG, "Log task exiting.");
-    esp_task_wdt_delete(NULL);
-    vTaskDelete(NULL);
+    CONTEXT_UNLOCK(context->lock, "task_log_cb()");
 }
-
-/* ----------------------------------------------------------------
- * STATIC FUNCTIONS: CALLBACKS
- * -------------------------------------------------------------- */
 
 // Custom vprintf handler with level filtering.
 static int tcp_log_vprintf(const char *fmt, va_list args)
@@ -570,7 +550,7 @@ static int tcp_log_vprintf(const char *fmt, va_list args)
     fgr_msg_header_log_t *header = &queue_msg.header;
     fgr_msg_body_t **body = &(queue_msg.body);
 
-    if (g_context.running && g_context.on_not_off) {
+    if (g_context.queue_handle && g_context.on_not_off) {
         // Parse the log level from format string
         // ESP-IDF logs start with level character: "I (123) TAG: message"
         esp_log_level_t esp_log_level = ESP_LOG_INFO;
@@ -616,7 +596,7 @@ static int tcp_log_vprintf(const char *fmt, va_list args)
                 // won't be able to get the lock to send it.
                 // Just have to make sure we don't pull the rug out
                 // from under ourselves in clean_up()...?
-                if (xQueueSend(g_context.queue, &queue_msg, pdMS_TO_TICKS(100)) != pdPASS) {
+                if (xQueueSend(g_context.queue_handle, &queue_msg, pdMS_TO_TICKS(100)) != pdPASS) {
                     g_context.queue_full_count++;
                     free(*body);
                 }
@@ -668,7 +648,7 @@ static void socket_reconnect_cb(int sock, void *param)
         context->sock = sock;
         context->connected = true;
 
-        if (context->queue && !context->buffer.replay_active) {
+        if (context->queue_handle && !context->buffer.replay_active) {
             // If we have a queue, we are configured and running,
             // so queue an FGR_MSG_TYPE_NULL message as a replay signal
             queue_msg_t replay_msg = {0};
@@ -677,7 +657,7 @@ static void socket_reconnect_cb(int sock, void *param)
             replay_msg.body = NULL;
             replay_msg.body_length = 0;
 
-            if (xQueueSend(context->queue, &replay_msg, pdMS_TO_TICKS(100)) != pdPASS) {
+            if (xQueueSend(context->queue_handle, &replay_msg, pdMS_TO_TICKS(100)) != pdPASS) {
                 ESP_LOGW(TAG, "Failed to queue replay request.");
             }
         }
@@ -708,7 +688,7 @@ int32_t fgr_log_init(const char *server_ip, uint16_t port,
 
         CONTEXT_LOCK(g_context.lock, "fgr_log_init()");
 
-        if (!g_context.running) {
+        if (!g_context.queue_handle) {
 
             g_context.level_min = level_min;
 
@@ -752,9 +732,9 @@ int32_t fgr_log_init(const char *server_ip, uint16_t port,
             if (err == ESP_OK) {
                 err = -ESP_ERR_NO_MEM;
                 // Start logging queue and task
-                if (!g_context.queue) {
-                    g_context.queue = xQueueCreate(LOG_QUEUE_LENGTH, sizeof(queue_msg_t));
-                    if (g_context.queue) {
+                if (!g_context.queue_handle) {
+                    g_context.queue_handle = xQueueCreate(LOG_QUEUE_LENGTH, sizeof(queue_msg_t));
+                    if (g_context.queue_handle) {
                         // Initialize the log buffer
                         err = log_buffer_init(&g_context.buffer);
                         if (err != ESP_OK) {
@@ -762,14 +742,12 @@ int32_t fgr_log_init(const char *server_ip, uint16_t port,
                             // Continue without it
                             err = ESP_OK;
                         }
-                        g_context.running = true;
-                        if (xTaskCreate(&task_log, "log", FGR_MSG_TASK_LOG_STACK_SIZE,
-                                        &g_context, 5, &g_context.task) == pdPASS) {
-                            err = ESP_OK;
-                        } else {
-                            g_context.running = false;
-                            vQueueDelete(g_context.queue);
-                            g_context.queue = NULL;
+                        err = fgr_util_task_create(&task_log_cb, &g_context, "log",
+                                                   FGR_MSG_TASK_LOG_STACK_SIZE,
+                                                   5, &g_context.task_handle);
+                        if (err != ESP_OK) {
+                            vQueueDelete(g_context.queue_handle);
+                            g_context.queue_handle = NULL;
                         }
                     }
                 }

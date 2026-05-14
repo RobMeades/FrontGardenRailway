@@ -212,11 +212,14 @@ typedef fgr_state_t (*fgr_debug_state_cb_t)(void *param);
  *                   defined.
  * @param cb_param   parameter that will be passed to cb()
  *                   when it is called; may be NULL.
- * @return ESP_OK on success, else a negative value from esp_err_t.
+ * @return           ESP_OK on success, else a negative value from
+ *                   esp_err_t.
  */
 int32_t fgr_debug_init(fgr_debug_state_cb_t cb, void *cb_param);
 
-/** Deinitialise debug.
+/** Deinitialise debug.  This will also free any remaining tasks,
+ * and do so in a coooperative way, waiting for any task callbacks
+ * to return, no crowbars.
  */
 void fgr_debug_deinit();
 

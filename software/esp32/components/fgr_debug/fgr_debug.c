@@ -188,8 +188,7 @@ typedef struct {
     spi_device_handle_t spi;
     SemaphoreHandle_t lock;
     TaskHandle_t task_handle;
-    bool running;
-    QueueHandle_t queue;
+    QueueHandle_t queue_handle;
     fgr_debug_state_cb_t cb;
     void *cb_param;
     bool led_masked_off;
@@ -581,85 +580,74 @@ static void update_led(context_t *context)
     }
 }
 
-// LED task.
-static void task_led(void *param)
+// LED task callback
+static void task_led_cb(void *param)
 {
     context_t *context = (context_t *) param;
     breathe_state_t *breathe_state = &(context->breathe_state);
     flash_state_t *flash_state = &(context->flash_state);
-    uint32_t last_update_ms = 0;
+    static uint32_t last_update_ms = 0;
     led_cmd_t cmd;
 
-    esp_task_wdt_add(NULL);
+    uint32_t now_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
 
-    while (context->running) {
-        uint32_t now_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+    CONTEXT_LOCK(g_context.lock, "task_led_cb()");
 
-        CONTEXT_LOCK(g_context.lock, "task_led()");
-
-        // Process all pending messages (non-blocking)
-        while (xQueueReceive(context->queue, &cmd, 0) == pdTRUE) {
-            switch (cmd.mode) {
-                case FGR_LED_MODE_BREATHE:
-                    if ((cmd.colour.red == 0) && (cmd.colour.green == 0) && (cmd.colour.blue == 0)) {
-                        // Receiving a command with all zeroes for the colours
-                        // indicates that we should should choose the breathe
-                        // colour automatically based on the state of the node
-                        if (context->cb) {
-                            breathe_state->use_cb = true;
-                        }
-                    } else {
-                        breathe_state->use_cb = false;
+    // Process all pending messages (non-blocking)
+    while (xQueueReceive(context->queue_handle, &cmd, 0) == pdTRUE) {
+        switch (cmd.mode) {
+            case FGR_LED_MODE_BREATHE:
+                if ((cmd.colour.red == 0) && (cmd.colour.green == 0) && (cmd.colour.blue == 0)) {
+                    // Receiving a command with all zeroes for the colours
+                    // indicates that we should should choose the breathe
+                    // colour automatically based on the state of the node
+                    if (context->cb) {
+                        breathe_state->use_cb = true;
                     }
-                    breathe_state->colour = cmd.colour;
-                    breathe_state->period_steps = cmd.breathe_period_steps;
-                    breathe_state->step_counter = 0;
-                    break;
+                } else {
+                    breathe_state->use_cb = false;
+                }
+                breathe_state->colour = cmd.colour;
+                breathe_state->period_steps = cmd.breathe_period_steps;
+                breathe_state->step_counter = 0;
+                break;
 
-                case FGR_LED_MODE_FLASH:
-                    flash_state->active = true;
-                    if (breathe_state->enabled) {
-                        // Make flash more visible if breathing
-                        boost_flash_intensity(&cmd.colour,
-                                              breathe_state->colour,
-                                              breathe_state->intensity);
-                    }
-                    flash_state->colour = cmd.colour;
-                    flash_state->total_steps = cmd.flash_duration_steps;
-                    flash_state->step_counter = 0;
-                    flash_state->completed = false;
-                    break;
+            case FGR_LED_MODE_FLASH:
+                flash_state->active = true;
+                if (breathe_state->enabled) {
+                    // Make flash more visible if breathing
+                    boost_flash_intensity(&cmd.colour,
+                                            breathe_state->colour,
+                                            breathe_state->intensity);
+                }
+                flash_state->colour = cmd.colour;
+                flash_state->total_steps = cmd.flash_duration_steps;
+                flash_state->step_counter = 0;
+                flash_state->completed = false;
+                break;
 
-                case FGR_LED_MODE_OFF:
-                    breathe_state->enabled = false;
-                    flash_state->active = false;
-                    break;
+            case FGR_LED_MODE_OFF:
+                breathe_state->enabled = false;
+                flash_state->active = false;
+                break;
 
-                default:
-                    break;
-            }
+            default:
+                break;
         }
-
-        // Update breathe colour at the start of every breath if we're using the callback
-        if (breathe_state->use_cb && (breathe_state->intensity == 0)) {
-            update_breathe_colour(context);
-        }
-        // Update LED at consistent intervals
-        if ((now_ms - last_update_ms) >= LED_STEP_DURATION_MS) {
-            update_breathe_intensity(breathe_state);
-            update_led(context);
-            last_update_ms = now_ms;
-        }
-
-        CONTEXT_UNLOCK(g_context.lock, "task_led()");
-
-        vTaskDelay(pdMS_TO_TICKS(FGR_UTIL_WATCHDOG_FEED_TIME_MS));
-        esp_task_wdt_reset();
     }
 
-    ESP_LOGI(TAG, "LED task exiting.");
-    esp_task_wdt_delete(NULL);
-    vTaskDelete(NULL);
+    // Update breathe colour at the start of every breath if we're using the callback
+    if (breathe_state->use_cb && (breathe_state->intensity == 0)) {
+        update_breathe_colour(context);
+    }
+    // Update LED at consistent intervals
+    if ((now_ms - last_update_ms) >= LED_STEP_DURATION_MS) {
+        update_breathe_intensity(breathe_state);
+        update_led(context);
+        last_update_ms = now_ms;
+    }
+
+    CONTEXT_UNLOCK(g_context.lock, "task_led_cb()");
 }
 
 #  endif  // #if defined(CONFIG_FGR_DEBUG_LED_PIN) && (CONFIG_FGR_DEBUG_LED_PIN >= 0)
@@ -688,7 +676,7 @@ void led_breathe_enabled(context_t *context, bool enabled)
 
         CONTEXT_LOCK(g_context.lock, "led_breathe_enabled()");
 
-        if (context->running) {
+        if (context->queue_handle) {
 
             context->breathe_state.enabled = enabled;
             nvs_led_breathe_enabled_set(enabled);
@@ -703,7 +691,7 @@ void led_breathe_enabled(context_t *context, bool enabled)
                 cmd.mode = FGR_LED_MODE_OFF;
             }
 
-            xQueueSend(context->queue, &cmd, portMAX_DELAY);
+            xQueueSend(context->queue_handle, &cmd, portMAX_DELAY);
         }
 
         CONTEXT_UNLOCK(g_context.lock, "led_breathe_enabled()");
@@ -726,7 +714,7 @@ int32_t fgr_debug_init(fgr_debug_state_cb_t cb, void *cb_param)
     if (g_context.lock) {
         err = ESP_OK;
 
-        if (!g_context.running) {
+        if (!g_context.queue_handle) {
 
             CONTEXT_LOCK(g_context.lock, "fgr_debug_init()");
 
@@ -766,11 +754,12 @@ int32_t fgr_debug_init(fgr_debug_state_cb_t cb, void *cb_param)
                 err = spi_bus_add_device(CONFIG_FGR_DEBUG_LED_SPI_NUM, &dev_cfg, &g_context.spi);
                 if (err == ESP_OK) {
                     err = ESP_ERR_NO_MEM;
-                    g_context.queue = xQueueCreate(10, sizeof(led_cmd_t));
-                    if (g_context.queue) {
-                        g_context.running = true;
-                        if (xTaskCreate(&task_led, "led", FGR_DEBUG_TASK_LED_STACK_SIZE,
-                                        &g_context, 3, &g_context.task_handle) == pdPASS) {
+                    g_context.queue_handle = xQueueCreate(10, sizeof(led_cmd_t));
+                    if (g_context.queue_handle) {
+                        err = fgr_util_task_create(&task_led_cb, &g_context, "led",
+                                                   FGR_DEBUG_TASK_LED_STACK_SIZE,
+                                                   3, &g_context.task_handle);
+                        if (err == ESP_OK) {
                             // Only now add the callback, when we know we can use it
                             g_context.cb = cb;
                             g_context.cb_param = cb_param;
@@ -778,11 +767,9 @@ int32_t fgr_debug_init(fgr_debug_state_cb_t cb, void *cb_param)
                                 g_context.breathe_state.use_cb = true;
                             }
                             ESP_LOGI(TAG, "If the LED breathes red when obviously connected, toggle CONFIG_FGR_DEBUG_LED_WS2812_GRB.");
-                            err = ESP_OK;
                         } else {
-                            g_context.running = false;
-                            vQueueDelete(g_context.queue);
-                            g_context.queue = NULL;
+                            vQueueDelete(g_context.queue_handle);
+                            g_context.queue_handle = NULL;
                         }
                     }
 
@@ -835,18 +822,18 @@ void fgr_debug_deinit()
 #  if defined(CONFIG_FGR_DEBUG_LED_SPI_NUM) && (CONFIG_FGR_DEBUG_LED_SPI_NUM > 1) // SPIs 0 and 1 are used internally
     if (g_context.lock) {
 
-        g_context.running = false;
+        ESP_LOGI(TAG, "Stopping debug.");
+
+        // Need to do this before taking the lock or we
+        // will lock-up the task exit
+        fgr_util_task_destroy(g_context.task_handle);
+        g_context.task_handle = NULL;
 
         CONTEXT_LOCK(g_context.lock, "fgr_debug_deinit()");
 
-        if (g_context.task_handle) {
-            // Let the LED task exit
-            vTaskDelay(100);
-        }
-
-        if (g_context.queue) {
-            vQueueDelete(g_context.queue);
-            g_context.queue = NULL;
+        if (g_context.queue_handle) {
+            vQueueDelete(g_context.queue_handle);
+            g_context.queue_handle = NULL;
         }
 
         if (g_context.spi) {
@@ -885,14 +872,14 @@ void fgr_debug_led_flash(int32_t duration_ms, fgr_debug_colour_t colour)
 
             // Convert milliseconds to steps (rounded up)
             uint32_t steps = (duration_ms + LED_STEP_DURATION_MS - 1) / LED_STEP_DURATION_MS;
-            if (g_context.running) {
+            if (g_context.queue_handle) {
                 led_cmd_t cmd = {
                     .mode = FGR_LED_MODE_FLASH,
                     .colour = colour,
                     .flash_duration_steps = steps,
                     .breathe_period_steps = 0
                 };
-                xQueueSend(g_context.queue, &cmd, portMAX_DELAY);
+                xQueueSend(g_context.queue_handle, &cmd, portMAX_DELAY);
             }
 #  else
             // Single colour LED
@@ -919,7 +906,7 @@ void fgr_debug_led_breathe_set(fgr_debug_colour_t colour)
 
         CONTEXT_LOCK(g_context.lock, "fgr_debug_set_breathe()");
 
-        if (g_context.running && !g_context.led_masked_off &&
+        if (g_context.queue_handle && !g_context.led_masked_off &&
             g_context.breathe_state.enabled) {
             led_cmd_t cmd = {
                 .mode = FGR_LED_MODE_BREATHE,
@@ -927,7 +914,7 @@ void fgr_debug_led_breathe_set(fgr_debug_colour_t colour)
                 .breathe_period_steps = LED_UPDATE_BREATHE_PERIOD_STEPS,
                 .flash_duration_steps = 0
             };
-            xQueueSend(g_context.queue, &cmd, portMAX_DELAY);
+            xQueueSend(g_context.queue_handle, &cmd, portMAX_DELAY);
 
         }
 

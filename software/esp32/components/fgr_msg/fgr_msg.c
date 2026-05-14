@@ -121,9 +121,8 @@ typedef struct {
 // Context for message send queue.
 typedef struct {
     SemaphoreHandle_t lock;
-    TaskHandle_t task_send;
+    TaskHandle_t task_send_handle;
     QueueHandle_t queue_send;
-    bool running;
 } context_send_t;
 
 // Context.
@@ -132,8 +131,7 @@ typedef struct {
     void *context_sock;
     bool connected;
     SemaphoreHandle_t lock;
-    TaskHandle_t task_rssi;
-    bool running;
+    TaskHandle_t task_rssi_handle;
     uint8_t ind_reference;
     fgr_msg_state_cb_t state_cb;
     void *state_cb_param;
@@ -333,89 +331,68 @@ static int32_t decode_msg(context_decoder_t *decoder, const uint8_t *buffer,
 }
 
 /* ----------------------------------------------------------------
- * STATIC FUNCTIONS: TASKS
+ * STATIC FUNCTIONS: TASK CALLBACKS
  * -------------------------------------------------------------- */
 
 // Send messages that were put on the send queue.
-static void task_send_queue(void *param)
+static void task_send_queue_cb(void *param)
 {
     context_send_t *context = (context_send_t *) param;
+    msg_send_t msg;
 
-    // Allow us to feed the watchdog
-    esp_task_wdt_add(NULL);
-
-    // Message send-from-queue loop
-    while (context->running) {
-        msg_send_t msg;
-        if (xQueueReceive(context->queue_send, &msg, pdMS_TO_TICKS(100)) == pdPASS) {
-            if (msg.type == FGR_MSG_TYPE_CNF) {
-                fgr_msg_send_cnf(msg.msg_sub_type, msg.error, msg.reference,
-                                 msg.body_contents, msg.body_length);
-                free(msg.body_contents);
-            } else if (msg.type == FGR_MSG_TYPE_IND) {
-                fgr_msg_send_ind(msg.msg_sub_type, msg.body_contents, msg.body_length);
-                free(msg.body_contents);
-            } else {
-                ESP_LOGE(TAG, "Unknown message type on send queue (%d)!", msg.type);
-            }
+    if (xQueueReceive(context->queue_send, &msg, pdMS_TO_TICKS(100)) == pdPASS) {
+        if (msg.type == FGR_MSG_TYPE_CNF) {
+            fgr_msg_send_cnf(msg.msg_sub_type, msg.error, msg.reference,
+                                msg.body_contents, msg.body_length);
+            free(msg.body_contents);
+        } else if (msg.type == FGR_MSG_TYPE_IND) {
+            fgr_msg_send_ind(msg.msg_sub_type, msg.body_contents, msg.body_length);
+            free(msg.body_contents);
+        } else {
+            ESP_LOGE(TAG, "Unknown message type on send queue (%d)!", msg.type);
         }
-        esp_task_wdt_reset();
-        // Short delay to make sure the idle task gets in
-        vTaskDelay(pdMS_TO_TICKS(FGR_UTIL_WATCHDOG_FEED_TIME_MS));
     }
-
-    ESP_LOGI(TAG, "Message send task exiting.");
-    esp_task_wdt_delete(NULL);
-    vTaskDelete(NULL);
 }
 
 // RSSI averaging task.
-static void task_rssi(void *param)
+static void task_rssi_cb(void *param)
 {
     context_t *context = (context_t *) param;
     buffer_rssi_t *buffer_rssi = &(context->buffer_rssi);
 
-    esp_task_wdt_add(NULL);
+    CONTEXT_LOCK(context->lock, "task_rssi_cb()");
 
-    while (context->running) {
-        CONTEXT_LOCK(context->lock, "task_rssi()");
-
-        // Shift readings (from highest index down)
-        for (int32_t x = buffer_rssi->count - 1; x >= 0; x--) {
-            buffer_rssi->readings[x + 1] = buffer_rssi->readings[x];
-        }
-
-        // Add new reading
-        int rssi = 0;
-        esp_err_t err = esp_wifi_sta_get_rssi(&rssi);
-        if (err == ESP_OK) {
-            buffer_rssi->readings[0] = (int8_t) rssi;
-            if (buffer_rssi->count < FGR_UTIL_ARRAY_LENGTH(buffer_rssi->readings)) {
-                buffer_rssi->count++;
-            }
-        } else {
-            ESP_LOGD(TAG, "Unable to take RSSI reading (%s).", esp_err_to_name(err));
-        }
-
-        // Calculate average
-        buffer_rssi->average_dbm = 0;
-        if (buffer_rssi->count > 0) {
-            int32_t sum = 0;
-            for (int32_t x = 0; x < buffer_rssi->count; x++) {
-                sum += buffer_rssi->readings[x];
-            }
-            // Denominator has to be signed to produce a signed result
-            buffer_rssi->average_dbm = sum / (int32_t) buffer_rssi->count;
-        }
-        CONTEXT_UNLOCK(context->lock, "task_rssi()");
-
-        esp_task_wdt_reset();
-        vTaskDelay(pdMS_TO_TICKS(RSSI_AVERAGE_TIME_SECONDS * 1000 / RSSI_BUFFER_LENGTH));
+    // Shift readings (from highest index down)
+    for (int32_t x = buffer_rssi->count - 1; x >= 0; x--) {
+        buffer_rssi->readings[x + 1] = buffer_rssi->readings[x];
     }
 
-    ESP_LOGI(TAG, "RSSI averaging task exiting.");
-    esp_task_wdt_delete(NULL);
-    vTaskDelete(NULL);
+    // Add new reading
+    int rssi = 0;
+    esp_err_t err = esp_wifi_sta_get_rssi(&rssi);
+    if (err == ESP_OK) {
+        buffer_rssi->readings[0] = (int8_t) rssi;
+        if (buffer_rssi->count < FGR_UTIL_ARRAY_LENGTH(buffer_rssi->readings)) {
+            buffer_rssi->count++;
+        }
+    } else {
+        ESP_LOGD(TAG, "Unable to take RSSI reading (%s).", esp_err_to_name(err));
+    }
+
+    // Calculate average
+    buffer_rssi->average_dbm = 0;
+    if (buffer_rssi->count > 0) {
+        int32_t sum = 0;
+        for (int32_t x = 0; x < buffer_rssi->count; x++) {
+            sum += buffer_rssi->readings[x];
+        }
+        // Denominator has to be signed to produce a signed result
+        buffer_rssi->average_dbm = sum / (int32_t) buffer_rssi->count;
+    }
+
+    CONTEXT_UNLOCK(context->lock, "task_rssi_cb()");
+
+    vTaskDelay(pdMS_TO_TICKS(RSSI_AVERAGE_TIME_SECONDS * 1000 / RSSI_BUFFER_LENGTH));
 }
 
 /* ----------------------------------------------------------------
@@ -487,7 +464,7 @@ static int32_t send_msg(uint16_t type, uint8_t error_state,
 }
 
 /* ----------------------------------------------------------------
- * STATIC FUNCTIONS: CALLBACKS
+ * STATIC FUNCTIONS: OTHER CALLBACKS
  * -------------------------------------------------------------- */
 
 // Callback to send a heartbeat message.
@@ -636,15 +613,12 @@ static void clean_up()
 
     if (g_context.lock) {
 
-        g_context.running = false;
+        // Need to do this before taking the lock or we
+        // will lock-up the task exit
+        fgr_util_task_destroy(g_context.task_rssi_handle);
+        g_context.task_rssi_handle = NULL;
 
         CONTEXT_LOCK(g_context.lock, "clean_up() msg");
-
-        if (g_context.task_rssi){
-            // Wait for the RSSI task to exit
-            vTaskDelay(pdMS_TO_TICKS(100));
-            g_context.task_rssi = NULL;
-        }
 
         // Lose the socket
         fgr_socket_channel_stop(&g_context.context_sock);
@@ -716,13 +690,13 @@ int32_t fgr_msg_init(const char *server_ip, uint16_t port,
 
             if (err == ESP_OK) {
                 // On a best-effort basis, start the RSSI read task
-                g_context.running = true;
-                if (xTaskCreate(&task_rssi, "rssi", FGR_MSG_TASK_RSSI_STACK_SIZE,
-                                &g_context, 5, &g_context.task_rssi) == pdPASS) {
+                err = fgr_util_task_create(&task_rssi_cb, &g_context, "rssi",
+                                            FGR_MSG_TASK_RSSI_STACK_SIZE,
+                                            3, &g_context.task_rssi_handle);
+                if (err != ESP_OK) {
+                    g_context.task_rssi_handle = NULL;  // Just in case
+                    // Continue anyway
                     err = ESP_OK;
-                } else {
-                    g_context.task_rssi = NULL;  // Just in case
-                    g_context.running = false;
                 }
             }
 
@@ -802,12 +776,11 @@ int32_t fgr_msg_send_queue_init(size_t length)
         if (!g_context_send.queue_send) {
             g_context_send.queue_send = xQueueCreate(length, sizeof(msg_send_t));
             if (g_context_send.queue_send) {
-                g_context_send.running = true;
-                if (xTaskCreate(&task_send_queue, "send_queue", FGR_MSG_TASK_SEND_QUEUE_STACK_SIZE,
-                                &g_context_send, 5, &g_context_send.task_send) == pdPASS) {
-                    err = ESP_OK;
-                } else {
-                    g_context_send.running = false;
+                err = fgr_util_task_create(&task_send_queue_cb, &g_context_send,
+                                            "send_queue",
+                                            FGR_MSG_TASK_SEND_QUEUE_STACK_SIZE,
+                                            5, &g_context_send.task_send_handle);
+                if (err != ESP_OK) {
                     vQueueDelete(g_context_send.queue_send);
                     g_context_send.queue_send = NULL;
                 }
@@ -931,22 +904,21 @@ void fgr_msg_send_queue_deinit()
 {
     if (g_context_send.lock) {
 
+        // Need to do this before taking the lock or we
+        // will lock-up the task exit
+        fgr_util_task_destroy(g_context_send.task_send_handle);
+        g_context_send.task_send_handle = NULL;
+
         CONTEXT_LOCK(g_context_send.lock, "fgr_msg_send_queue_deinit()");
-        if (g_context_send.running) {
-            g_context_send.running = false;
-            // Wait for the send task to exit
-            vTaskDelay(pdMS_TO_TICKS(1000));
-            g_context_send.task_send = NULL;
-            if (g_context_send.queue_send) {
-                msg_send_t msg;
-                while (xQueueReceive(g_context_send.queue_send, &msg, 0) == pdTRUE) {
-                    free(msg.body_contents);
-                    vTaskDelay(pdMS_TO_TICKS(FGR_UTIL_WATCHDOG_FEED_TIME_MS));
-                    esp_task_wdt_reset();
-                }
-                vQueueDelete(g_context_send.queue_send);
-                g_context_send.queue_send = NULL;
+        if (g_context_send.queue_send) {
+            msg_send_t msg;
+            while (xQueueReceive(g_context_send.queue_send, &msg, 0) == pdTRUE) {
+                free(msg.body_contents);
+                vTaskDelay(pdMS_TO_TICKS(FGR_UTIL_WATCHDOG_FEED_TIME_MS));
+                esp_task_wdt_reset();
             }
+            vQueueDelete(g_context_send.queue_send);
+            g_context_send.queue_send = NULL;
         }
         CONTEXT_UNLOCK(g_context_send.lock, "fgr_msg_send_queue_deinit()");
         // Don't delete the semaphore, someone might have it still
@@ -1051,8 +1023,8 @@ void fgr_msg_receive_handler_remove_by_cb(fgr_msg_rx_cb_t cb)
     if (g_context.lock && cb) {
 
         CONTEXT_LOCK(g_context.lock, "fgr_msg_receive_handler_remove_by_cb()");
-        struct msg_rx_cb_t *iter;
-        struct msg_rx_cb_t *prev = NULL;
+        msg_rx_cb_t *iter;
+        msg_rx_cb_t *prev = NULL;
         SLIST_FOREACH(iter, &g_context.msg_rx_cb_list, next) {
             if (iter->cb == cb) {  // Found Bob
                 if (prev == NULL) {
@@ -1063,6 +1035,7 @@ void fgr_msg_receive_handler_remove_by_cb(fgr_msg_rx_cb_t cb)
                     SLIST_REMOVE_AFTER(prev, next);
                 }
                 free(iter);
+                break;
             }
             prev = iter;
         }
@@ -1076,8 +1049,8 @@ void fgr_msg_receive_handler_remove_by_type(uint16_t msg_type)
     if (g_context.lock) {
 
         CONTEXT_LOCK(g_context.lock, "fgr_msg_receive_handler_remove_by_type()");
-        struct msg_rx_cb_t *iter;
-        struct msg_rx_cb_t *prev = NULL;
+        msg_rx_cb_t *iter;
+        msg_rx_cb_t *prev = NULL;
         SLIST_FOREACH(iter, &g_context.msg_rx_cb_list, next) {
             if (iter->msg_type == msg_type) {  // Found Bob
                 if (prev == NULL) {
@@ -1088,6 +1061,7 @@ void fgr_msg_receive_handler_remove_by_type(uint16_t msg_type)
                     SLIST_REMOVE_AFTER(prev, next);
                 }
                 free(iter);
+                break;
             }
             prev = iter;
         }
@@ -1103,7 +1077,7 @@ void fgr_msg_receive_stop()
         CONTEXT_LOCK(g_context.lock, "fgr_msg_receive_stop()");
         fgr_socket_receive_stop(&g_context.context_rx);
         while (!SLIST_EMPTY(&g_context.msg_rx_cb_list)) {
-            struct msg_rx_cb_t *p = SLIST_FIRST(&g_context.msg_rx_cb_list);
+            msg_rx_cb_t *p = SLIST_FIRST(&g_context.msg_rx_cb_list);
             SLIST_REMOVE_HEAD(&g_context.msg_rx_cb_list, next);
             free(p);
         }

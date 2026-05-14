@@ -87,8 +87,14 @@ extern "C" {
  * TYPES
  * -------------------------------------------------------------- */
 
+/** A task.
+ *
+ * @param param  cb_param as passed to fgr_util_task_create().
+ */
+typedef void (*fgr_util_task_cb_t)(void *param);
+
 /* ----------------------------------------------------------------
- * FUNCTIONS
+ * FUNCTIONS: STATIC
  * -------------------------------------------------------------- */
 
 /** Check if a double-indirect is correct: use this wherever
@@ -135,6 +141,84 @@ static inline bool fgr_util_is_valid_ptr_to_ptr(void **pptr, const char *tag,
 
     return true;
 }
+
+/* ----------------------------------------------------------------
+ * FUNCTIONS
+ * -------------------------------------------------------------- */
+
+/** Initialise debug.
+ *
+ * Note: this will create a semaphore that is never destroyed.
+ *
+ * @return ESP_OK on success, else a negative value from esp_err_t.
+ */
+int32_t fgr_util_init();
+
+/** Deinitialise tuils.
+ */
+void fgr_util_deinit();
+
+/** Create a task.  The advantage of doing your task creation this way
+ * is that (a) task exit is orchestrated properly and (b) watchdog timers
+ * are applied and monitored automagically.  The callback will be called
+ * in a loop with FGR_UTIL_WATCHDOG_FEED_TIME_MS loop delay to let the
+ * idle task feed its task watchdog.
+ *
+ * @param cb               the callback that forms the body of the task;
+ *                         cannot be NULL.  The callback must return
+ *                         in a reasonably time frame, e.g. within
+ *                         10 seconds, in order that the rest of the
+ *                         task loop runs to feed the watchdogs.
+ * @param cb_param         a parameter to pass to the callback; may
+ *                         be NULL.
+ * @param name             a null-terminated string that forms the
+ *                         name of the task, purely for debugging
+ *                         purposes, may be truncated if more than
+ *                         about 16 characters in length, may be NULL.
+ *                         If non-NULL this MUST be a true constant
+ *                         that is valid for the duration of the
+ *                         task's run.
+ * @param stack_size_bytes the amount of stack to allocate for the
+ *                         task in bytes.
+ * @param priority         the task priority, where higher numbers
+ *                         represent a higher priority, normal
+ *                         ESP-IDF task priority.
+ * @param handle           a pointer to a place to store the task
+ *                         handle; cannot be NULL.  The handle will
+ *                         be a good 'ole FreeRTOS TaskHandle, nothing
+ *                         weird; you can do anything with it that
+ *                         you could do with a TaskHandle.
+ * @return                 ESP_OK on success, else a negative value
+ *                         from esp_err_t.
+ */
+int32_t fgr_util_task_create(fgr_util_task_cb_t cb,
+                             void *cb_param,
+                             const char *name,
+                             size_t stack_size_bytes,
+                             int32_t priority,
+                             void *handle);
+
+/** Determine if the given task is running.
+ *
+ * @param handle  the handle of the task.
+ * @return        true if the task is running, else false.
+ */
+bool fgr_util_task_is_running(void *handle);
+
+/** Get the stack high watermark, i.e. the smallest
+ * amount of stack ever left over time.
+ *
+ * @param handle  the handle of the task.
+ * @return        the high watermark in bytes,
+ *                zero if handle is not found.
+ */
+int32_t fgr_util_min_free_stack(void *handle);
+
+/** Destroy a task.
+ *
+ * @param handle  the handle of the task to destroy.
+ */
+void fgr_util_task_destroy(void *handle);
 
 #ifdef __cplusplus
 }

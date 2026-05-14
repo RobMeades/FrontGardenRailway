@@ -293,6 +293,11 @@ static int32_t init(context_t *context)
         }
     }
 
+    // Initialise utilities (needed for task creation)
+    if (err == ESP_OK) {
+        err = fgr_util_init();
+    }
+
     // Initialise OTA: do this whether there is WiFi or not
     // as it also initialises non-volatile storage (and you
     // can't just separately iniitalise non-volatile storage
@@ -372,6 +377,7 @@ static void deinit(context_t *context)
     fgr_log_deinit();
     fgr_network_deinit();
     fgr_debug_deinit();
+    fgr_util_deinit();
     vSemaphoreDelete(context->lock);
     esp_restart();
 }
