@@ -1874,6 +1874,20 @@ class WebController(Controller):
             border-color: #007bff;
         }
 
+        .filter-select {
+            border: 1px solid #ced4da;
+            border-radius: 3px;
+            padding: 2px 4px;
+            font-size: 9px;
+            background: white;
+            cursor: pointer;
+        }
+
+        .filter-select:focus {
+            outline: none;
+            border-color: #007bff;
+        }
+
         .log-highlight {
             color: #ffd966 !important;
             font-weight: bold;
@@ -2125,6 +2139,16 @@ class WebController(Controller):
                 <div class="filter-input-group">
                     <span class="filter-label" id="filterHighlightLabel">Highlight NODEs</span>
                     <input type="text" id="filterHighlightNodes" placeholder="e.g., 2,3" class="filter-textbox">
+                </div>
+                <div class="filter-input-group">
+                    <span class="filter-label">Min NODE log level</span>
+                    <select id="filterMinLogLevel" class="filter-select">
+                        <option value="0">DEBUG</option>
+                        <option value="1">INFO</option>
+                        <option value="2">WARN</option>
+                        <option value="3">ERROR</option>
+                        <option value="4" selected>No filter</option>
+                    </select>
                 </div>
             </div>
             <div class="debug-buttons">
@@ -2662,6 +2686,7 @@ class WebController(Controller):
         let filterExcludeCtrl = false;
         let filterIncludeNodes = new Set();  // Set of node IP last octets to include (empty means all)
         let filterHighlightNodes = new Set(); // Set of node IP last octets to highlight
+        let filterMinLogLevel = 4;  // Default OFF (4)
         let controllerIpPrefix = ''; // Will be set from server
 
         // Parse node IP last octet from log line
@@ -2672,6 +2697,21 @@ class WebController(Controller):
                 if (ipParts.length === 4) {
                     return ipParts[3];
                 }
+            }
+            return null;
+        }
+
+        // Extract log level from NODE log line
+        function extractLogLevel(logLine) {
+            if (!logLine.includes('[NODE]')) return null;
+
+            const match = logLine.match(/\\[NODE\\].*?\\[[\\d.]+\\]\\s*([DIWE])\\s/);
+            if (match && match[1]) {
+                const levelChar = match[1];
+                if (levelChar === 'D') return 0;  // DEBUG
+                if (levelChar === 'I') return 1;  // INFO
+                if (levelChar === 'W') return 2;  // WARN
+                if (levelChar === 'E') return 3;  // ERROR
             }
             return null;
         }
@@ -2689,6 +2729,14 @@ class WebController(Controller):
             if (filterIncludeNodes.size > 0 && isNode) {
                 const lastOctet = extractNodeLastOctet(logLine);
                 if (lastOctet && !filterIncludeNodes.has(lastOctet)) {
+                    return false;
+                }
+            }
+
+            // Minimum log level filter (NODE logs only)
+            if (isNode && filterMinLogLevel < 4) {  // 4 = OFF
+                const logLevel = extractLogLevel(logLine);
+                if (logLevel !== null && logLevel < filterMinLogLevel) {
                     return false;
                 }
             }
@@ -2808,6 +2856,9 @@ class WebController(Controller):
 
             const highlightInput = document.getElementById('filterHighlightNodes');
             filterHighlightNodes = parseFilterInput(highlightInput ? highlightInput.value : '');
+
+            const logLevelSelect = document.getElementById('filterMinLogLevel');
+            filterMinLogLevel = logLevelSelect ? parseInt(logLevelSelect.value) : 4;
 
             refilterAndRenderLogs();
         }
@@ -3678,6 +3729,7 @@ class WebController(Controller):
             const excludeCheckbox = document.getElementById('filterExcludeCtrl');
             const includeInput = document.getElementById('filterIncludeNodes');
             const highlightInput = document.getElementById('filterHighlightNodes');
+            const logLevelSelect = document.getElementById('filterMinLogLevel');
 
             // Restrict input: only 2-9, comma, period, space, dash allowed
             function restrictFilterInput(e) {
@@ -3694,6 +3746,9 @@ class WebController(Controller):
             if (highlightInput) {
                 highlightInput.addEventListener('input', updateFiltersAndRender);
                 highlightInput.addEventListener('input', restrictFilterInput);
+            }
+            if (logLevelSelect) {
+                logLevelSelect.addEventListener('change', updateFiltersAndRender);
             }
         }
 
