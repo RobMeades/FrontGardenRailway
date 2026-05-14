@@ -1955,6 +1955,14 @@ class WebController(Controller):
         .badge-success { background: #4caf50; color: white; padding: 2px 5px; border-radius: 4px; font-size: 8px; }
         .badge-warning { background: #ff9800; color: white; padding: 2px 5px; border-radius: 4px; font-size: 8px; }
 
+        /* Page indicator styling */
+        .page-indicator {
+            text-align: center;
+            margin-top: 6px;
+            font-size: 11px;
+            color: #888;
+        }
+
         /* Navigation buttons */
         .nav-btn {
             position: absolute;
