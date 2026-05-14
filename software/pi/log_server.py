@@ -132,7 +132,7 @@ class FGRLogServer:
                           device_info: Dict[str, str]) -> None:
         """Write a log message to the systemd journal"""
         priority = self._get_priority_from_level(level)
-        
+
         # Prepend the IP address to the message for easier reading
         ip = device_info.get('addr', 'unknown')
         enhanced_message = f"[{ip}] {message}"
@@ -190,8 +190,10 @@ class FGRLogServer:
 
                             # Extract log message and level
                             log_text = msg.get_log_message()
-                            # In the header, error_or_state contains the log level for LOG messages
-                            log_level = msg.error_or_state
+                            # Using the generic header structure, the error_or_state
+                            # field is in the position of what is actually the
+                            # log level for LOG messages
+                            log_level = msg.reference
 
                             # Write to journal with IP prepended
                             self._write_to_journal(log_text, log_level, device_info)

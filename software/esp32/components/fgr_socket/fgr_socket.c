@@ -337,6 +337,49 @@ static void task_rx(void *param)
 }
 
 /* ----------------------------------------------------------------
+ * STATIC FUNCTIONS: MISC
+ * -------------------------------------------------------------- */
+
+// Send data on a socket.
+static int32_t socket_send(int sock, const void *buffer, size_t length,
+                           size_t retry_count, bool log)
+{
+    esp_err_t err = ESP_OK;
+    size_t total_written = 0;
+    size_t retries = 0;
+
+    if (buffer) {
+      while ((total_written < length) && (err == ESP_OK) && (retries <= retry_count)) {
+          int32_t len_written = send(sock, ((uint8_t *) buffer) + total_written, length - total_written, MSG_DONTWAIT);
+          if (len_written >= 0) {
+              total_written += len_written;
+              retries = 0;  // Reset on success
+          } else {
+              if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                  retries++;
+                  vTaskDelay(pdMS_TO_TICKS(10));  // Small delay before retry
+              } else {
+                  err = -errno;
+                  if (log) {
+                    ESP_LOGE(TAG, "Error sending to server %d (%s)!", errno, strerror(errno));
+                  }
+              }
+          }
+      }
+    }
+
+    if (retries > retry_count) {
+        if (log) {
+            ESP_LOGE(TAG, "Send timeout after %d retries.", retries);
+        }
+        err = ESP_ERR_TIMEOUT;
+    }
+
+    // Returns ESP_OK or negative error code from esp_err_t
+    return (int32_t) -err;
+}
+
+/* ----------------------------------------------------------------
  * PUBLIC FUNCTIONS: SIMPLE OPERATIONS
  * -------------------------------------------------------------- */
 
@@ -816,35 +859,14 @@ void fgr_socket_channel_stop(void **context)
 int32_t fgr_socket_send(int sock, const void *buffer, size_t length,
                         size_t retry_count)
 {
-    esp_err_t err = ESP_OK;
-    size_t total_written = 0;
-    size_t retries = 0;
+    return socket_send(sock, buffer, length, retry_count, true);
+}
 
-    if (buffer) {
-      while ((total_written < length) && (err == ESP_OK) && (retries <= retry_count)) {
-          int32_t len_written = send(sock, ((uint8_t *) buffer) + total_written, length - total_written, MSG_DONTWAIT);
-          if (len_written >= 0) {
-              total_written += len_written;
-              retries = 0;  // Reset on success
-          } else {
-              if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                  retries++;
-                  vTaskDelay(pdMS_TO_TICKS(10));  // Small delay before retry
-              } else {
-                  err = -errno;
-                  ESP_LOGE(TAG, "Error sending to server %d (%s)!", errno, strerror(errno));
-              }
-          }
-      }
-    }
-
-    if (retries > retry_count) {
-        ESP_LOGE(TAG, "Send timeout after %d retries.", retries);
-        err = ESP_ERR_TIMEOUT;
-    }
-
-    // Returns ESP_OK or negative error code from esp_err_t
-    return (int32_t) -err;
+// Send data on a socket without any logging.
+int32_t fgr_socket_send_no_log(int sock, const void *buffer, size_t length,
+                               size_t retry_count)
+{
+    return socket_send(sock, buffer, length, retry_count, false);
 }
 
 // Start receiving data on a socket.

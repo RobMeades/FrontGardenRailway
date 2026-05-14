@@ -52,67 +52,67 @@ class ProtocolDef:
 
 class CHeaderParser:
     """Parser for C protocol header files"""
-    
+
     def __init__(self, header_path: str):
         self.header_path = Path(header_path)
         self.content = self.header_path.read_text()
         self.protocol = ProtocolDef()
-        
+
     def parse(self) -> ProtocolDef:
         """Parse the C header and extract all protocol definitions"""
         self._parse_macros()
         self._parse_enums()
         self._parse_structs()
         return self.protocol
-    
+
     def _parse_macros(self):
         """Extract #define macros"""
         # Protocol version
         version_match = re.search(r'#define\s+FGR_PROTOCOL_VERSION\s+(0x[0-9A-Fa-f]+|\d+)', self.content)
         if version_match:
             self.protocol.version = self._parse_int(version_match.group(1))
-        
+
         # Message contents max length
         msg_contents_len_match = re.search(r'#define\s+FGR_MSG_CONTENTS_MAX_LEN\s+(\d+)', self.content)
         if msg_contents_len_match:
             self.protocol.msg_contents_max_len = int(msg_contents_len_match.group(1))
-        
+
         # Log string max length
         log_string_len_match = re.search(r'#define\s+FGR_LOG_STRING_MAX_LEN\s+(\d+)', self.content)
         if log_string_len_match:
             self.protocol.log_string_max_len = int(log_string_len_match.group(1))
-    
+
     def _parse_int(self, value_str: str) -> int:
         """Parse integer value that might be hex, decimal, or binary"""
         value_str = value_str.strip()
-        
+
         if not value_str:
             return 0
-        
+
         if value_str.startswith('0x'):
             try:
                 return int(value_str, 16)
             except ValueError:
                 return 0
-        
+
         if value_str.startswith('0b'):
             try:
                 return int(value_str, 2)
             except ValueError:
                 return 0
-        
+
         try:
             return int(value_str)
         except ValueError:
             return 0
-    
+
     def _parse_enum_body(self, body: str, enum_name: str) -> Dict[str, int]:
         """Parse an enum body and return name-value pairs"""
         values = {}
-        
+
         # Remove comments
         body = re.sub(r'//.*$', '', body, flags=re.MULTILINE)
-        
+
         # Collect all entries
         entries = []
         for line in body.split('\n'):
@@ -122,7 +122,7 @@ class CHeaderParser:
                     entry = entry.strip()
                     if entry and not entry.startswith('//'):
                         entries.append(entry)
-        
+
         # Parse entries
         last_value = None
         for entry in entries:
@@ -130,7 +130,7 @@ class CHeaderParser:
                 name, expr = entry.split('=', 1)
                 name = name.strip()
                 expr = expr.strip()
-                
+
                 # Handle expressions
                 if expr.startswith('0x') or expr.isdigit():
                     value = self._parse_int(expr)
@@ -148,7 +148,7 @@ class CHeaderParser:
                         value = values[expr]
                     else:
                         value = last_value + 1 if last_value is not None else 0
-                
+
                 values[name] = value
                 last_value = value
             else:
@@ -158,9 +158,9 @@ class CHeaderParser:
                 else:
                     last_value = 0
                 values[name] = last_value
-        
+
         return values
-    
+
     def _parse_enums(self):
         """Extract all enum definitions"""
         # Find all enum blocks - both typedef enum and regular enum
@@ -168,7 +168,7 @@ class CHeaderParser:
             r'typedef\s+enum\s*{([^}]+)}\s*(\w+)_t;',
             r'enum\s+(\w+)\s*{([^}]+)};'
         ]
-        
+
         for pattern in enum_patterns:
             for match in re.finditer(pattern, self.content, re.DOTALL):
                 if len(match.groups()) == 2:
@@ -180,9 +180,9 @@ class CHeaderParser:
                         enum_body = match.group(2)
                 else:
                     continue
-                
+
                 values = self._parse_enum_body(enum_body, enum_name)
-                
+
                 # Route to appropriate container
                 if enum_name == 'fgr_msg_type':
                     self.protocol.msg_types = values
@@ -196,26 +196,26 @@ class CHeaderParser:
                     self.protocol.error_codes = values
                 elif enum_name == 'fgr_state':
                     self.protocol.states = values
-    
+
     def _parse_structs(self):
         """Extract struct definitions"""
         struct_pattern = r'typedef\s+struct\s*(?:__attribute__\(\(packed\)\))?\s*{([^}]+)}\s*(\w+)_t;'
-        
+
         for match in re.finditer(struct_pattern, self.content, re.DOTALL):
             struct_body = match.group(1)
             struct_name = match.group(2)
-            
+
             fields = self._parse_struct_body(struct_body)
             if fields:
                 self.protocol.structs[struct_name] = fields
-    
+
     def _parse_struct_body(self, body: str) -> Dict[str, Tuple[str, int, str]]:
         """Parse struct body and return field name -> (type, size, description) mappings"""
         fields = {}
-        
+
         # Remove comments
         body = re.sub(r'//.*$', '', body, flags=re.MULTILINE)
-        
+
         # Type mapping for size calculation
         type_sizes = {
             'uint8_t': 1,
@@ -226,16 +226,16 @@ class CHeaderParser:
             'int32_t': 4,
             'char': 1
         }
-        
+
         # Split into individual field declarations
         field_lines = []
         current_field = []
-        
+
         for line in body.split('\n'):
             line = line.strip()
             if not line:
                 continue
-                
+
             if ';' in line:
                 parts = line.split(';')
                 for part in parts[:-1]:
@@ -250,22 +250,22 @@ class CHeaderParser:
                     current_field.append(last_part)
             else:
                 current_field.append(line)
-        
+
         if current_field:
             field_lines.append(' '.join(current_field))
-        
+
         # Parse each field line
         for field_line in field_lines:
             field_line = field_line.strip()
             if not field_line:
                 continue
-                
+
             # Parse field declaration
             parts = field_line.split()
             if len(parts) >= 2:
                 type_name = parts[0]
                 field_name_part = parts[1].rstrip(';')
-                
+
                 # Handle arrays
                 array_match = re.search(r'(\w+)\[(\d+)\]', field_name_part)
                 if array_match:
@@ -278,19 +278,19 @@ class CHeaderParser:
                     field_name = field_name_part
                     size = type_sizes.get(type_name, 1)
                     type_info = type_name
-                
+
                 fields[field_name] = (type_info, size, field_line)
-        
+
         return fields
 
 
 class PythonGenerator:
     """Generate Python module from parsed protocol definitions"""
-    
+
     def __init__(self, protocol: ProtocolDef):
         self.p = protocol
         self.output = []
-    
+
     def generate(self) -> str:
         """Generate the complete Python module"""
         self._add_header()
@@ -299,9 +299,9 @@ class PythonGenerator:
         self._add_enums()
         self._add_message_classes()
         self._add_helper_functions()
-        
+
         return '\n'.join(self.output)
-    
+
     def _add_header(self):
         """Add module header and docstring"""
         self.output.extend([
@@ -317,7 +317,7 @@ class PythonGenerator:
             '"""',
             ''
         ])
-    
+
     def _add_imports(self):
         """Add required imports"""
         self.output.extend([
@@ -327,20 +327,20 @@ class PythonGenerator:
             'import socket',
             ''
         ])
-    
+
     def _add_constants(self):
         """Add protocol constants"""
         if self.p.version is not None:
             self.output.append(f'FGR_PROTOCOL_VERSION = {self.p.version}')
-        
+
         if self.p.msg_contents_max_len is not None:
             self.output.append(f'FGR_MSG_CONTENTS_MAX_LEN = {self.p.msg_contents_max_len}')
-        
+
         if self.p.log_string_max_len is not None:
             self.output.append(f'FGR_LOG_STRING_MAX_LEN = {self.p.log_string_max_len}')
-        
+
         self.output.append('')
-    
+
     def _add_enums(self):
         """Add enum classes"""
         enum_configs = [
@@ -351,19 +351,19 @@ class PythonGenerator:
             ('FGRError', self.p.error_codes, 'Error codes'),
             ('FGRState', self.p.states, 'Device states')
         ]
-        
+
         for enum_name, values, description in enum_configs:
             if values:
                 self.output.extend([
                     f'class {enum_name}(IntEnum):',
                     f'    """{description}"""'
                 ])
-                
+
                 for name, value in sorted(values.items(), key=lambda x: x[1]):
                     self.output.append(f'    {name} = {value}')
-                
+
                 self.output.append('')
-    
+
     def _generate_header_class(self):
         """Generate the header class with proper big-endian handling"""
         self.output.extend([
@@ -537,11 +537,11 @@ class PythonGenerator:
             '    # Log header accessors',
             '    @property',
             '    def log_level(self) -> int:',
-            '        return self.error_or_state',
+            '        return self.reference',
             '',
             '    @log_level.setter',
             '    def log_level(self, value: int):',
-            '        self.error_or_state = value',
+            '        self.reference = value',
             '',
             '    def pack(self) -> bytes:',
             '        """Pack header into network bytes (big-endian)"""',
@@ -560,11 +560,11 @@ class PythonGenerator:
             '        return f"<FGRMsgHeader type=0x{self._type:04X} ref={self._reference} err/state={self._error_or_state}>"',
             ''
         ])
-    
+
     def _generate_message_class(self):
         """Generate the main message class with network byte order"""
         contents_max_len = self.p.msg_contents_max_len or 256
-        
+
         self.output.extend([
             'class FGRMsg:',
             '    """Main FGR message class with variable-length body"',
@@ -689,13 +689,13 @@ class PythonGenerator:
             '        return f"<FGRMsg type={msg_type_name} subtype=0x{self.subtype:03X} ref={self.reference} contents_len={len(self.contents)}>"',
             ''
         ])
-    
+
     def _add_message_classes(self):
         """Add message class definitions"""
         self._generate_header_class()
         self.output.append('')
         self._generate_message_class()
-    
+
     def _add_helper_functions(self):
         """Add utility functions for working with the protocol"""
         self.output.extend([
@@ -789,7 +789,7 @@ class PythonGenerator:
             '    return FGRMsg.create_req(FGRReqCnf.FGR_REQ_CNF_CFG, reference, config_data)',
             ''
         ])
-    
+
     def print_usage_instructions(self):
         """Print usage instructions for the generated module"""
         contents_max_len = self.p.msg_contents_max_len or 256
@@ -820,13 +820,13 @@ The Python protocol module has been generated. Here's how to use it:
         reference=1,
         contents=b"\\x01\\x02\\x03"  # Device-specific config data
     )
-    
+
     # Create a start request
     start_msg = FGRMsg.create_req(
         req_type=FGRReqCnf.FGR_REQ_CNF_START,
         reference=2
     )
-    
+
     # Send over socket
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.connect(('192.168.1.100', 5000))
@@ -863,7 +863,7 @@ The Python protocol module has been generated. Here's how to use it:
       - Bytes 0-1: type (top 4 bits = message type, bottom 12 bits = subtype)
       - Byte 2: reference
       - Byte 3: error (for CNF) or state (for IND)
-    
+
     Body:
       - Length (4 bytes, big-endian): Length of contents field
       - Contents (variable): Message payload (max {contents_max_len} bytes)
@@ -871,10 +871,10 @@ The Python protocol module has been generated. Here's how to use it:
 🔍 HEX DUMP EXAMPLE
 ──────────────────────────────────────────────────────────────────────────────
     A FGR_IND_RSP_NEEDS_CFG message (type=0x3, subtype=0x001, ref=0, state=1):
-    
+
     On wire (big-endian): 30 01 00 01 00 00 00 00
                          [--header--] [--length--]
-    
+
     This is much more readable than little-endian!
 
 ⚠️ NOTES
@@ -898,14 +898,14 @@ def main():
     if len(sys.argv) < 2:
         print("Usage: python3 generate_fgr_protocol.py <fgr_protocol.h> [output.py]")
         sys.exit(1)
-    
+
     header_path = sys.argv[1]
     output_path = sys.argv[2] if len(sys.argv) > 2 else 'fgr_protocol.py'
-    
+
     print(f"Parsing {header_path}...")
     parser = CHeaderParser(header_path)
     protocol = parser.parse()
-    
+
     print(f"\nFound:")
     print(f"  - {len(protocol.msg_types)} message types")
     print(f"  - {len(protocol.req_cnf_types)} request/confirmation types")
@@ -914,21 +914,21 @@ def main():
     print(f"  - {len(protocol.error_codes)} error codes")
     print(f"  - {len(protocol.states)} states")
     print(f"  - {len(protocol.structs)} structs")
-    
+
     if protocol.msg_contents_max_len:
         print(f"  - Message contents max length: {protocol.msg_contents_max_len}")
     if protocol.log_string_max_len:
         print(f"  - Log string max length: {protocol.log_string_max_len}")
-    
+
     print(f"\nGenerating {output_path}...")
     generator = PythonGenerator(protocol)
     python_code = generator.generate()
-    
+
     Path(output_path).write_text(python_code)
-    
+
     # Print usage instructions
     generator.print_usage_instructions()
-    
+
     print(f"\n✅ Successfully generated {output_path}")
 
 

@@ -257,11 +257,11 @@ class FGRMsgHeader:
     # Log header accessors
     @property
     def log_level(self) -> int:
-        return self.error_or_state
+        return self.reference
 
     @log_level.setter
     def log_level(self, value: int):
-        self.error_or_state = value
+        self.reference = value
 
     def pack(self) -> bytes:
         """Pack header into network bytes (big-endian)"""

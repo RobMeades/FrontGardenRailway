@@ -70,7 +70,7 @@
 
 #ifndef LOG_QUEUE_LENGTH
 // How many messages to hold in the queue, each of size queue_msg_t.
-#  define LOG_QUEUE_LENGTH 100
+#  define LOG_QUEUE_LENGTH 512
 #endif
 
 #ifndef NVS_NAME_LOG_ON_NOT_OFF
@@ -103,7 +103,9 @@ typedef struct {
     uint16_t head;                   // Write position
     uint16_t tail;                   // Read position (oldest)
     bool full;
-    uint32_t dropped_count;          // Messages dropped due to full buffer
+    size_t replay_count;
+    size_t dropped_count;            // Messages dropped due to full buffer
+    bool replay_active;
 } buffer_t;
 
 // Context.
@@ -118,6 +120,7 @@ typedef struct {
     QueueHandle_t queue;
     bool running;
     buffer_t buffer;
+    size_t queue_full_count;
 } context_t;
 
 /* ----------------------------------------------------------------
@@ -305,6 +308,7 @@ static int32_t log_buffer_init(buffer_t *buffer)
         buffer->head = 0;
         buffer->tail = 0;
         buffer->full = false;
+        buffer->replay_count = 0;
         buffer->dropped_count = 0;
 
         ESP_LOGI(TAG, "Disconnect buffer initialized with %d entries",
@@ -336,6 +340,7 @@ static void log_buffer_add(buffer_t *buffer,
                     free(buffer->headers[buffer->tail]);
                     free(buffer->bodies[buffer->tail]);
                     buffer->tail = (buffer->tail + 1) % buffer->size;
+                    // main buffer full: failure
                     buffer->dropped_count++;
                 }
 
@@ -350,7 +355,13 @@ static void log_buffer_add(buffer_t *buffer,
                 // Success - prevent cleanup
                 header_copy = NULL;
                 body_copy = NULL;
+            } else {
+                // malloc() failure
+                buffer->dropped_count++;
             }
+        } else {
+            // malloc() failure
+            buffer->dropped_count++;
         }
 
         if (header_copy) {
@@ -359,15 +370,29 @@ static void log_buffer_add(buffer_t *buffer,
         if (body_copy) {
             free(body_copy);
         }
-        if (!header_copy || !body_copy) {
-            buffer->dropped_count++;
-        }
     }
+}
+
+// Send a marker string directly, used by log_buffer_replay().
+// IMPORTANT: context should be locked before this is called.
+static void log_replay_marker(const char *str, context_t *context)
+{
+    fgr_msg_t marker_msg;
+
+    marker_msg.header.log.type = htons(((uint16_t) FGR_MSG_TYPE_LOG) << 12);
+    marker_msg.header.log.level = FGR_LOG_LEVEL_INFO;
+    marker_msg.body.length = htonl(strlen(str));
+    memcpy(marker_msg.body.contents, str, strlen(str));
+
+    fgr_socket_send_no_log(context->sock, &marker_msg,
+                           sizeof(marker_msg.header) + sizeof(marker_msg.body.length) + strlen(str), 0);
 }
 
 // Replay buffered messages from when we were disconnected.
 // IMPORTANT: context SHOULD NOT be locked before this is called.
-static void log_buffer_replay(context_t *context)
+static void log_buffer_replay(context_t *context,
+                              char *marker_buffer, // Passed in just to save stack
+                              size_t marker_buffer_length)
 {
     fgr_msg_t replay_msg;
     uint16_t count = 0;
@@ -377,7 +402,8 @@ static void log_buffer_replay(context_t *context)
     uint16_t cleanup_idx = 0;
     buffer_t *buffer = &context->buffer;
 
-    if (buffer->headers) {
+    if (buffer->headers && !buffer->replay_active) {
+        buffer->replay_active = true;
         // All manual semaphore calls in this function,
         // since we need to give the semaphore as much
         // as we can
@@ -389,9 +415,16 @@ static void log_buffer_replay(context_t *context)
                  buffer->size - buffer->tail + buffer->head);
 
         if (count > 0) {
-            ESP_LOGI(TAG, "Replaying %d buffered log message(s) (dropped %lu total)",
-                     count, buffer->dropped_count);
 
+            buffer->replay_count++;
+
+            // Send a marker message indicating replay is starting
+            snprintf(marker_buffer, marker_buffer_length,
+                     "=== Replay %d BEGIN: %d buffered message(s) (%u dropped) ===",
+                     buffer->replay_count, count, buffer->dropped_count);
+            log_replay_marker(marker_buffer, context);
+
+            // Now start the replay
             start_idx = buffer->tail;
             xSemaphoreGive(context->lock);
 
@@ -406,14 +439,14 @@ static void log_buffer_replay(context_t *context)
                 }
 
                 replay_msg.header.log = *buffer->headers[idx];
-                uint32_t body_length_net = buffer->bodies[idx]->length;
-                size_t body_length = ntohl(body_length_net) + sizeof(body_length_net);
+                uint32_t body_length_network = buffer->bodies[idx]->length;
+                size_t body_length = ntohl(body_length_network) + sizeof(body_length_network);
                 memcpy(&replay_msg.body, buffer->bodies[idx], body_length);
 
                 xSemaphoreGive(context->lock);
 
-                fgr_socket_send(context->sock, &replay_msg,
-                                sizeof(replay_msg.header) + body_length, 0);
+                fgr_socket_send_no_log(context->sock, &replay_msg,
+                                       sizeof(replay_msg.header) + body_length, 0);
 
                 idx++;
                 sent++;
@@ -427,11 +460,17 @@ static void log_buffer_replay(context_t *context)
             xSemaphoreTake(context->lock, portMAX_DELAY);
 
             cleanup_idx = buffer->tail;
-            for (uint16_t i = 0; i < count; i++) {
+            for (size_t x = 0; x < count; x++) {
                 free(buffer->headers[cleanup_idx]);
                 free(buffer->bodies[cleanup_idx]);
                 cleanup_idx = (cleanup_idx + 1) % buffer->size;
             }
+
+            // Mark the end
+            snprintf(marker_buffer, marker_buffer_length,
+                     "========= Replay %d END: %d buffered message(s) =========",
+                     buffer->replay_count, count);
+            log_replay_marker(marker_buffer, context);
 
             buffer->head = 0;
             buffer->tail = 0;
@@ -440,10 +479,11 @@ static void log_buffer_replay(context_t *context)
 
             xSemaphoreGive(context->lock);
 
-            ESP_LOGI(TAG, "Replay complete, sent %d message(s).", sent);
         } else {
             xSemaphoreGive(context->lock);
         }
+
+        buffer->replay_active = false;
     }
 }
 
@@ -457,6 +497,7 @@ static void task_log(void *param)
     context_t *context = (context_t *) param;
     fgr_msg_t log_msg;
     queue_msg_t queue_msg;
+    char marker_buffer[128];
 
     esp_task_wdt_add(NULL);
 
@@ -473,14 +514,14 @@ static void task_log(void *param)
             if (msg_type == (FGR_MSG_TYPE_NULL << 12)) {
                 // This is a replay request - release lock and handle it
                 xSemaphoreGive(context->lock);
-                log_buffer_replay(context);
+                log_buffer_replay(context, marker_buffer, sizeof(marker_buffer));
                 xSemaphoreTake(context->lock, portMAX_DELAY);
             } else {
                 if (context->connected) {
                     log_msg.header.log = queue_msg.header;
                     memcpy(&log_msg.body, queue_msg.body, queue_msg.body_length);
-                    if (fgr_socket_send(context->sock, &log_msg,
-                                        sizeof(log_msg.header) + queue_msg.body_length, 0) == ESP_OK) {
+                    if (fgr_socket_send_no_log(context->sock, &log_msg,
+                                               sizeof(log_msg.header) + queue_msg.body_length, 0) == ESP_OK) {
                         fgr_socket_channel_activity(&context->context_sock);
                     } else {
                         fgr_socket_channel_failed(&context->context_sock);
@@ -495,6 +536,15 @@ static void task_log(void *param)
                 }
 
                 free(queue_msg.body);
+
+                if (context->connected && (context->queue_full_count > 0)) {
+                    // Send a marker message with the count of queue full events
+                    snprintf(marker_buffer, sizeof(marker_buffer),
+                            "### Lost %d log message(s) due to queue full ###",
+                            context->queue_full_count);
+                    context->queue_full_count = 0;
+                    log_replay_marker(marker_buffer, context);
+                }
             }
         }
 
@@ -566,7 +616,8 @@ static int tcp_log_vprintf(const char *fmt, va_list args)
                 // won't be able to get the lock to send it.
                 // Just have to make sure we don't pull the rug out
                 // from under ourselves in clean_up()...?
-                if (xQueueSend(g_context.queue, &queue_msg, portMAX_DELAY) != pdPASS) {
+                if (xQueueSend(g_context.queue, &queue_msg, pdMS_TO_TICKS(100)) != pdPASS) {
+                    g_context.queue_full_count++;
                     free(*body);
                 }
             }
@@ -617,7 +668,7 @@ static void socket_reconnect_cb(int sock, void *param)
         context->sock = sock;
         context->connected = true;
 
-        if (context->queue) {
+        if (context->queue && !context->buffer.replay_active) {
             // If we have a queue, we are configured and running,
             // so queue an FGR_MSG_TYPE_NULL message as a replay signal
             queue_msg_t replay_msg = {0};

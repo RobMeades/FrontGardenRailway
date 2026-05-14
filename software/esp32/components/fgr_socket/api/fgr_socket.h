@@ -379,6 +379,19 @@ void fgr_socket_channel_stop(void **context);
 int32_t fgr_socket_send(int sock, const void *buffer, size_t length,
                         size_t retry_count);
 
+/** As fgr_socket_send() but don't call any of the logging
+ * APIs on failure: used by fgr_log() to avoid recursion.
+ *
+ * @param sock           the socket.
+ * @param buffer         a pointer to the data to send.
+ * @param length         the amount of data in buffer.
+ * @param retry_count    how many times to retry on failure, e.g.
+ *                       FGR_SOCKET_TX_RETRY_COUNT.
+ * @return               ESP_OK on success, else a negative value from esp_err_t.
+ */
+int32_t fgr_socket_send_no_log(int sock, const void *buffer, size_t length,
+                               size_t retry_count);
+
 /** Start receiving data on a socket.  A task is created to receive
  * data and rx_cb() may be called from this task until
  * fgr_socket_receive_stop() is called.
