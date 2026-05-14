@@ -148,6 +148,11 @@ class Node:
     led_breathe_on: Optional[bool] = None
     rssi: Optional[int] = None  # WiFi signal strength in dBm
 
+    def identifier(self) -> str:
+        """Return node identifier as 'name (ip)' or just 'name' if IP not available"""
+        if hasattr(self, 'ip') and self.ip:
+            return f"{self.name} ({self.ip})"
+        return self.name
 
 # ============================================================================
 # Node Handler Base Class
@@ -670,9 +675,9 @@ class Controller:
         if cnf and cnf.error_or_state == fgr.FGRError.FGR_ERROR_NONE and len(cnf.contents) >= 2:
             node.log_on = bool(cnf.contents[0])
             node.log_level = cnf.contents[1]
-            self.logger.info(f"Node {node.name}: log_on={node.log_on}, log_level={node.log_level}")
+            self.logger.info(f"Node {node.identifier()}: log_on={node.log_on}, log_level={node.log_level}")
         else:
-            self.logger.debug(f"Node {node.name}: log status query failed/timeout")
+            self.logger.debug(f"Node {node.identifier()}: log status query failed/timeout")
             # Leave as None (unknown)
 
         # Query debug LED status
@@ -680,9 +685,9 @@ class Controller:
         if cnf and cnf.error_or_state == fgr.FGRError.FGR_ERROR_NONE and len(cnf.contents) >= 2:
             node.led_on = bool(cnf.contents[0])
             node.led_breathe_on = bool(cnf.contents[1])
-            self.logger.info(f"Node {node.name}: led_on={node.led_on}, led_breathe_on={node.led_breathe_on}")
+            self.logger.info(f"Node {node.identifier()}: led_on={node.led_on}, led_breathe_on={node.led_breathe_on}")
         else:
-            self.logger.debug(f"Node {node.name}: LED status query failed/timeout")
+            self.logger.debug(f"Node {node.identifier()}: LED status query failed/timeout")
             # Leave as None (unknown)
 
     def _disconnect_node(self, node: Node) -> None:
@@ -697,7 +702,7 @@ class Controller:
         current_sock = node.sock
         current_thread_name = threading.current_thread().name
 
-        self.logger.debug(f"[{node.name}] Disconnecting node (msgs_rcvd={node.message_count}, "
+        self.logger.debug(f"[{node.identifier()}] Disconnecting node (msgs_rcvd={node.message_count}, "
                         f"heartbeats={node.heartbeat_count}, state={node.state}, "
                         f"thread={current_thread_name})")
 
@@ -711,11 +716,11 @@ class Controller:
                 node.sock.shutdown(socket.SHUT_RDWR)
             except Exception as e:
                 # Ignore errors on shutdown - socket might already be closed
-                self.logger.debug(f"Error during socket shutdown for {node.name}: {e}")
+                self.logger.debug(f"Error during socket shutdown for {node.identifier()}: {e}")
             try:
                 node.sock.close()
             except Exception as e:
-                self.logger.debug(f"Error during socket close for {node.name}: {e}")
+                self.logger.debug(f"Error during socket close for {node.identifier()}: {e}")
             node.sock = None
 
         # Clear all pending requests
@@ -735,16 +740,16 @@ class Controller:
             # Reset FGR state as well
             node.fgr_state = fgr.FGRState.FGR_STATE_NOT_POPULATED
 
-            self.logger.info(f"Node {node.name} disconnected (old_state={old_state}, last_seen={node.last_seen})")
+            self.logger.info(f"Node {node.identifier()} disconnected (old_state={old_state}, last_seen={node.last_seen})")
 
             # Notify handler - but only if this isn't a duplicate disconnect
             if node.handler:
                 try:
                     node.handler.on_disconnected()
                 except Exception as e:
-                    self.logger.error(f"Error in on_disconnected() for {node.name}: {e}")
+                    self.logger.error(f"Error in on_disconnected() for {node.identifier()}: {e}")
         else:
-            self.logger.debug(f"[{node.name}] Already disconnected, skipping duplicate disconnect")
+            self.logger.debug(f"[{node.identifier()}] Already disconnected, skipping duplicate disconnect")
 
     def start(self) -> bool:
         """Start the controller server"""
@@ -826,25 +831,25 @@ class Controller:
                     # Debug: Log active threads for this node
                     node_threads = [t.name for t in threading.enumerate() if node.name in t.name and t.is_alive()]
                     if node_threads:
-                        self.logger.info(f"Active threads for {node.name} before reconnect: {node_threads}")
+                        self.logger.info(f"Active threads for {node.identifier()} before reconnect: {node_threads}")
 
-                    self.logger.info(f"Found node {node.name} for IP {ip}, current state={node.state}")
+                    self.logger.info(f"Found node {node.identifier()} for IP {ip}, current state={node.state}")
 
                     # If node already has a socket, clean it up properly
                     if node.sock:
-                        self.logger.info(f"Node {node.name} already has socket, cleaning up old connection")
+                        self.logger.info(f"Node {node.identifier()} already has socket, cleaning up old connection")
 
                         # Set stop event first to signal old receive thread
                         node.stop_event.set()
 
                         # Wait for old receive thread to finish before proceeding
                         if node.rx_thread and node.rx_thread.is_alive():
-                            self.logger.info(f"Waiting for old receive thread for {node.name} to finish...")
+                            self.logger.info(f"Waiting for old receive thread for {node.identifier()} to finish...")
                             node.rx_thread.join(timeout=2.0)
                             if node.rx_thread.is_alive():
-                                self.logger.warning(f"Old receive thread for {node.name} did not terminate after 2 seconds!")
+                                self.logger.warning(f"Old receive thread for {node.identifier()} did not terminate after 2 seconds!")
                             else:
-                                self.logger.info(f"Old receive thread for {node.name} terminated successfully")
+                                self.logger.info(f"Old receive thread for {node.identifier()} terminated successfully")
 
                         # Close the old socket (after thread has finished)
                         old_sock = node.sock
@@ -869,7 +874,7 @@ class Controller:
                         # Reset reference counter to avoid confusion
                         node.reference_counter = 0
 
-                        self.logger.info(f"Cleanup complete for {node.name}, ready for new connection")
+                        self.logger.info(f"Cleanup complete for {node.identifier()}, ready for new connection")
 
                     # ALWAYS reset stop event for a new connection
                     # This must happen whether there was an old socket or not,
@@ -885,7 +890,7 @@ class Controller:
                     node.heartbeat_count = 0
                     node.connection_id += 1
                     node.connection_time = time.time()
-                    self.logger.info(f"Node {node.name} connected at {node.connection_time} (connection #{node.connection_id})")
+                    self.logger.info(f"Node {node.identifier()} connected at {node.connection_time} (connection #{node.connection_id})")
 
                     # Create handler if needed
                     if not node.handler:
@@ -898,7 +903,7 @@ class Controller:
                     node.rx_thread = threading.Thread(
                         target=self._receive_loop,
                         args=(node, captured_sock),  # ← Pass the captured socket
-                        name=f"RX-{node.name}"
+                        name=f"RX-{node.identifier()}"
                     )
                     node.rx_thread.daemon = True
                     node.rx_thread.start()
@@ -909,9 +914,9 @@ class Controller:
                     # Notify handler of successful connection
                     try:
                         node.handler.on_connected()
-                        self.logger.info(f"Node {node.name} connected (type={node.node_type})")
+                        self.logger.info(f"Node {node.identifier()} connected (type={node.node_type})")
                     except Exception as e:
-                        self.logger.error(f"Error in on_connected() for {node.name}: {e}")
+                        self.logger.error(f"Error in on_connected() for {node.identifier()}: {e}")
                 else:
                     self.logger.warning(f"Unknown node from {ip}, closing connection")
                     client_sock.close()
@@ -939,11 +944,11 @@ class Controller:
         my_sock = captured_sock
         my_thread_name = threading.current_thread().name
 
-        self.logger.info(f"Starting receive loop for {node.name} (thread={my_thread_name}, socket={my_sock.fileno() if my_sock else 'None'})")
+        self.logger.info(f"Starting receive loop for {node.identifier()} (thread={my_thread_name}, socket={my_sock.fileno() if my_sock else 'None'})")
 
         # Sanity check - make sure the socket is still valid
         if not my_sock:
-            self.logger.error(f"Receive loop for {node.name} started with no socket!")
+            self.logger.error(f"Receive loop for {node.identifier()} started with no socket!")
             return
 
         while self.running and not node.stop_event.is_set():
@@ -958,7 +963,7 @@ class Controller:
                 if self.logger.isEnabledFor(logging.DEBUG):
                     msg_type_name = msg_type_names.get(msg.message_type, f"UNK({msg.message_type})")
                     self.logger.debug(
-                        f"[{node.name}] RCVD #{node.message_count}: "
+                        f"[{node.identifier()}] RCVD #{node.message_count}: "
                         f"type={msg_type_name}, subtype=0x{msg.subtype:03X}, "
                         f"ref={msg.reference}, err/state={msg.error_or_state}, "
                         f"len={len(msg.contents)}"
@@ -973,13 +978,13 @@ class Controller:
                 if not node.stop_event.is_set():
                     # Don't log "Connection reset by peer" as an error during normal operation
                     if hasattr(e, 'errno') and e.errno == 104:  # Connection reset by peer
-                        self.logger.debug(f"Connection reset by peer from {node.name} (normal during reboot)")
+                        self.logger.debug(f"Connection reset by peer from {node.identifier()} (normal during reboot)")
                     else:
-                        self.logger.error(f"Socket error from {node.name}: {e}")
+                        self.logger.error(f"Socket error from {node.identifier()}: {e}")
                 break
             except Exception as e:
                 if not node.stop_event.is_set():
-                    self.logger.error(f"Receive error from {node.name}: {e}")
+                    self.logger.error(f"Receive error from {node.identifier()}: {e}")
                     import traceback
                     traceback.print_exc()
                 break
@@ -988,17 +993,17 @@ class Controller:
         # Check if node.sock is the same as our captured socket
         current_sock = node.sock
         if current_sock is None or (my_sock and current_sock.fileno() == my_sock.fileno()):
-            self.logger.info(f"Receive loop ending for {node.name}, disconnecting...")
+            self.logger.info(f"Receive loop ending for {node.identifier()}, disconnecting...")
             self._disconnect_node(node)
         else:
-            self.logger.info(f"Receive loop ending for {node.name} but socket was replaced (old_fd={my_sock.fileno() if my_sock else 'None'}, new_fd={current_sock.fileno() if current_sock else 'None'}), not disconnecting")
+            self.logger.info(f"Receive loop ending for {node.identifier()} but socket was replaced (old_fd={my_sock.fileno() if my_sock else 'None'}, new_fd={current_sock.fileno() if current_sock else 'None'}), not disconnecting")
 
     def _dispatch_message(self, node: Node, msg: fgr.FGRMsg) -> None:
         """Dispatch a message to the appropriate handler"""
         try:
             msg_type = msg.message_type
 
-            self.logger.debug(f"[{node.name}] Dispatching message type {msg_type}")
+            self.logger.debug(f"[{node.identifier()}] Dispatching message type {msg_type}")
 
             if msg_type == fgr.FGRMsgType.FGR_MSG_TYPE_CNF:
                 ref = msg.reference
@@ -1022,7 +1027,7 @@ class Controller:
                         if not node.handler.on_node_specific_indication(msg):
                             # No handler for this node-specific indication
                             self.logger.warning(
-                                f"[{node.name}] Unhandled node-specific indication: "
+                                f"[{node.identifier()}] Unhandled node-specific indication: "
                                 f"type=0x{msg.subtype:03X}, len={len(msg.contents)}"
                             )
                 else:
@@ -1034,17 +1039,17 @@ class Controller:
                     node.handler.on_response(msg)
 
             elif msg_type == fgr.FGRMsgType.FGR_MSG_TYPE_REQ:
-                self.logger.warning(f"Unexpected REQ from {node.name}")
+                self.logger.warning(f"Unexpected REQ from {node.identifier()}")
 
             elif msg_type == fgr.FGRMsgType.FGR_MSG_TYPE_LOG:
                 # LOG messages (type 5) are ignored - they go to a different endpoint
                 pass
             else:
                 # Unknown message type
-                self.logger.warning(f"[{node.name}] Unknown message type: {msg_type}")
+                self.logger.warning(f"[{node.identifier()}] Unknown message type: {msg_type}")
 
         except Exception as e:
-            self.logger.error(f"Exception in dispatch for {node.name}: {e}")
+            self.logger.error(f"Exception in dispatch for {node.identifier()}: {e}")
             import traceback
             traceback.print_exc()
             # Don't close the connection on exception
@@ -1056,12 +1061,12 @@ class Controller:
         # Debug: Show raw values for all indications
         if self.logger.isEnabledFor(logging.DEBUG):
             self.logger.debug(
-                f"[{node.name}] IND: type=0x{ind_type:03X} ({ind_type}), "
+                f"[{node.identifier()}] IND: type=0x{ind_type:03X} ({ind_type}), "
                 f"state={msg.error_or_state}, ref={msg.reference}"
             )
 
         if ind_type == fgr.FGRIndRsp.FGR_IND_RSP_NEEDS_CFG:
-            self.logger.info(f"Node {node.name}: needs configuration")
+            self.logger.info(f"Node {node.identifier()}: needs configuration")
             # Send response but DON'T change state or close connection
             self.send_response_to_node(node.name, ind_type, msg.reference, b"")
             # Update node state
@@ -1069,12 +1074,12 @@ class Controller:
             node.state = ConnectionState.from_fgr_state(msg.error_or_state)
 
         elif ind_type == fgr.FGRIndRsp.FGR_IND_RSP_START:
-            self.logger.info(f"Node {node.name}: started")
+            self.logger.info(f"Node {node.identifier()}: started")
             node.fgr_state = msg.error_or_state
             node.state = ConnectionState.from_fgr_state(msg.error_or_state)
 
         elif ind_type == fgr.FGRIndRsp.FGR_IND_RSP_STOP:
-            self.logger.info(f"Node {node.name}: stopped")
+            self.logger.info(f"Node {node.identifier()}: stopped")
             node.fgr_state = msg.error_or_state
             node.state = ConnectionState.from_fgr_state(msg.error_or_state)
 
@@ -1088,11 +1093,11 @@ class Controller:
                     rssi = rssi - 256
                 node.rssi = rssi
             if self.logger.isEnabledFor(logging.DEBUG):
-                self.logger.debug(f"[{node.name}] HEARTBEAT #{node.heartbeat_count}, RSSI={node.rssi} dBm")
+                self.logger.debug(f"[{node.identifier()}] HEARTBEAT #{node.heartbeat_count}, RSSI={node.rssi} dBm")
 
         elif ind_type > fgr.FGRIndRsp.FGR_IND_RSP_LAST:
             if self.logger.isEnabledFor(logging.DEBUG):
-                self.logger.debug(f"Node {node.name}: device indication 0x{ind_type:03X}")
+                self.logger.debug(f"Node {node.identifier()}: device indication 0x{ind_type:03X}")
 
     def _heartbeat_loop(self) -> None:
         """Monitor node heartbeats"""
@@ -1105,14 +1110,14 @@ class Controller:
 
                     if time_since > node.heartbeat_timeout:
                         self.logger.warning(
-                            f"Node {node.name} heartbeat timeout "
+                            f"Node {node.identifier()} heartbeat timeout "
                             f"(last: {time_since:.1f}s ago, timeout: {node.heartbeat_timeout}s, "
                             f"msgs={node.message_count}, hb={node.heartbeat_count})"
                         )
                         self._disconnect_node(node)
                     elif time_since > node.heartbeat_timeout - 15 and self.logger.isEnabledFor(logging.DEBUG):
                         self.logger.debug(
-                            f"Node {node.name} heartbeat due soon "
+                            f"Node {node.identifier()} heartbeat due soon "
                             f"(last: {time_since:.1f}s ago, timeout: {node.heartbeat_timeout}s)"
                         )
 

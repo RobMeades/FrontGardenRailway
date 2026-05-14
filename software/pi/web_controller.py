@@ -1805,6 +1805,80 @@ class WebController(Controller):
             white-space: nowrap;
         }
 
+        /* Debug filters styling */
+        .debug-filters {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            flex-wrap: wrap;
+            font-size: 10px;
+            flex: 1;
+        }
+
+        /* Prevent filter inputs from triggering panel collapse/expand */
+        .debug-filters input,
+        .debug-filters label {
+            position: relative;
+            z-index: 1002;
+            cursor: default;
+        }
+
+        .filter-textbox {
+            cursor: text;
+        }
+
+        .filter-checkbox {
+            cursor: pointer;
+        }
+
+        .filter-checkbox {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            cursor: pointer;
+            white-space: nowrap;
+            color: #333;
+        }
+
+        .filter-checkbox input {
+            cursor: pointer;
+            margin: 0;
+        }
+
+        .filter-input-group {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            background: #e9ecef;
+            padding: 2px 8px;
+            border-radius: 4px;
+        }
+
+        .filter-label {
+            font-size: 9px;
+            color: #495057;
+            white-space: nowrap;
+        }
+
+        .filter-textbox {
+            border: 1px solid #ced4da;
+            border-radius: 3px;
+            padding: 2px 4px;
+            font-size: 9px;
+            width: 90px;
+            background: white;
+        }
+
+        .filter-textbox:focus {
+            outline: none;
+            border-color: #007bff;
+        }
+
+        .log-highlight {
+            color: #ffd966 !important;
+            font-weight: bold;
+        }
+
         .debug-buttons {
             display: flex;
             gap: 6px;
@@ -1982,6 +2056,23 @@ class WebController(Controller):
             .nav-next { right: -35px; width: 32px; height: 32px; }
             .nav-prev::before, .nav-next::before { font-size: 14px; }
         }
+
+        /* Override collapsed behavior - prevent hiding content */
+        .debug-panel.collapsed .debug-window {
+            display: flex !important;
+            visibility: visible !important;
+            opacity: 1 !important;
+            height: auto !important;
+            min-height: 100px !important;
+        }
+
+        /* Also ensure log entries are visible */
+        .debug-window > div {
+            display: block !important;
+            height: auto !important;
+            min-height: auto !important;
+        }
+
     </style>
 </head>
 <body>
@@ -2015,6 +2106,19 @@ class WebController(Controller):
     <div class="debug-panel">
         <div class="debug-header">
             <h2>🐛 Debug Output <span id="journalBadge" class="badge-warning">loading...</span></h2>
+            <div class="debug-filters">
+                <label class="filter-checkbox">
+                    <input type="checkbox" id="filterExcludeCtrl"> Exclude CTRL
+                </label>
+                <div class="filter-input-group">
+                    <span class="filter-label" id="filterIncludeLabel">Include only NODEs</span>
+                    <input type="text" id="filterIncludeNodes" placeholder="e.g., 2,3" class="filter-textbox">
+                </div>
+                <div class="filter-input-group">
+                    <span class="filter-label" id="filterHighlightLabel">Highlight NODEs</span>
+                    <input type="text" id="filterHighlightNodes" placeholder="e.g., 2,3" class="filter-textbox">
+                </div>
+            </div>
             <div class="debug-buttons">
                 <button onclick="selectAllLogs()" style="background:#17a2b8;color:white;">📋 Select All</button>
                 <button onclick="copyLogsToClipboard(event)" style="background:#28a745;color:white;">📋 Copy</button>
@@ -2435,13 +2539,6 @@ class WebController(Controller):
                     document.body.style.cursor = '';
                 }
             });
-
-            // Make the whole header clickable to toggle (but not buttons)
-            header.addEventListener('click', function(e) {
-                // Don't toggle if clicking on buttons
-                if (e.target.tagName === 'BUTTON') return;
-                toggleDebugPanel();
-            });
         }
 
         function dockDebugPanel() {
@@ -2546,52 +2643,240 @@ class WebController(Controller):
                 debugWindow.innerHTML = 'Logs cleared...';
             }
             logBuffer = [];
+            logElements = [];
+            logTexts = [];
             fetch('/api/logs/clear', {method: 'POST'})
                 .then(() => setupLogsStream())
                 .catch(e => console.error('Error clearing logs:', e));
+        }
+
+        // Filter state
+        let filterExcludeCtrl = false;
+        let filterIncludeNodes = new Set();  // Set of node IP last octets to include (empty means all)
+        let filterHighlightNodes = new Set(); // Set of node IP last octets to highlight
+        let controllerIpPrefix = ''; // Will be set from server
+
+        // Parse node IP last octet from log line
+        function extractNodeLastOctet(logLine) {
+            const bracketMatch = logLine.match(/\\[NODE\\]\\s+\\[([^\\]]+)\\]/);
+            if (bracketMatch && bracketMatch[1]) {
+                const ipParts = bracketMatch[1].split('.');
+                if (ipParts.length === 4) {
+                    return ipParts[3];
+                }
+            }
+            return null;
+        }
+
+        function shouldDisplayLog(logLine) {
+            const isCtrl = logLine.includes('[CTRL]');
+            const isNode = logLine.includes('[NODE]');
+
+            // Exclude CTRL filter
+            if (filterExcludeCtrl && isCtrl) {
+                return false;
+            }
+
+            // Include only NODEs filter
+            if (filterIncludeNodes.size > 0 && isNode) {
+                const lastOctet = extractNodeLastOctet(logLine);
+                if (lastOctet && !filterIncludeNodes.has(lastOctet)) {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        // Apply highlighting to a log line
+        function applyHighlighting(logLine) {
+            if (filterHighlightNodes.size === 0) {
+                return logLine;  // Return raw text, not escaped
+            }
+
+            const lastOctet = extractNodeLastOctet(logLine);
+            if (lastOctet && filterHighlightNodes.has(lastOctet)) {
+                return `<span class="log-highlight">${logLine}</span>`;
+            }
+            return logLine;
+        }
+
+        // Store all log DOM elements for efficient filtering
+        let logElements = [];  // Store references to DOM elements
+        let logTexts = [];     // Store raw text for each log
+
+        function refilterAndRenderLogs() {
+            const debugWindow = document.getElementById('debugWindow');
+            if (!debugWindow) return;
+
+            // If we have no logElements yet, build them from buffer
+            if (logElements.length === 0 && logBuffer.length > 0) {
+                debugWindow.innerHTML = '';
+                logElements = [];
+                logTexts = [];
+                for (const log of logBuffer) {
+                    const className = log.includes('[CTRL]') ? 'log-ctrl' : 'log-node';
+                    const logDiv = document.createElement('div');
+                    logDiv.className = className;
+                    logDiv.textContent = log;
+                    debugWindow.appendChild(logDiv);
+                    logElements.push(logDiv);
+                    logTexts.push(log);
+                }
+            }
+
+            // Apply filters to existing elements
+            let visibleCount = 0;
+            for (let i = 0; i < logElements.length; i++) {
+                const logDiv = logElements[i];
+                const log = logTexts[i];
+                const shouldShow = shouldDisplayLog(log);
+
+                if (shouldShow) {
+                    logDiv.style.display = '';
+                    const highlightedContent = applyHighlighting(log);
+                    if (highlightedContent !== log) {
+                        logDiv.innerHTML = highlightedContent;
+                    } else if (logDiv.innerHTML !== log && logDiv.textContent === log) {
+                        logDiv.textContent = log;
+                    }
+                    visibleCount++;
+                } else {
+                    logDiv.style.setProperty('display', 'none', 'important');
+                }
+            }
+
+            // Show message if nothing visible
+            const emptyMsg = document.getElementById('filter-empty-message');
+            if (visibleCount === 0 && logBuffer.length > 0) {
+                if (!emptyMsg) {
+                    const msg = document.createElement('div');
+                    msg.id = 'filter-empty-message';
+                    msg.className = 'log-ctrl';
+                    msg.textContent = 'No logs match current filters...';
+                    debugWindow.appendChild(msg);
+                } else {
+                    emptyMsg.style.display = '';
+                }
+            } else if (emptyMsg) {
+                emptyMsg.style.display = 'none';
+            }
+        }
+
+        // Parse comma/space separated list of numbers into a Set
+        function parseFilterInput(inputValue) {
+            const result = new Set();
+            if (!inputValue.trim()) return result;
+
+            // Match one or more numbers, separated by any non-number characters
+            const matches = inputValue.match(/\\d+/g);
+            if (matches) {
+                for (const match of matches) {
+                    result.add(match);
+                }
+            }
+            return result;
+        }
+
+        // Update filter labels with controller IP prefix
+        function updateFilterLabels(controllerIpPrefix) {
+            const includeLabel = document.getElementById('filterIncludeLabel');
+            const highlightLabel = document.getElementById('filterHighlightLabel');
+
+            if (includeLabel && controllerIpPrefix) {
+                includeLabel.textContent = `Include only NODEs ${controllerIpPrefix}.X`;
+            }
+            if (highlightLabel && controllerIpPrefix) {
+                highlightLabel.textContent = `Highlight NODEs ${controllerIpPrefix}.X`;
+            }
+        }
+
+        function updateFiltersAndRender() {
+            const excludeCheckbox = document.getElementById('filterExcludeCtrl');
+            filterExcludeCtrl = excludeCheckbox ? excludeCheckbox.checked : false;
+
+            const includeInput = document.getElementById('filterIncludeNodes');
+            filterIncludeNodes = parseFilterInput(includeInput ? includeInput.value : '');
+
+            const highlightInput = document.getElementById('filterHighlightNodes');
+            filterHighlightNodes = parseFilterInput(highlightInput ? highlightInput.value : '');
+
+            refilterAndRenderLogs();
+        }
+
+        // Set controller IP prefix for filter hints
+        function setControllerIpPrefix(ip) {
+            // Extract first three octets: a.b.c
+            const match = ip.match(/(\\d+\\.\\d+\\.\\d+)\\.\\d+/);
+            if (match) {
+                controllerIpPrefix = match[1];
+                // Update placeholder text for filter inputs
+                const includeInput = document.getElementById('filterIncludeNodes');
+                const highlightInput = document.getElementById('filterHighlightNodes');
+                if (includeInput) {
+                    includeInput.placeholder = `e.g., 1,2,3 (${controllerIpPrefix}.X)`;
+                }
+                if (highlightInput) {
+                    highlightInput.placeholder = `e.g., 1,2,3 (${controllerIpPrefix}.X)`;
+                }
+            }
+        }
+
+        function appendLogsFiltered(newLogs) {
+            const debugWindow = document.getElementById('debugWindow');
+            if (!debugWindow) return;
+
+            if (newLogs.length === 0) return;
+
+            // Remove empty message if present
+            const emptyMsg = document.getElementById('filter-empty-message');
+            if (emptyMsg) emptyMsg.remove();
+
+            // Clear "Waiting" message
+            if (debugWindow.innerHTML === 'Waiting for logs...') {
+                debugWindow.innerHTML = '';
+                logElements = [];
+                logTexts = [];
+            }
+
+            const wasAtBottom = debugWindow.scrollHeight - debugWindow.scrollTop - debugWindow.clientHeight < 10;
+
+            // Add new logs to buffer and DOM
+            for (const log of newLogs) {
+                logBuffer.push(log);
+                logTexts.push(log);
+
+                const shouldShow = shouldDisplayLog(log);
+                const className = log.includes('[CTRL]') ? 'log-ctrl' : 'log-node';
+                const logDiv = document.createElement('div');
+                logDiv.className = className;
+
+                if (shouldShow) {
+                    const highlightedContent = applyHighlighting(log);
+                    if (highlightedContent !== log) {
+                        logDiv.innerHTML = highlightedContent;
+                    } else {
+                        logDiv.textContent = log;
+                    }
+                    logDiv.style.display = '';
+                } else {
+                    logDiv.textContent = log;
+                    logDiv.style.setProperty('display', 'none', 'important');
+                }
+
+                debugWindow.appendChild(logDiv);
+                logElements.push(logDiv);
+            }
+
+            if (wasAtBottom && autoScrollEnabled) {
+                debugWindow.scrollTop = debugWindow.scrollHeight;
+            }
         }
 
         function escapeHtml(text) {
             const div = document.createElement('div');
             div.textContent = text;
             return div.innerHTML;
-        }
-
-        function appendLogs(newLogs) {
-            const debugWindow = document.getElementById('debugWindow');
-            if (!debugWindow) return;
-
-            if (newLogs.length === 0) {
-                if (logBuffer.length === 0 && debugWindow.innerHTML === 'Logs cleared...') {
-                    return;
-                }
-                if (logBuffer.length === 0 && debugWindow.innerHTML === '') {
-                    debugWindow.innerHTML = 'Waiting for logs...';
-                }
-                return;
-            }
-
-            if (debugWindow.innerHTML === 'Logs cleared...') {
-                debugWindow.innerHTML = '';
-            }
-            if (debugWindow.innerHTML === '' || debugWindow.innerHTML === 'Waiting for logs...') {
-                debugWindow.innerHTML = '';
-            }
-
-            const wasAtBottom = debugWindow.scrollHeight - debugWindow.scrollTop - debugWindow.clientHeight < 10;
-            newLogs.forEach(log => {
-                let className = 'log-ctrl';
-                if (log.includes('[NODE]')) className = 'log-node';
-                if (log.includes('ERROR')) className = 'log-ctrl';
-                const logDiv = document.createElement('div');
-                logDiv.className = className;
-                logDiv.textContent = log;
-                debugWindow.appendChild(logDiv);
-            });
-            logBuffer = logBuffer.concat(newLogs);
-            if (wasAtBottom && autoScrollEnabled) {
-                debugWindow.scrollTop = debugWindow.scrollHeight;
-            }
         }
 
         // Update pagination controls - handle expanded mode differently
@@ -3302,8 +3587,32 @@ class WebController(Controller):
             if (statusSource) statusSource.close();
             const source = new EventSource('/api/status/stream');
             source.onmessage = (event) => {
-                try { updateUI(JSON.parse(event.data)); }
-                catch (e) { console.error("Error parsing status:", e); }
+                try {
+                    const status = JSON.parse(event.data);
+                    updateUI(status);
+                    // Extract controller IP prefix from first node's IP
+                    if (!controllerIpPrefix && status.nodes && status.nodes.length > 0) {
+                        for (const node of status.nodes) {
+                            if (node.ip) {
+                                const match = node.ip.match(/(\\d+\\.\\d+\\.\\d+)\\.\\d+/);
+                                if (match) {
+                                    controllerIpPrefix = match[1];
+                                    updateFilterLabels(controllerIpPrefix);
+                                    // Also update placeholder hints
+                                    const includeInput = document.getElementById('filterIncludeNodes');
+                                    const highlightInput = document.getElementById('filterHighlightNodes');
+                                    if (includeInput) {
+                                        includeInput.placeholder = `e.g., 2,3 (${controllerIpPrefix}.X)`;
+                                    }
+                                    if (highlightInput) {
+                                        highlightInput.placeholder = `e.g., 2,3 (${controllerIpPrefix}.X)`;
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                } catch (e) { console.error("Error parsing status:", e); }
             };
             source.onerror = () => {
                 console.log('Status stream error, reconnecting...');
@@ -3320,7 +3629,7 @@ class WebController(Controller):
             source.onmessage = (event) => {
                 try {
                     const newLogs = JSON.parse(event.data);
-                    if (newLogs.length > 0) appendLogs(newLogs);
+                    if (newLogs.length > 0) appendLogsFiltered(newLogs);
                 } catch (e) { console.error("Error parsing logs:", e); }
             };
 
@@ -3338,6 +3647,9 @@ class WebController(Controller):
                 if (debugWindow && debugWindow.innerHTML === '') {
                     debugWindow.innerHTML = 'Waiting for logs...';
                 }
+                // Reset our stored elements on stream reset
+                logElements = [];
+                logTexts = [];
             });
 
             source.onerror = () => {
@@ -3352,7 +3664,34 @@ class WebController(Controller):
         setupResizableDebugPanel();
         setupStatusStream();
         setupLogsStream();
-    </script>
+
+        // Setup filter event listeners
+        function setupFilterListeners() {
+            const excludeCheckbox = document.getElementById('filterExcludeCtrl');
+            const includeInput = document.getElementById('filterIncludeNodes');
+            const highlightInput = document.getElementById('filterHighlightNodes');
+
+            // Restrict input: only 2-9, comma, period, space, dash allowed
+            function restrictFilterInput(e) {
+                this.value = this.value.replace(/[^2-9,.\\s-]/g, '');
+            }
+
+            if (excludeCheckbox) {
+                excludeCheckbox.addEventListener('change', updateFiltersAndRender);
+            }
+            if (includeInput) {
+                includeInput.addEventListener('input', updateFiltersAndRender);
+                includeInput.addEventListener('input', restrictFilterInput);
+            }
+            if (highlightInput) {
+                highlightInput.addEventListener('input', updateFiltersAndRender);
+                highlightInput.addEventListener('input', restrictFilterInput);
+            }
+        }
+
+        setupFilterListeners();
+
+        </script>
 </body>
 </html>'''
 
