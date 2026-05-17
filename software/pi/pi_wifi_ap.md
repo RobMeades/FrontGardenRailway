@@ -26,6 +26,8 @@ Since the Pi will lose connectivity to your Wi-Fi network (you do _not_ want an 
 
   - `sudo apt install tcpdump`: can be handy for debugging,
 
+  - `sudo apt install sqlite3`: may be needed later when you are storing metrics from nodes in a database,
+
 - Connect a PC to the Pi's serial port and log in to it, e.g. `minicom -D /dev/ttyUSB0` on Linux.
 
 - Check that binary file uploads and downloads work, e.g. in `minicom` `CTRL-A`, `S`, `zmodem`, then find a binary file (let's call it `blah.bin`) and send it, rename the uploaded file to something like `blah_new.bin`, then in the `minicom` terminal type `sz blah_new.bin` to send the file back, leave `minicom` and finally, on Linux, `diff blah.bin blah_new.bin` should produce no output (i.e. the files are the same).

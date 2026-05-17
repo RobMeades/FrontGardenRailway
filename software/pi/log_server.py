@@ -44,9 +44,11 @@ import signal
 import struct
 import time
 import threading
+import sqlite3
+import json
 from pathlib import Path
 from typing import Optional, Dict, Set
-from datetime import datetime
+from datetime import datetime, timezone
 
 # Add the protocol directory to Python path
 # Get the directory where THIS script is located
@@ -91,9 +93,12 @@ DEFAULT_PRIORITY = journal.LOG_INFO if HAS_SYSTEMD else 6
 class FGRLogServer:
     """FGR Protocol Log Server"""
 
-    def __init__(self, bind_address: str = '0.0.0.0', port: int = 5001):
+    def __init__(self, bind_address: str = '0.0.0.0', port: int = 5001,
+                db_path: str = None, retention_days: int = 30):
         self.bind_address = bind_address
         self.port = port
+        self.db_path = db_path
+        self.retention_days = retention_days
         self.server_socket: Optional[socket.socket] = None
         self.client_threads: Dict[socket.socket, threading.Thread] = {}
         self.running = True
@@ -101,9 +106,18 @@ class FGRLogServer:
             'connections': 0,
             'log_messages': 0,
             'bytes_received': 0,
-            'errors': 0
+            'errors': 0,
+            'metrics_stored': 0
         }
         self.lock = threading.Lock()
+        self.stop_cleanup = threading.Event()
+
+        # Initialize database only if path provided (creates tables, no persistent connection)
+        if self.db_path:
+            self._init_database()
+            self._start_cleanup_thread()
+        else:
+            print("No database path provided - running in log-only mode")
 
         # Set up signal handlers for graceful shutdown
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -129,34 +143,176 @@ class FGRLogServer:
         return LOG_LEVEL_TO_PRIORITY.get(level, DEFAULT_PRIORITY)
 
     def _write_to_journal(self, message: str, level: int,
-                          device_info: Dict[str, str]) -> None:
+                        device_info: Dict[str, str]) -> None:
         """Write a log message to the systemd journal"""
-        priority = self._get_priority_from_level(level)
+        try:
+            priority = self._get_priority_from_level(level)
 
-        # Prepend the IP address to the message for easier reading
-        ip = device_info.get('addr', 'unknown')
-        enhanced_message = f"[{ip}] {message}"
+            # Prepend the IP address to the message for easier reading
+            ip = device_info.get('addr', 'unknown')
+            enhanced_message = f"[{ip}] {message}"
 
-        if HAS_SYSTEMD:
-            # Send to systemd journal with metadata
-            extra_fields = {
-                'SYSLOG_IDENTIFIER': 'fgr-log-server',
-                'PRIORITY': str(priority),
-                'FGR_DEVICE_ADDR': device_info.get('addr', 'unknown'),
-                'FGR_DEVICE_PORT': str(device_info.get('port', 'unknown')),
-                'FGR_LOG_LEVEL': str(level),
-                'FGR_LOG_LEVEL_NAME': self._get_level_name(level),
-                'SOURCE_IP': device_info.get('addr', 'unknown'),
-            }
+            if HAS_SYSTEMD:
+                # Send to systemd journal with metadata
+                extra_fields = {
+                    'SYSLOG_IDENTIFIER': 'fgr-log-server',
+                    'PRIORITY': str(priority),
+                    'FGR_DEVICE_ADDR': device_info.get('addr', 'unknown'),
+                    'FGR_DEVICE_PORT': str(device_info.get('port', 'unknown')),
+                    'FGR_LOG_LEVEL': str(level),
+                    'FGR_LOG_LEVEL_NAME': self._get_level_name(level),
+                    'SOURCE_IP': device_info.get('addr', 'unknown'),
+                }
 
-            journal.send(enhanced_message, priority=priority, **extra_fields)
-        else:
-            # Fallback to console output
-            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
-            level_name = self._get_level_name(level)
+                journal.send(enhanced_message, priority=priority, **extra_fields)
+            else:
+                # Fallback to console output
+                timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+                level_name = self._get_level_name(level)
+                print(f"[{timestamp}] [{device_info['addr']}:{device_info['port']}] "
+                    f"[{level_name}] {message}")
 
-            print(f"[{timestamp}] [{device_info['addr']}:{device_info['port']}] "
-                  f"[{level_name}] {message}")
+        except Exception as e:
+            print(f"Journal write failed for {device_info.get('addr', 'unknown')}: {e}")
+
+    def _init_database(self):
+        """Initialize database schema (called once at startup)"""
+        if not self.db_path:
+            return
+
+        # Ensure directory exists
+        db_dir = Path(self.db_path).parent
+        db_dir.mkdir(parents=True, exist_ok=True)
+
+        # Use a temporary connection to create tables
+        conn = sqlite3.connect(self.db_path, timeout=5.0)
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS metrics (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    node_ip TEXT NOT NULL,
+                    timestamp_utc TEXT NOT NULL,
+                    epoch_time INTEGER NOT NULL,
+                    data TEXT NOT NULL
+                )
+            ''')
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_metrics_node_ip ON metrics(node_ip)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_metrics_epoch_time ON metrics(epoch_time)")
+            conn.commit()
+            print(f"Database initialized at {self.db_path}")
+        finally:
+            conn.close()
+
+    def _extract_json_from_log(self, log_text: str) -> Optional[str]:
+        """Extract JSON from a log message that may have prefixes"""
+        if not log_text:
+            return None
+
+        # Find the first '{' character
+        start = log_text.find('{')
+        if start == -1:
+            return None
+
+        # Find the matching '}' at the end (simple approach - assumes valid JSON)
+        # Count brackets to handle nested objects
+        brace_count = 0
+        end = -1
+        for i in range(start, len(log_text)):
+            if log_text[i] == '{':
+                brace_count += 1
+            elif log_text[i] == '}':
+                brace_count -= 1
+                if brace_count == 0:
+                    end = i
+                    break
+
+        if end == -1:
+            return None
+
+        return log_text[start:end+1]
+
+    def _store_metrics(self, node_ip: str, log_text: str) -> None:
+        """Store raw metrics JSON in database - creates a new connection per call"""
+        if not self.db_path:
+            return
+
+        if not log_text.strip().startswith('{'):
+            return
+
+        try:
+            # Validate JSON
+            json.loads(log_text)
+
+            # Create a fresh connection for this thread
+            conn = sqlite3.connect(self.db_path, timeout=5.0)
+            try:
+                conn.execute('''
+                    INSERT INTO metrics (node_ip, timestamp_utc, epoch_time, data)
+                    VALUES (?, ?, ?, ?)
+                ''', (
+                    node_ip,
+                    datetime.now(timezone.utc).isoformat(),
+                    int(time.time()),
+                    log_text
+                ))
+                conn.commit()
+
+                with self.lock:
+                    self.stats['metrics_stored'] += 1
+
+                if self.stats['metrics_stored'] % 100 == 0:
+                    print(f"Stored {self.stats['metrics_stored']} metrics so far")
+            finally:
+                conn.close()
+
+        except json.JSONDecodeError:
+            pass  # Not valid JSON, ignore silently
+        except Exception as e:
+            print(f"Error storing metrics for {node_ip}: {e}")
+
+    def _start_cleanup_thread(self):
+        """Start a background thread for database cleanup"""
+        self.stop_cleanup = threading.Event()
+
+        def cleanup_loop():
+            # Run initial cleanup after 1 minute
+            self.stop_cleanup.wait(60)
+            while not self.stop_cleanup.is_set():
+                self._cleanup_old_metrics()
+                self.stop_cleanup.wait(86400)  # 24 hours, but can be interrupted
+
+        cleanup_thread = threading.Thread(target=cleanup_loop, daemon=True)
+        cleanup_thread.start()
+        print("Database cleanup thread started (runs daily)")
+
+    def _cleanup_old_metrics(self):
+        """Delete metrics older than retention_days"""
+        if not self.db_path or self.retention_days <= 0:
+            return
+
+        cutoff_time = int(time.time()) - (self.retention_days * 86400)
+
+        # Create a fresh connection for cleanup
+        conn = sqlite3.connect(self.db_path, timeout=5.0)
+        try:
+            cursor = conn.execute(
+                "DELETE FROM metrics WHERE epoch_time < ?",
+                (cutoff_time,)
+            )
+            deleted = cursor.rowcount
+            if deleted > 0:
+                conn.commit()
+                print(f"Deleted {deleted} old metrics (older than {self.retention_days} days)")
+
+                # VACUUM occasionally to reclaim space
+                if deleted > 10000:
+                    conn.execute("VACUUM")
+                    print("Database vacuumed to reclaim space")
+        except Exception as e:
+            print(f"Error cleaning up old metrics: {e}")
+        finally:
+            conn.close()
 
     def _handle_client(self, client_socket: socket.socket,
                     client_address: tuple) -> None:
@@ -197,18 +353,21 @@ class FGRLogServer:
                         continue
 
                     # Process the message
-                    if msg.message_type == FGRMsgType.FGR_MSG_TYPE_LOG:
-                        with self.lock:
-                            self.stats['log_messages'] += 1
-                            log_text = msg.get_log_message()
-                            log_level = msg.reference
-                            self._write_to_journal(log_text, log_level, device_info)
+                    with self.lock:
+                        self.stats['log_messages'] += 1
+                        log_text = msg.get_log_message()
+                        log_level = msg.reference
+                        self._write_to_journal(log_text, log_level, device_info)
 
-                except socket.timeout:
-                    continue
-                except (ConnectionResetError, BrokenPipeError) as e:
-                    print(f"Connection error from {client_address[0]}:{client_address[1]}: {e}")
-                    break
+                    # Extract JSON if present (outside lock to avoid blocking)
+                    json_text = self._extract_json_from_log(log_text)
+                    if json_text:
+                        try:
+                            json.loads(json_text)
+                            self._store_metrics(device_info['addr'], json_text)
+                        except json.JSONDecodeError:
+                            pass  # Not valid JSON, ignore
+
                 except Exception as e:
                     with self.lock:
                         self.stats['errors'] += 1
@@ -280,21 +439,15 @@ class FGRLogServer:
             self.stop()
 
     def stop(self) -> None:
-        """Stop the log server and clean up"""
+        """Stop the log server - daemon threads will exit automatically"""
         print("\nShutting down...")
+        self.running = False
 
-        # Wait for all client threads to finish
-        print("Waiting for client threads to finish...")
-        with self.lock:
-            threads = list(self.client_threads.values())
+        # Signal cleanup thread to stop (so it doesn't wait 24h)
+        if hasattr(self, 'stop_cleanup'):
+            self.stop_cleanup.set()
 
-        for thread in threads:
-            try:
-                thread.join(timeout=2.0)
-            except:
-                pass
-
-        # Close server socket
+        # Close server socket to unblock accept() in main loop
         if self.server_socket:
             try:
                 self.server_socket.close()
@@ -305,6 +458,8 @@ class FGRLogServer:
         print("\n=== Server Statistics ===")
         print(f"Total connections: {self.stats['connections']}")
         print(f"Log messages received: {self.stats['log_messages']}")
+        if self.db_path:
+            print(f"Metrics stored: {self.stats['metrics_stored']}")
         print(f"Total bytes received: {self.stats['bytes_received']}")
         print(f"Errors: {self.stats['errors']}")
         print("=========================")
@@ -328,7 +483,18 @@ def main():
         default='0.0.0.0',
         help='Address to bind to (default: 0.0.0.0)'
     )
-
+    parser.add_argument(
+        '--db-path', '-d',
+        type=str,
+        default=None,
+        help='Path to SQLite database file (e.g. /mnt/ssd/fgr_metrics.db), default no database, log only mode'
+    )
+    parser.add_argument(
+        '--retention-days', '-r',
+        type=int,
+        default=30,
+        help='Number of days to retain metrics (default: 30, 0 = unlimited)'
+    )
     args = parser.parse_args()
 
     # Validate port range
@@ -339,7 +505,9 @@ def main():
     # Create and start server
     server = FGRLogServer(
         bind_address=args.bind_address,
-        port=args.port
+        port=args.port,
+        db_path=args.db_path,
+        retention_days=args.retention_days
     )
 
     try:

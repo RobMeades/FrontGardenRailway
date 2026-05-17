@@ -393,7 +393,7 @@ static void task_send_queue_cb(void *param)
     if (xQueueReceive(context->queue_send, &msg, pdMS_TO_TICKS(100)) == pdPASS) {
         if (msg.type == FGR_MSG_TYPE_CNF) {
             fgr_msg_send_cnf(msg.msg_sub_type, msg.error, msg.reference,
-                                msg.body_contents, msg.body_length);
+                             msg.body_contents, msg.body_length);
             free(msg.body_contents);
         } else if (msg.type == FGR_MSG_TYPE_IND) {
             fgr_msg_send_ind(msg.msg_sub_type, msg.body_contents, msg.body_length);

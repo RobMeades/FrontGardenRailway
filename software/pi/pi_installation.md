@@ -40,4 +40,26 @@ For isolation, the Raspberry Pi should be installed on a VLAN of the home networ
 
 - Verify that the change is working by running `ntpq -p`: you should see the configured NTP server IP address in the list, and it should eventually show a `*` next to it, indicating it is the source that NTP on the Pi is syncing to, but this might take many many minutes.
 
+- If you intend to log node metrics to a database, plug an SSD into the Raspberry Pi, check with `lsblk` and, if it for instance appears as `/dev/sda`, mount it and check that it as mounted with:
+
+  ```
+  sudo mkdir -p /mnt/ssd
+  sudo mount /dev/sda1 /mnt/ssd
+  lsblk
+  ```
+
+  ...then make the mount persistent by getting the `PARTUUID` of the partition with `sudo blkid /dev/sda1` and then `sudo nano /etc/fstab` and add a line as follows, adding no spurious spaces at the start:
+  
+  ```
+  PARTUUID=3e4d6a20-01 /mnt/ssd vfat defaults,auto,users,rw,nofail 0 0
+  ```
+
+ ...(obviously replacing `PARTUUID` with the `PARTUUID` for your SSD) then check that you got that write by confirming the mount with:
+ 
+  ```
+  sudo mount -a
+  lsblk
+  ```
+- You can then `sudo nano /lib/systemd/system/log_server.service` and add to the end of the `ExecStart` line `--db-path /mnt/ssd/fgr_metrics.db`, do a `sudo systemctl daemon-reload` and then restart the `log_server` service  with `sudo systemctl estart log_server` and any metrics sent by nodes will be stored in the database.
+
 - Enter `ro` again to make the file system of the Raspberry Pi read-only once more.
