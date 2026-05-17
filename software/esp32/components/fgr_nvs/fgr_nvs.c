@@ -32,6 +32,7 @@
 #include "nvs_flash.h"
 #include "errno.h"
 
+#include "fgr_metrics.h"
 #include "fgr_nvs.h"
 
 /* ----------------------------------------------------------------
@@ -139,6 +140,8 @@ int32_t fgr_nvs_set(const char *name, uint32_t value)
                     ESP_LOGW(TAG, "Unable to commit changes to NVS:"
                              " 0x%04x (\"%s\")!", err, esp_err_to_name(err));
                 }
+                fgr_metrics_event_bool_set(FGR_METRIC_EVENT_BOOL_NVS_WRITE,
+                                           err == ESP_OK, sizeof(value));
             } else {
                 ESP_LOGW(TAG, "Unable to store \"%s\" to NVS:"
                          " 0x%04x (\"%s\")!", name,

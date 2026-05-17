@@ -62,6 +62,7 @@ SLIST_HEAD(task_list_t, task_t);
 // Context.
 typedef struct {
     SemaphoreHandle_t lock;
+    task_t *min_free_stack_next_task;
     struct task_list_t task_list;
 } context_t;
 
@@ -131,7 +132,9 @@ static void task_destroy(task_t *task)
                     // Removing a middle element
                     SLIST_REMOVE_AFTER(prev, next);
                 }
-                // Done
+                // Done; MUST break after an insertion or removal as
+                // otherwise SLIST_FOREACH will go bang as it
+                // relies on pointers still being valid.
                 break;
             }
             prev = iter;
@@ -139,7 +142,6 @@ static void task_destroy(task_t *task)
         free(task);
     }
 }
-
 
 /* ----------------------------------------------------------------
  * PUBLIC FUNCTIONS
@@ -190,12 +192,13 @@ int32_t fgr_util_task_create(fgr_util_task_cb_t cb,
 {
     int32_t err = -ESP_ERR_INVALID_ARG;
 
-    if (g_context.lock) {
-
-        CONTEXT_LOCK(g_context.lock, "fgr_util_task_create()");
+    if (cb && handle) {
 
         err = -ESP_ERR_INVALID_STATE;
-        if (cb && handle) {
+
+        if (g_context.lock) {
+
+            CONTEXT_LOCK(g_context.lock, "fgr_util_task_create()");
 
             err = -ESP_ERR_NO_MEM;
             task_t *task = (task_t *) malloc(sizeof(*task ));
@@ -222,9 +225,9 @@ int32_t fgr_util_task_create(fgr_util_task_cb_t cb,
             if (err != ESP_OK) {
                 task_destroy(task);
             }
-        }
 
-        CONTEXT_UNLOCK(g_context.lock, "fgr_util_task_create()");
+            CONTEXT_UNLOCK(g_context.lock, "fgr_util_task_create()");
+        }
     }
 
     return err;
@@ -251,6 +254,105 @@ int32_t fgr_util_min_free_stack(void *handle)
     }
 
     return high_watermark;
+}
+
+// The start the sequence of calls to get the minimum free stack
+int32_t fgr_util_min_free_stack_start(const char **name,
+                                      int32_t *min_free)
+{
+    int32_t err = -ESP_ERR_INVALID_ARG;
+
+    if (name && min_free) {
+
+        err = -ESP_ERR_INVALID_STATE;
+
+        if (g_context.lock) {
+
+            CONTEXT_LOCK(g_context.lock, "fgr_util_min_free_stack_start()");
+
+            err = -ESP_ERR_NOT_FOUND;
+
+            if (!g_context.min_free_stack_next_task) {
+                task_t *iter;
+                err = 0;
+                SLIST_FOREACH(iter, &g_context.task_list, next) {
+                    if (err == 0) {
+                        *name = iter->name;
+                        *min_free = iter->min_free_stack_bytes;
+                    } else if (err == 1) {
+                        g_context.min_free_stack_next_task = iter;
+                    }
+                    err++;
+                }
+
+                // Return the number of tasks _remaining_ in the list,
+                // will return ESP_FAIL (-1) if there were no tasks at all
+                err--;
+            }
+
+            CONTEXT_UNLOCK(g_context.lock, "fgr_util_min_free_stack_start()");
+        }
+    }
+
+    return err;
+}
+
+// Get the next in the set of minimum free stack values.
+int32_t fgr_util_min_free_stack_next(const char **name,
+                                     int32_t *min_free)
+{
+    int32_t err = -ESP_ERR_INVALID_ARG;
+
+    if (name && min_free) {
+
+        err = -ESP_ERR_INVALID_STATE;
+
+        if (g_context.lock) {
+
+            CONTEXT_LOCK(g_context.lock, "fgr_util_min_free_stack_next()");
+
+            err = -ESP_ERR_NOT_FOUND;
+
+            if (g_context.min_free_stack_next_task) {
+                task_t *iter;
+                err = 0;
+                SLIST_FOREACH(iter, &g_context.task_list, next) {
+                    if (err > 0) {
+                        if (err == 1) {
+                            g_context.min_free_stack_next_task = iter;
+                        }
+                        // If we are beyond g_context.min_free_stack_next_task,
+                        // just increment err
+                        err++;
+                    }
+                    if ((err == 0) && (iter == g_context.min_free_stack_next_task)) {
+                        *name = iter->name;
+                        *min_free = iter->min_free_stack_bytes;
+                        g_context.min_free_stack_next_task = NULL;
+                        err++;
+                    }
+                }
+
+                // Return the number of tasks _remaining_ in the list,
+                // will return ESP_FAIL (-1) if there were no tasks at all
+                err--;
+            }
+
+            CONTEXT_UNLOCK(g_context.lock, "fgr_util_min_free_stack_next()");
+        }
+    }
+
+    return err;
+}
+
+// Stop reading task stack high watermark values.
+void fgr_util_min_free_stack_stop()
+{
+    if (g_context.lock) {
+        CONTEXT_LOCK(g_context.lock, "fgr_util_min_free_stack_stop()");
+        g_context.min_free_stack_next_task = NULL;
+        CONTEXT_UNLOCK(g_context.lock, "fgr_util_min_free_stack_stop()");
+    }
 }
 
 // Determine if the given task is running.

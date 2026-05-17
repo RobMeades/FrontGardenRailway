@@ -36,6 +36,7 @@
 #include "fgr_socket.h"
 #include "fgr_msg.h"
 #include "fgr_debug.h"
+#include "fgr_metrics.h"
 #include "fgr_log.h"
 
 #include "fgr_rcwl9610a.h"
@@ -298,6 +299,12 @@ static int32_t init(context_t *context)
         err = fgr_util_init();
     }
 
+    // Configure metrics: needs tasks so has to come after
+    // fgr_util_init()
+    if (err == ESP_OK) {
+        err = fgr_metrics_init(fgr_metrics_log_cb, NULL);
+    }
+
     // Initialise OTA: do this whether there is WiFi or not
     // as it also initialises non-volatile storage (and you
     // can't just separately iniitalise non-volatile storage
@@ -372,11 +379,13 @@ static int32_t init(context_t *context)
 // Shutdown.
 static void deinit(context_t *context)
 {
+
     fgr_rcwl9610a_deinit();
     fgr_msg_deinit();
     fgr_log_deinit();
     fgr_network_deinit();
     fgr_debug_deinit();
+    fgr_metrics_deinit();
     fgr_util_deinit();
     vSemaphoreDelete(context->lock);
     esp_restart();
@@ -454,6 +463,7 @@ void app_main(void)
     } else {
         // Only get here if there has been a problem
         state_set(&context, FGR_STATE_GENERIC_FAILED);
+        fgr_metrics_event_set(FGR_METRIC_EVENT_LOCAL_REBOOT, 0);
         ESP_LOGE(TAG, "Setup failed (%s), will restart soonish.", esp_err_to_name(-err));
     }
 

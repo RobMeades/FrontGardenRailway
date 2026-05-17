@@ -33,6 +33,7 @@
 #include "esp_phy_init.h"
 #include "lwip/netdb.h"
 
+#include "fgr_metrics.h"
 #include "fgr_network.h"
 
 /* ----------------------------------------------------------------
@@ -44,7 +45,7 @@
 
 #ifndef FGR_NETWORK_IP_ADDRESS_ASSIGNMENT_WAIT_SECONDS
 // How long to wait for an IP address to be assigned, in seconds
-#define FGR_NETWORK_IP_ADDRESS_ASSIGNMENT_WAIT_SECONDS 60
+#  define FGR_NETWORK_IP_ADDRESS_ASSIGNMENT_WAIT_SECONDS 60
 #endif
 
 /* ----------------------------------------------------------------
@@ -72,9 +73,11 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
         ESP_LOGI(TAG, "WiFi started, connecting...");
         esp_wifi_connect();
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_CONNECTED) {
+        fgr_metrics_event_bool_set(FGR_METRIC_EVENT_BOOL_WIFI_CONNECTION, true, 0);
         ESP_LOGI(TAG, "WiFi connected to AP.");
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
         wifi_event_sta_disconnected_t *event = (wifi_event_sta_disconnected_t*) event_data;
+        fgr_metrics_event_bool_set(FGR_METRIC_EVENT_BOOL_WIFI_CONNECTION, false, 0);
         ESP_LOGI(TAG, "WiFi disconnected, reason: %d.", event->reason);
 
         // Print the AP info that failed
@@ -98,6 +101,7 @@ static void ip_event_handler(void *arg, esp_event_base_t event_base,
 {
     if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *event = (ip_event_got_ip_t *) event_data;
+        fgr_metrics_event_set(FGR_METRIC_EVENT_IP_CONNECTION, 0);
         ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&event->ip_info.ip), ".");
 
         SemaphoreHandle_t semaphore = (SemaphoreHandle_t) arg;

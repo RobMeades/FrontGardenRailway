@@ -154,7 +154,7 @@ static inline bool fgr_util_is_valid_ptr_to_ptr(void **pptr, const char *tag,
  */
 int32_t fgr_util_init();
 
-/** Deinitialise tuils.
+/** Deinitialise utils.
  */
 void fgr_util_deinit();
 
@@ -187,7 +187,8 @@ void fgr_util_deinit();
  *                         handle; cannot be NULL.  The handle will
  *                         be a good 'ole FreeRTOS TaskHandle, nothing
  *                         weird; you can do anything with it that
- *                         you could do with a TaskHandle.
+ *                         you could do with a TaskHandle.  Will not
+ *                         be touched on failure.
  * @return                 ESP_OK on success, else a negative value
  *                         from esp_err_t.
  */
@@ -213,6 +214,69 @@ bool fgr_util_task_is_running(void *handle);
  *                zero if handle is not found.
  */
 int32_t fgr_util_min_free_stack(void *handle);
+
+/** The start of a sequence of calls to get the minimum
+ * free stack values of all of the tasks that fgr_utils
+ * knows about: i.e. fgr_util_min_free_stack() for all.
+ *
+ * A usage pattern might be:
+ *
+ *    const char *name = NULL;
+ *    int32_t min_free = 0;
+ *    if (fgr_util_min_free_stack_start(&name, &min_free) >= 0) {
+ *        do {
+ *            printf("task %s had min free stack %d.\n", name, min_free);
+ *        } while (fgr_util_min_free_stack_next(&name, &min_free) >= 0);
+ *        fgr_util_min_free_stack_stop();
+ *    }
+ *
+ * When fgr_util_min_free_stack_start() has returned a
+ * non-negative value and you don't loop through all of the
+ * entries until fgr_util_min_free_stack_next() returns zero
+ * or less, fgr_util_min_free_stack_stop() MUST be
+ * called to terminate the sequence (and there is no
+ * harm in always calling it at the end of the sequence
+ * even if you do loop through the lot).
+ *
+ * This sequence of functions should only be called from
+ * a single thread at any one time; the sequence of
+ * calls is single-threaded.
+ *
+ * If a new task is added with a call to fgr_util_task_create()
+ * it may or may not be included; best not do that.
+ *
+ * @param name           a place to put the name of the task
+ *                       being reported on; cannot be NULL.
+ * @param min_free_bytes a place to put the minimum free stack
+ *                       value (in bytes); cannot be NULL.
+ * @return               on success, the number of calls to
+ *                       fgr_util_min_free_stack_next() that
+ *                       are required to read all of the
+ *                       task stack free min values, else
+ *                       negative value from esp_err_t.
+ */
+int32_t fgr_util_min_free_stack_start(const char **name,
+                                      int32_t *min_free);
+
+/** Get the next in the set of minimum free stack values,
+ * see fgr_util_min_free_stack_start() for an explanation.
+ *
+ * @param name           a place to put the name of the task
+ *                       being reported on; cannot be NULL.
+ * @param min_free_bytes a place to put the minimum free stack
+ *                       value (in bytes); cannot be NULL.
+ * @return               on success, the number of subsequent
+ *                       calls required to read all of the
+ *                       task stack free min values, else
+ *                       negative value from esp_err_t.
+ */
+int32_t fgr_util_min_free_stack_next(const char **name,
+                                     int32_t *min_free);
+
+/** Stop reading task stack high watermark values, see
+ * fgr_util_min_free_stack_start() for an explanation.
+ */
+void fgr_util_min_free_stack_stop();
 
 /** Destroy a task.
  *

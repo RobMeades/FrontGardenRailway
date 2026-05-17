@@ -743,7 +743,6 @@ int32_t fgr_socket_channel_maintain(void **context,
                      context_channel->server_ip, context_channel->port,
                      context_channel->heartbeat_seconds ? buffer : "no hearbeat though");
         } else {
-            context_channel->task_handle = NULL; // Just in case
             context_channel->heartbeat_seconds = 0;
             context_channel->heartbeat_cb = NULL;
             context_channel->down_cb = NULL;

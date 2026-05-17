@@ -45,10 +45,10 @@ extern "C" {
 #define FGR_MSG_MAX_LEN (sizeof(fgr_msg_t))
 
 // The maximum length of a message contents field.
-#define FGR_MSG_CONTENTS_MAX_LEN 256
+#define FGR_MSG_CONTENTS_MAX_LEN 512
 
 // The maximum length of a log string (excluding the null terminator).
-#define FGR_LOG_STRING_MAX_LEN   255
+#define FGR_LOG_STRING_MAX_LEN   511
 
 #if FGR_MSG_CONTENTS_MAX_LEN < (FGR_LOG_STRING_MAX_LEN) + 1
 #  error "FGR_MSG_CONTENTS_MAX_LEN must be at least as large as FGR_LOG_STRING_MAX_LEN + 1"

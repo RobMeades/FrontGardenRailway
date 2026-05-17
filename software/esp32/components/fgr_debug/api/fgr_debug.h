@@ -189,7 +189,8 @@ typedef fgr_state_t (*fgr_debug_state_cb_t)(void *param);
  * FUNCTIONS: INITIALISE/DEINITIALISE
  * -------------------------------------------------------------- */
 
-/** Initialise debug.
+/** Initialise debug.  Needs a task so fgr_util_init() must
+ * have been called first.
  *
  * Note: this will create a semaphore that is never destroyed.
  *

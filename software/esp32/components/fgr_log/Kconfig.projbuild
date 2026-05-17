@@ -7,7 +7,10 @@ menu "FGR Log Configuration"
 
     config FGR_LOG_HEARTBEAT_SECONDS
         int "how often to check the underlying channel"
-        default 290
+        default 60
         range 30 65535
+        help
+            If metrics are being sent to logging, set this to more than the
+            metrics period for maximum efficiency.
 
 endmenu

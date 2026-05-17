@@ -33,10 +33,10 @@
 #include "esp_log.h"
 #include "arpa/inet.h"
 #include "sys/queue.h"
-#include "esp_wifi.h" // for esp_wifi_sta_get_rssi()
 
 #include "fgr_util.h"
 #include "fgr_debug.h"
+#include "fgr_metrics.h"
 #include "fgr_socket.h"
 #include "fgr_msg.h"
 
@@ -52,20 +52,6 @@
 
 #ifndef FGR_MSG_TASK_SEND_QUEUE_STACK_SIZE
 #  define FGR_MSG_TASK_SEND_QUEUE_STACK_SIZE (1024 * 4)
-#endif
-
-#ifndef FGR_MSG_TASK_RSSI_STACK_SIZE
-#  define FGR_MSG_TASK_RSSI_STACK_SIZE (1024 * 4)
-#endif
-
-#ifndef RSSI_BUFFER_LENGTH
-// How many readings to average RSSI over.
-#  define RSSI_BUFFER_LENGTH 10
-#endif
-
-#ifndef RSSI_AVERAGE_TIME_SECONDS
-// How long average the RSSI over.
-#  define RSSI_AVERAGE_TIME_SECONDS 10
 #endif
 
 /* ----------------------------------------------------------------
@@ -111,13 +97,6 @@ typedef struct msg_rx_cb_t {
 // Message receive callback list head.
 SLIST_HEAD(msg_rx_cb_list_t, msg_rx_cb_t);
 
-// An RSSI buffer.
-typedef struct {
-    int32_t average_dbm; // The RSSI averaged over the readings
-    size_t count;        // How many readings there are
-    int8_t readings[RSSI_BUFFER_LENGTH];
-} buffer_rssi_t;
-
 // Context for message send queue.
 typedef struct {
     SemaphoreHandle_t lock;
@@ -131,10 +110,11 @@ typedef struct {
     void *context_sock;
     bool connected;
     SemaphoreHandle_t lock;
-    TaskHandle_t task_rssi_handle;
     uint8_t ind_reference;
     fgr_msg_state_cb_t state_cb;
     void *state_cb_param;
+    fgr_msg_rssi_cb_t rssi_cb;
+    void *rssi_cb_param;
     fgr_msg_send_cb_t send_cb;
     void *send_cb_param;
     fgr_msg_send_ping_body_cb_t send_ping_body_cb;
@@ -142,7 +122,6 @@ typedef struct {
     void *context_rx;
     struct msg_rx_cb_list_t msg_rx_cb_list;
     context_decoder_t context_decoder;
-    buffer_rssi_t buffer_rssi;
 } context_t;
 
 /* ----------------------------------------------------------------
@@ -331,71 +310,6 @@ static int32_t decode_msg(context_decoder_t *decoder, const uint8_t *buffer,
 }
 
 /* ----------------------------------------------------------------
- * STATIC FUNCTIONS: TASK CALLBACKS
- * -------------------------------------------------------------- */
-
-// Send messages that were put on the send queue.
-static void task_send_queue_cb(void *param)
-{
-    context_send_t *context = (context_send_t *) param;
-    msg_send_t msg;
-
-    if (xQueueReceive(context->queue_send, &msg, pdMS_TO_TICKS(100)) == pdPASS) {
-        if (msg.type == FGR_MSG_TYPE_CNF) {
-            fgr_msg_send_cnf(msg.msg_sub_type, msg.error, msg.reference,
-                                msg.body_contents, msg.body_length);
-            free(msg.body_contents);
-        } else if (msg.type == FGR_MSG_TYPE_IND) {
-            fgr_msg_send_ind(msg.msg_sub_type, msg.body_contents, msg.body_length);
-            free(msg.body_contents);
-        } else {
-            ESP_LOGE(TAG, "Unknown message type on send queue (%d)!", msg.type);
-        }
-    }
-}
-
-// RSSI averaging task.
-static void task_rssi_cb(void *param)
-{
-    context_t *context = (context_t *) param;
-    buffer_rssi_t *buffer_rssi = &(context->buffer_rssi);
-
-    CONTEXT_LOCK(context->lock, "task_rssi_cb()");
-
-    // Shift readings (from highest index down)
-    for (int32_t x = buffer_rssi->count - 1; x >= 0; x--) {
-        buffer_rssi->readings[x + 1] = buffer_rssi->readings[x];
-    }
-
-    // Add new reading
-    int rssi = 0;
-    esp_err_t err = esp_wifi_sta_get_rssi(&rssi);
-    if (err == ESP_OK) {
-        buffer_rssi->readings[0] = (int8_t) rssi;
-        if (buffer_rssi->count < FGR_UTIL_ARRAY_LENGTH(buffer_rssi->readings)) {
-            buffer_rssi->count++;
-        }
-    } else {
-        ESP_LOGD(TAG, "Unable to take RSSI reading (%s).", esp_err_to_name(err));
-    }
-
-    // Calculate average
-    buffer_rssi->average_dbm = 0;
-    if (buffer_rssi->count > 0) {
-        int32_t sum = 0;
-        for (int32_t x = 0; x < buffer_rssi->count; x++) {
-            sum += buffer_rssi->readings[x];
-        }
-        // Denominator has to be signed to produce a signed result
-        buffer_rssi->average_dbm = sum / (int32_t) buffer_rssi->count;
-    }
-
-    CONTEXT_UNLOCK(context->lock, "task_rssi_cb()");
-
-    vTaskDelay(pdMS_TO_TICKS(RSSI_AVERAGE_TIME_SECONDS * 1000 / RSSI_BUFFER_LENGTH));
-}
-
-/* ----------------------------------------------------------------
  * STATIC FUNCTIONS: SENDING
  * -------------------------------------------------------------- */
 
@@ -424,9 +338,11 @@ static int32_t send_msg_locked(context_t *context,
     }
 
     // Send header and length
+    int32_t total_bytes = sizeof(header_and_length);
     int32_t err = fgr_socket_send(context->sock, &header_and_length, sizeof(header_and_length), FGR_SOCKET_TX_RETRY_COUNT);
     if ((err == ESP_OK) && (buffer != NULL)) {
         // Send contents
+        total_bytes += length;
         err = fgr_socket_send(context->sock, buffer, length, FGR_SOCKET_TX_RETRY_COUNT);
     }
     if (err == ESP_OK) {
@@ -438,6 +354,7 @@ static int32_t send_msg_locked(context_t *context,
     } else {
         fgr_socket_channel_failed(&context->context_sock);
     }
+    fgr_metrics_event_bool_set(FGR_METRIC_EVENT_BOOL_CONTROLLER_SOCKET_TX, err == ESP_OK, total_bytes);
 
     return err;
 }
@@ -464,21 +381,45 @@ static int32_t send_msg(uint16_t type, uint8_t error_state,
 }
 
 /* ----------------------------------------------------------------
- * STATIC FUNCTIONS: OTHER CALLBACKS
+ * STATIC FUNCTIONS: CALLBACKS
  * -------------------------------------------------------------- */
+
+// Send messages that were put on the send queue.
+static void task_send_queue_cb(void *param)
+{
+    context_send_t *context = (context_send_t *) param;
+    msg_send_t msg;
+
+    if (xQueueReceive(context->queue_send, &msg, pdMS_TO_TICKS(100)) == pdPASS) {
+        if (msg.type == FGR_MSG_TYPE_CNF) {
+            fgr_msg_send_cnf(msg.msg_sub_type, msg.error, msg.reference,
+                                msg.body_contents, msg.body_length);
+            free(msg.body_contents);
+        } else if (msg.type == FGR_MSG_TYPE_IND) {
+            fgr_msg_send_ind(msg.msg_sub_type, msg.body_contents, msg.body_length);
+            free(msg.body_contents);
+        } else {
+            ESP_LOGE(TAG, "Unknown message type on send queue (%d)!", msg.type);
+        }
+    }
+}
 
 // Callback to send a heartbeat message.
 static void socket_heartbeat_cb(int sock, void *param)
 {
     context_t *context = (context_t *) param;
     uint8_t contents = 0;
+    uint32_t length = 0;
 
     CONTEXT_LOCK(context->lock, "socket_heartbeat_cb() msg");
-    contents = (uint8_t) context->buffer_rssi.average_dbm;
+    if (context->rssi_cb) {
+        // Populate a single byte in the contents containing the RSSI
+        contents = (uint8_t) context->rssi_cb(context->rssi_cb_param);
+        length++;
+    }
     CONTEXT_UNLOCK(context->lock, "socket_heartbeat_cb() msg");
 
-    // A single byte in the contents containing the RSSI
-    fgr_msg_send_ind(FGR_IND_RSP_HEARTBEAT, &contents, 1);
+    fgr_msg_send_ind(FGR_IND_RSP_HEARTBEAT, &contents, length);
 }
 
 // Callback called by fgr_socket_channel_maintain() when a
@@ -502,6 +443,7 @@ static void socket_reconnect_cb(int sock, void *param)
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "fgr_socket_enable_tcp_no_delay() returned error: %s.", esp_err_to_name(err));
         }
+        fgr_metrics_event_bool_set(FGR_METRIC_EVENT_BOOL_CONTROLLER_CONNECTION, true, 0);
 
         context->sock = sock;
         context->connected = true;
@@ -520,6 +462,8 @@ static void socket_down_cb(void *param)
 
     // Make the debug LED breathe an appropriate colour
     fgr_debug_led_breathe_set(FGR_DEBUG_LED_COLOUR_BAD);
+    // Log the metric
+    fgr_metrics_event_bool_set(FGR_METRIC_EVENT_BOOL_CONTROLLER_CONNECTION, false, 0);
 }
 
 // Handle a ping message, called by receive_cb().
@@ -528,6 +472,8 @@ static void receive_handler_ping_locked(context_t *context, uint8_t reference)
 {
     uint8_t buffer[FGR_MSG_CONTENTS_MAX_LEN];
     uint32_t length = 0;
+
+    fgr_metrics_event_set(FGR_METRIC_EVENT_PING_RX, 0);
 
     // Populate the body
     if (context->send_ping_body_cb) {
@@ -553,6 +499,8 @@ static void receive_cb(void *buffer, size_t length, void *param)
     context_t *context = (context_t *) param;
 
     if (context->lock && buffer && (length > 0)) {
+
+        fgr_metrics_event_set(FGR_METRIC_EVENT_CONTROLLER_SOCKET_RX, length);
 
         CONTEXT_LOCK(context->lock, "receive_cb()");
         fgr_msg_t *msg = NULL;
@@ -613,11 +561,6 @@ static void clean_up()
 
     if (g_context.lock) {
 
-        // Need to do this before taking the lock or we
-        // will lock-up the task exit
-        fgr_util_task_destroy(g_context.task_rssi_handle);
-        g_context.task_rssi_handle = NULL;
-
         CONTEXT_LOCK(g_context.lock, "clean_up() msg");
 
         // Lose the socket
@@ -625,6 +568,8 @@ static void clean_up()
         g_context.sock = -1;
         g_context.state_cb = NULL;
         g_context.state_cb_param = NULL;
+        g_context.rssi_cb = NULL;
+        g_context.rssi_cb_param = NULL;
         g_context.send_cb = NULL;
         g_context.send_cb_param = NULL;
 
@@ -668,6 +613,9 @@ int32_t fgr_msg_init(const char *server_ip, uint16_t port,
                                            &g_context.context_sock);
             if (err == ESP_OK) {
 
+                fgr_metrics_event_bool_set(FGR_METRIC_EVENT_BOOL_CONTROLLER_CONNECTION,
+                                           true, 0);
+
                 xSemaphoreGive(g_context.lock);
                 // Do initial extra socket configuration
                 socket_reconnect_cb(g_context.sock, &g_context);
@@ -688,18 +636,6 @@ int32_t fgr_msg_init(const char *server_ip, uint16_t port,
                 }
             }
 
-            if (err == ESP_OK) {
-                // On a best-effort basis, start the RSSI read task
-                err = fgr_util_task_create(&task_rssi_cb, &g_context, "rssi",
-                                            FGR_MSG_TASK_RSSI_STACK_SIZE,
-                                            3, &g_context.task_rssi_handle);
-                if (err != ESP_OK) {
-                    g_context.task_rssi_handle = NULL;  // Just in case
-                    // Continue anyway
-                    err = ESP_OK;
-                }
-            }
-
             CONTEXT_UNLOCK(g_context.lock, "fgr_msg_init()");
         }
     }
@@ -708,6 +644,23 @@ int32_t fgr_msg_init(const char *server_ip, uint16_t port,
         ESP_LOGI(TAG, "Connected to controller.");
     } else {
         clean_up();
+    }
+
+    return err;
+}
+
+// Set a callback that will return an RSSI reading.
+int32_t fgr_msg_rssi_cb(fgr_msg_rssi_cb_t cb, void *cb_param)
+{
+    int32_t err = -ESP_ERR_INVALID_STATE;
+
+    if (g_context.lock) {
+
+        CONTEXT_LOCK(g_context.lock, "fgr_msg_rssi_cb()");
+        g_context.rssi_cb = cb;
+        g_context.rssi_cb_param = cb_param;
+        err = ESP_OK;
+        CONTEXT_UNLOCK(g_context.lock, "fgr_msg_rssi_cb()");
     }
 
     return err;
@@ -1026,7 +979,7 @@ void fgr_msg_receive_handler_remove_by_cb(fgr_msg_rx_cb_t cb)
         msg_rx_cb_t *iter;
         msg_rx_cb_t *prev = NULL;
         SLIST_FOREACH(iter, &g_context.msg_rx_cb_list, next) {
-            if (iter->cb == cb) {  // Found Bob
+            if (iter->cb == cb) {
                 if (prev == NULL) {
                     // Removing the first element
                     SLIST_REMOVE_HEAD(&g_context.msg_rx_cb_list, next);
@@ -1035,6 +988,9 @@ void fgr_msg_receive_handler_remove_by_cb(fgr_msg_rx_cb_t cb)
                     SLIST_REMOVE_AFTER(prev, next);
                 }
                 free(iter);
+                // Done; MUST break after an insertion or removal as
+                // otherwise SLIST_FOREACH will go bang as it
+                // relies on pointers still being valid.
                 break;
             }
             prev = iter;
@@ -1052,7 +1008,7 @@ void fgr_msg_receive_handler_remove_by_type(uint16_t msg_type)
         msg_rx_cb_t *iter;
         msg_rx_cb_t *prev = NULL;
         SLIST_FOREACH(iter, &g_context.msg_rx_cb_list, next) {
-            if (iter->msg_type == msg_type) {  // Found Bob
+            if (iter->msg_type == msg_type) {
                 if (prev == NULL) {
                     // Removing the first element
                     SLIST_REMOVE_HEAD(&g_context.msg_rx_cb_list, next);
@@ -1061,6 +1017,9 @@ void fgr_msg_receive_handler_remove_by_type(uint16_t msg_type)
                     SLIST_REMOVE_AFTER(prev, next);
                 }
                 free(iter);
+                // Done; MUST break after an insertion or removal as
+                // otherwise SLIST_FOREACH will go bang as it
+                // relies on pointers still being valid.
                 break;
             }
             prev = iter;

@@ -37,6 +37,7 @@
 #include "nvs_flash.h"
 #include "errno.h"
 
+#include "fgr_metrics.h"
 #include "fgr_nvs.h"
 #include "fgr_ota.h"
 
@@ -278,7 +279,7 @@ int32_t fgr_ota_update(const char *update_file_url,
         err = ESP_ERR_NO_MEM;
     }
 
-    // Write the file
+    // Get the file
     int32_t binary_file_length = 0;
     if (err == ESP_OK) {
         update_partition = esp_ota_get_next_update_partition(NULL);
@@ -395,6 +396,15 @@ int32_t fgr_ota_update(const char *update_file_url,
                 }
             }
         }
+
+        if ((err != ESP_OK) && !same_version_detected) {
+            // Download failed and it wasn't because we dropped it because the
+            // downloading file was the same version as we are running
+            fgr_metrics_event_bool_set(FGR_METRIC_EVENT_BOOL_OTA_CONNECTION, false, 0);
+        }
+    } else {
+        // Connection failed
+        fgr_metrics_event_bool_set(FGR_METRIC_EVENT_BOOL_OTA_CONNECTION, false, 0);
     }
 
     // Either have a new binary file or don't need one, finish the OTA
@@ -407,6 +417,7 @@ int32_t fgr_ota_update(const char *update_file_url,
                 err = esp_ota_set_boot_partition(update_partition);
                 if (err == ESP_OK) {
                     ESP_LOGI(TAG, "Prepare to restart system!");
+                    fgr_metrics_event_set(FGR_METRIC_EVENT_LOCAL_REBOOT, 0);
                     esp_restart();
                 }
             } else {
@@ -416,6 +427,9 @@ int32_t fgr_ota_update(const char *update_file_url,
                     ESP_LOGE(TAG, "esp_ota_end failed (%s)!", esp_err_to_name(err));
                 }
             }
+            fgr_metrics_event_bool_set(FGR_METRIC_EVENT_BOOL_OTA_NVS_WRITE,
+                                       err == ESP_OK,
+                                       binary_file_length);
         }
     }
 

@@ -35,6 +35,7 @@
 #include "errno.h"
 
 #include "fgr_util.h"
+#include "fgr_metrics.h"
 #include "fgr_socket.h"
 #include "fgr_msg.h"
 #include "fgr_nvs.h"
@@ -643,6 +644,8 @@ static void socket_reconnect_cb(int sock, void *param)
             ESP_LOGW(TAG, "fgr_socket_enable_tcp_no_delay() returned error: %s.", esp_err_to_name(err));
         }
 
+        fgr_metrics_event_bool_set(FGR_METRIC_EVENT_BOOL_LOG_SERVER_CONNECTION, true, 0);
+
         CONTEXT_LOCK(context->lock, "socket_reconnect_cb() log");
 
         context->sock = sock;
@@ -664,6 +667,14 @@ static void socket_reconnect_cb(int sock, void *param)
 
         CONTEXT_UNLOCK(context->lock, "socket_reconnect_cb() log");
     }
+}
+
+// Callback called by fgr_socket_channel_maintain() when a
+// connection has gone down; this just here to log the metric.
+static void socket_down_cb(void *param)
+{
+    (void) param;
+    fgr_metrics_event_bool_set(FGR_METRIC_EVENT_BOOL_LOG_SERVER_CONNECTION, false, 0);
 }
 
 /* ----------------------------------------------------------------
@@ -709,6 +720,9 @@ int32_t fgr_log_init(const char *server_ip, uint16_t port,
                                            &g_context.context_sock);
             if (err == ESP_OK) {
 
+                fgr_metrics_event_bool_set(FGR_METRIC_EVENT_BOOL_LOG_SERVER_CONNECTION,
+                                           err == ESP_OK, 0);
+
                 xSemaphoreGive(g_context.lock);
                 // Do initial extra socket configuration
                 socket_reconnect_cb(g_context.sock, &g_context);
@@ -719,7 +733,7 @@ int32_t fgr_log_init(const char *server_ip, uint16_t port,
                                                   CONFIG_FGR_LOG_HEARTBEAT_SECONDS,
                                                   socket_heartbeat_cb,
                                                   socket_reconnect_cb,
-                                                  NULL,
+                                                  socket_down_cb,
                                                   &g_context);
                 if (err == ESP_OK) {
                     g_context.connected = true;
