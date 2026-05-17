@@ -156,7 +156,8 @@ static const char *g_metric_json_name[] = {
     "ping_rx",
     "nvs_w",
     "stack",
-    "heap"};
+    "heap"
+};
 
 // The type of all of the metrics; must have the same number of
 // entries as fgr_metrics_t.

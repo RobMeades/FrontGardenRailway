@@ -2510,7 +2510,7 @@ class WebController(Controller):
             // Add toggle button to h2
             const toggleBtn = document.createElement('button');
             toggleBtn.className = 'debug-toggle-btn';
-            toggleBtn.textContent = '▲ Collapse';
+            toggleBtn.innerHTML = '▲ Maximise';  // Upward triangle for Maximise
             toggleBtn.onclick = function(e) {
                 e.stopPropagation();
                 toggleDebugPanel();
@@ -2571,6 +2571,13 @@ class WebController(Controller):
                     document.body.style.cursor = '';
                 }
             });
+
+            // Set initial state: not collapsed, button shows "▲ Maximise"
+            if (debugPanel && toggleBtn) {
+                debugPanel.classList.remove('collapsed');
+                toggleBtn.innerHTML = '▲ Maximise';
+                toggleBtn.textContent = '▲ Maximise';
+            }
         }
 
         function dockDebugPanel() {
@@ -2580,24 +2587,25 @@ class WebController(Controller):
             if (!debugPanel) return;
 
             const dockedHeight = debugPanel.getAttribute('data-docked-height') || '250px';
+            const toggleBtn = document.querySelector('.debug-toggle-btn');
 
-            // If already docked, do nothing
-            if (debugPanel.style.height === dockedHeight && !debugPanelCollapsed) {
-                // Flash feedback to show it's already docked
-                dockBtn.style.background = '#28a745';
-                setTimeout(() => {
-                    dockBtn.style.background = '#6c757d';
-                }, 500);
-                return;
-            }
-
-            // Ensure not collapsed
-            if (debugPanelCollapsed) {
-                toggleDebugPanel();
-            }
+            // Save current height before docking if needed
+            const currentHeight = debugPanel.offsetHeight;
+            const isCollapsed = debugPanel.classList.contains('collapsed');
 
             // Set to docked height
             debugPanel.style.height = dockedHeight;
+            debugPanel.classList.remove('collapsed');
+
+            // Update toggle button state (now in 'maximise' state relative to docked)
+            if (toggleBtn && !isCollapsed && currentHeight !== parseInt(dockedHeight)) {
+                // We were in an expanded state, now docked
+                toggleBtn.innerHTML = '▼ Minimise';
+                toggleBtn.textContent = '▼ Minimise';
+            } else if (toggleBtn) {
+                toggleBtn.innerHTML = '▼ Minimise';
+                toggleBtn.textContent = '▼ Minimise';
+            }
 
             // Flash feedback
             dockBtn.style.background = '#28a745';
@@ -2612,25 +2620,46 @@ class WebController(Controller):
 
             if (!debugPanel) return;
 
-            debugPanelCollapsed = !debugPanelCollapsed;
+            // Get current state from button text
+            const isMaximised = toggleBtn && toggleBtn.textContent.includes('Maximise');
+            const isMinimised = toggleBtn && toggleBtn.textContent.includes('Minimise');
 
-            if (debugPanelCollapsed) {
+            if (isMaximised) {
+                // Maximise: move top to maximum drag-height
+                const maxHeight = window.innerHeight * 0.93;
+                const currentHeight = debugPanel.offsetHeight;
+
+                // Save current height before expanding if it's not already max
+                if (currentHeight !== maxHeight) {
+                    debugPanel.setAttribute('data-pre-max-height', currentHeight);
+                }
+
+                debugPanel.style.height = maxHeight + 'px';
+                debugPanel.classList.remove('collapsed');
+
+                // Update button
+                if (toggleBtn) {
+                    toggleBtn.innerHTML = '▼ Minimise';
+                    toggleBtn.textContent = '▼ Minimise';
+                }
+            } else if (isMinimised) {
+                // Minimise: move to minimum drag-height (like collapse)
+                const minHeight = 42; // The height of the collapsed state
+
                 // Save current height before collapsing
-                const currentHeight = debugPanel.style.height;
-                if (currentHeight && currentHeight !== '40px' && currentHeight !== '42px') {
+                const currentHeight = debugPanel.offsetHeight;
+                if (currentHeight !== minHeight) {
                     debugPanel.setAttribute('data-expanded-height', currentHeight);
                 }
+
+                debugPanel.style.height = minHeight + 'px';
                 debugPanel.classList.add('collapsed');
-                if (toggleBtn) toggleBtn.textContent = '▼ Expand';
-            } else {
-                debugPanel.classList.remove('collapsed');
-                const savedHeight = debugPanel.getAttribute('data-expanded-height');
-                if (savedHeight) {
-                    debugPanel.style.height = savedHeight;
-                } else if (debugPanel.style.height === '40px' || debugPanel.style.height === '42px') {
-                    debugPanel.style.height = debugPanel.getAttribute('data-docked-height') || '250px';
+
+                // Update button
+                if (toggleBtn) {
+                    toggleBtn.innerHTML = '▲ Maximise';
+                    toggleBtn.textContent = '▲ Maximise';
                 }
-                if (toggleBtn) toggleBtn.textContent = '▲ Collapse';
             }
         }
 
