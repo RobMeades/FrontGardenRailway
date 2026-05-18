@@ -41,11 +41,11 @@ import sys
 import socket
 import argparse
 import signal
-import struct
 import time
 import threading
 import sqlite3
 import json
+import random
 from pathlib import Path
 from typing import Optional, Dict, Set
 from datetime import datetime, timezone
@@ -392,7 +392,7 @@ class FGRLogServer:
             print(f"Connection closed from {client_address[0]}:{client_address[1]}")
 
     def start(self) -> None:
-        """Start the log server"""
+        """Start the log server with rate limiting to protect WiFi air interface"""
         # Create server socket
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -405,13 +405,50 @@ class FGRLogServer:
             print(f"FGR Log Server listening on {self.bind_address}:{self.port}")
             print(f"Systemd journal support: {'Enabled' if HAS_SYSTEMD else 'Disabled'}")
             print(f"Protocol module loaded from: {protocol_dir}")
+            print("Global rate limiting enabled: min 0.5s between connections")
             print("Press Ctrl+C to stop")
             print()
+
+            # Rate limiting variables
+            last_accept_per_ip = {}  # Track last accept time per IP
+            last_global_accept = 0.0  # Track last accept time globally
+            min_global_interval = 0.5  # Minimum 500ms between ANY connections
+            min_per_ip_interval = 1.0  # Minimum 1 second between reconnects from same IP
 
             # Main accept loop
             while self.running:
                 try:
                     client_socket, client_address = self.server_socket.accept()
+                    ip = client_address[0]
+
+                    current_time = time.time()
+
+                    # FIRST: Global rate limiting - ensure minimum time between ANY connections
+                    time_since_last_global = current_time - last_global_accept
+                    if time_since_last_global < min_global_interval and last_global_accept > 0:
+                        wait_time = min_global_interval - time_since_last_global
+                        print(f"Global rate limit: waiting {wait_time:.2f}s before accepting connection from {ip}")
+                        time.sleep(wait_time)
+                        current_time = time.time()  # Update after sleep
+
+                    # SECOND: Per-IP staggering for reconnections
+                    last_time = last_accept_per_ip.get(ip, 0)
+                    if last_time > 0 and current_time - last_time < min_per_ip_interval:
+                        wait_time = min_per_ip_interval - (current_time - last_time)
+                        print(f"Per-IP staggering for {ip}: waiting {wait_time:.2f}s")
+                        time.sleep(wait_time)
+                        current_time = time.time()  # Update after sleep
+
+                    # THIRD: Add random jitter for first connections to desynchronize
+                    if ip not in last_accept_per_ip:
+                        random_delay = random.uniform(0, 0.5)
+                        print(f"First connection from {ip}, adding {random_delay:.2f}s random jitter")
+                        time.sleep(random_delay)
+                        current_time = time.time()  # Update after sleep
+
+                    # Update tracking
+                    last_global_accept = current_time
+                    last_accept_per_ip[ip] = current_time
 
                     with self.lock:
                         self.stats['connections'] += 1

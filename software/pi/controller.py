@@ -53,7 +53,7 @@ import importlib.util
 import inspect
 import sys
 import json
-import traceback
+import random
 from typing import Dict, Optional, Any, List, Type
 from dataclasses import dataclass, field
 from enum import IntEnum
@@ -806,11 +806,50 @@ class Controller:
         self.logger.info("Controller stopped")
 
     def _accept_loop(self) -> None:
-        """Accept incoming connections"""
+        """Accept incoming connections with global rate limiting and per-IP staggering"""
+        # Track last accept time per IP to stagger reconnections
+        last_accept_per_ip = {}
+        # Track last accept time globally (for ANY connection)
+        last_global_accept = 0.0
+        # Minimum time between ANY connections (protects WiFi air interface)
+        min_global_interval = 0.5  # 500ms between any connections
+
         while self.running:
             try:
                 self.listen_sock.settimeout(1.0)
                 client_sock, addr = self.listen_sock.accept()
+                ip = addr[0]
+
+                current_time = time.time()
+
+                # FIRST: Global rate limiting - ensure minimum time between ANY connections
+                time_since_last_global = current_time - last_global_accept
+                if time_since_last_global < min_global_interval:
+                    wait_time = min_global_interval - time_since_last_global
+                    self.logger.info(f"Global rate limit: waiting {wait_time:.2f}s before accepting connection from {ip}")
+                    time.sleep(wait_time)
+                    current_time = time.time()  # Update after sleep
+
+                # SECOND: Per-IP staggering for reconnections
+                last_time = last_accept_per_ip.get(ip, 0)
+                min_per_ip_interval = 1.0  # 1 second between reconnects from same IP
+                if current_time - last_time < min_per_ip_interval:
+                    wait_time = min_per_ip_interval - (current_time - last_time)
+                    self.logger.info(f"Per-IP staggering for {ip}: waiting {wait_time:.2f}s")
+                    time.sleep(wait_time)
+                    current_time = time.time()  # Update after sleep
+
+                # THIRD: Add random jitter for first connections to desynchronize
+                if ip not in last_accept_per_ip:
+                    random_delay = random.uniform(0, 0.5)
+                    self.logger.debug(f"First connection from {ip}, adding {random_delay:.2f}s random jitter")
+                    time.sleep(random_delay)
+                    current_time = time.time()  # Update after sleep
+
+                # Update tracking
+                last_global_accept = current_time
+                last_accept_per_ip[ip] = current_time
+
                 self.logger.info(f"Connection from {addr[0]}:{addr[1]}")
 
                 # Peek at first bytes for debugging
@@ -824,7 +863,6 @@ class Controller:
                         pass
                     client_sock.settimeout(None)
 
-                ip = addr[0]
                 if ip in self.nodes_by_ip:
                     node = self.nodes_by_ip[ip]
 

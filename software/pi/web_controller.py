@@ -115,20 +115,20 @@ METRICS_HELP = {
     'lrb': 'Local ReBoot event - the last time (since power-up) of, and a count of, the node restarting itself (reboots commanded by the controller are not counted)',
     'panic': 'Panic event - the last time (since power-up) of, and a count of, software panic(s)',
     'pwr': 'Power problem event - the last time (since power-up) of, and a count of, brown-outs or power glitches',
-    'w': 'WiFi connection event - the last time of (since boot) and a count of (+) successful, (-) failed, connections',
-    'ip': 'IP address acquisition events - the last time of (since boot) and a count of IP address acqusition - the count should be the same as WiFi connection successes',
+    'w': 'WiFi connection event - the last time (since boot) of and a count of (+) successful, (-) failed, connections',
+    'ip': 'IP address acquisition events - the last time (since boot) of and a count of IP address acqusition - the count should be the same as WiFi connection successes',
     'dbm': 'WiFi signal strength in dBm',
-    'ota_c': 'OTA connection events - the last time of (since power-up) and a count of successful (+) and failed (-) connections to the OTA server',
-    'ota_w': 'OTA write events - the last time of (since power-up) and a count of successful (+) and failed (-) actual OTA updates (i.e. a new version of code loaded)',
-    'log_c': 'Log connection events- the last time of (since boot) and a count of  successful (+) and failed (-) log server connections',
-    'cnt_c': 'Controller connection events - the last time of (since boot) and a count of successful (+) and failed (-) connections to the controller',
-    'cnt_tx': 'Controller transmit events - the last time of (since boot) and a count of successful (+) and failed (-) transmits to the controller, value is byte count',
-    'cnt_rx': 'Controller receive events - the last time of (since boot) and a count of receives from the controller, value is byte count',
-    'ping_tx': 'Ping transmit events - the last time of (since boot) and a count of successful (+) and failed (-) pings sent to the controller',
-    'ping_rx': 'Ping receive events - the last time of (since boot) and a count of successful (+) and failed (-) pings received from the controller',
-    'nvs_w': 'NVS write events - the last time of (since boot) and a count of successful (+) and failed (-) writes to non-volatile storage',
+    'ota_c': 'OTA connection events - the last time (since power-up) of and a count of successful (+) and failed (-) connections to the OTA server',
+    'ota_w': 'OTA write events - the last time (since power-up) of and a count of successful (+) and failed (-) actual OTA updates (i.e. a new version of code was loaded)',
+    'log_c': 'Log connection events- the last time (since boot) of and a count of  successful (+) and failed (-) log server connections',
+    'cnt_c': 'Controller connection events - the last time (since boot) of and a count of successful (+) and failed (-) connections to the controller',
+    'cnt_tx': 'Controller transmit events - the last time (since boot) of and a count of successful (+) and failed (-) transmits to the controller, value is total bytes transmitted since boot',
+    'cnt_rx': 'Controller receive events - the last time (since boot) of and a count of receives from the controller, value is total bytes received since boot',
+    'ping_tx': 'Ping transmit events - the last time (since boot) of and a count of successful (+) and failed (-) pings sent to the controller',
+    'ping_rx': 'Ping receive events - the last time (since boot) of and a count of successful (+) and failed (-) pings received from the controller',
+    'nvs_w': 'NVS write events - the last time (since boot) of and a count of successful (+) and failed (-) writes to non-volatile storage',
     'stack': 'The three tasks with the lowest minimum free stack values, in bytes',
-    'heap': 'The minimum free heap memory in (bytes)'
+    'heap': 'The minimum free heap memory in bytes'
 }
 
 def format_fgr_state(state):
@@ -557,9 +557,9 @@ class WebController(Controller):
                 count = plus_data.get('n', 0)
                 value = plus_data.get('v', 0)
                 if value != 0:
-                    parts.append(f"+{duration} n {count} v {value}")
+                    parts.append(f"+ {duration} n {count} v {value}")
                 else:
-                    parts.append(f"+{duration} n {count}")
+                    parts.append(f"+ {duration} n {count}")
 
         # Format fail events (-)
         if '-' in data:
@@ -574,9 +574,9 @@ class WebController(Controller):
                 count = minus_data.get('n', 0)
                 value = minus_data.get('v', 0)
                 if value != 0:
-                    parts.append(f"-{duration} n {count} v {value}")
+                    parts.append(f"- {duration} n {count} v {value}")
                 else:
-                    parts.append(f"-{duration} n {count}")
+                    parts.append(f"- {duration} n {count}")
 
         if not parts:
             return None
@@ -1854,7 +1854,7 @@ class WebController(Controller):
         }
 
         .metric-normal {
-            color: #999;
+            color: #888;
             font-weight: normal;
         }
 

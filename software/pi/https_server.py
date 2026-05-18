@@ -23,6 +23,7 @@ import os
 import time
 import argparse
 import json
+import random
 from aiohttp import web
 from aiohttp.web import HTTPException
 from aiohttp.client_exceptions import ClientConnectorError
@@ -159,8 +160,56 @@ class HandleFirmware:
             logger.warning(f"Blocked directory traversal attempt: {filename} from {request.remote}")
             return web.Response(status=403, text="Invalid filename")
 
+        # Rate limiting to protect WiFi air interface during reconnection storms
+        client_ip = request.remote
+        if client_ip == '::1':
+            client_ip = '127.0.0.1'
+
+        # Access rate limiting data from the app (initialized in main)
+        if not hasattr(request.app, 'rate_limiter'):
+            # Initialize rate limiter data if not exists
+            request.app.rate_limiter = {
+                'last_accept_per_ip': {},
+                'last_global_accept': 0.0,
+                'min_global_interval': 0.5,  # 500ms between ANY connections
+                'min_per_ip_interval': 1.0,  # 1 second between reconnects from same IP
+                'lock': asyncio.Lock()
+            }
+
+        limiter = request.app.rate_limiter
+
+        async with limiter['lock']:
+            current_time = time.time()
+
+            # FIRST: Global rate limiting - ensure minimum time between ANY connections
+            time_since_last_global = current_time - limiter['last_global_accept']
+            if time_since_last_global < limiter['min_global_interval'] and limiter['last_global_accept'] > 0:
+                wait_time = limiter['min_global_interval'] - time_since_last_global
+                logger.info(f"Global rate limit: waiting {wait_time:.2f}s before accepting request from {client_ip}")
+                await asyncio.sleep(wait_time)
+                current_time = time.time()  # Update after sleep
+
+            # SECOND: Per-IP staggering for reconnections
+            last_time = limiter['last_accept_per_ip'].get(client_ip, 0)
+            if last_time > 0 and current_time - last_time < limiter['min_per_ip_interval']:
+                wait_time = limiter['min_per_ip_interval'] - (current_time - last_time)
+                logger.info(f"Per-IP staggering for {client_ip}: waiting {wait_time:.2f}s")
+                await asyncio.sleep(wait_time)
+                current_time = time.time()  # Update after sleep
+
+            # THIRD: Add random jitter for first connections to desynchronize
+            if client_ip not in limiter['last_accept_per_ip']:
+                random_delay = random.uniform(0, 0.5)
+                logger.info(f"First connection from {client_ip}, adding {random_delay:.2f}s random jitter")
+                await asyncio.sleep(random_delay)
+                current_time = time.time()  # Update after sleep
+
+            # Update tracking
+            limiter['last_global_accept'] = current_time
+            limiter['last_accept_per_ip'][client_ip] = current_time
+
         #  Set the full file path
-        filename_mapped = self.map_filename(filename, request.remote)
+        filename_mapped = self.map_filename(filename, client_ip)
         filepath = os.path.join(self.base_path, filename_mapped)
 
         # Security check
@@ -171,7 +220,7 @@ class HandleFirmware:
             return web.Response(status=403, text="Invalid filename")
 
         if not os.path.exists(filepath) or not os.path.isfile(filepath):
-            logger.info(f"File not found: {filepath} (requested: {filename}) from {request.remote}")
+            logger.info(f"File not found: {filepath} (requested: {filename}) from {client_ip}")
             available_files = self.get_available_files()
             error_msg = f"File {filename} not found"
             if available_files:
@@ -179,7 +228,7 @@ class HandleFirmware:
             return web.Response(status=404, text=error_msg)
 
         file_size = os.path.getsize(filepath)
-        logger.info(f"Serving {filepath} ({file_size} bytes) to {request.remote} (requested: {filename})")
+        logger.info(f"Serving {filepath} ({file_size} bytes) to {client_ip} (requested: {filename})")
 
         # Create streaming response
         response = web.StreamResponse()
@@ -190,10 +239,10 @@ class HandleFirmware:
         try:
             await response.prepare(request)
         except ConnectionResetError:
-            logger.info(f"Client {request.remote} disconnected during prepare")
+            logger.info(f"Client {client_ip} disconnected during prepare")
             return web.Response(status=499)
         except Exception as e:
-            logger.error(f"Error preparing response for {request.remote}: {e}")
+            logger.error(f"Error preparing response for {client_ip}: {e}")
             return web.Response(status=500)
 
         # Use robust sender
@@ -241,6 +290,15 @@ def load_ip_to_file_map(config_file):
 
 async def main(base_dir, port, differentiated_mode, config_file=None):
     app = web.Application()
+
+    # Initialize rate limiter data in the app
+    app.rate_limiter = {
+        'last_accept_per_ip': {},
+        'last_global_accept': 0.0,
+        'min_global_interval': 0.5,  # 500ms between ANY connections
+        'min_per_ip_interval': 1.0,  # 1 second between reconnects from same IP
+        'lock': asyncio.Lock()
+    }
 
     # Load IP mapping if in differentiated mode
     ip_to_file_map = None
