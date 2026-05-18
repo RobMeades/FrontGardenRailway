@@ -3,3 +3,4 @@
 **/.vscode/*
 **/.clangd
 **/__pycache__/*
+software/esp32/applications/test/sdkconfig
