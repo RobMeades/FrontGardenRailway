@@ -2,3 +2,21 @@
 # partition table layout, with a 4MB flash size
 CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
 CONFIG_PARTITION_TABLE_TWO_OTA=y
+
+# Enable stack checking in all functions to catch memory corruption early
+CONFIG_COMPILER_STACK_CHECK_MODE_ALL=y
+
+# Verify all flash writes to ensure data integrity
+CONFIG_SPI_FLASH_VERIFY_WRITE=y
+# Explicitly disable NVS encryption to keep the storage simple and robust
+CONFIG_NVS_ENCRYPTION=n
+
+# Enable the Interrupt WDT to catch blocked interrupts (default anyway, but just in case)
+CONFIG_ESP_INT_WDT=y
+# Enable the Task WDT to catch stuck tasks (default anyway, but just in case)
+CONFIG_ESP_TASK_WDT=y
+# Make the Task WDT cause a panic (and thus a reset) on timeout
+CONFIG_ESP_TASK_WDT_PANIC=y
+
+# Enable panic handler to print backtrace to serial console (default anyway, but just in case)
+CONFIG_ESP_SYSTEM_PANIC_PRINT_BACKTRACE=y

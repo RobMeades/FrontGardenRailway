@@ -69,10 +69,14 @@ int32_t fgr_nvs_init()
     if (!g_initialised) {
         // Initialize NVS
         err = nvs_flash_init();
-        if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        if (err == ESP_ERR_NVS_NO_FREE_PAGES ||
+            err == ESP_ERR_NVS_NEW_VERSION_FOUND ||
+            err == ESP_ERR_NVS_NOT_ENOUGH_SPACE) {  // Add this condition
             // OTA app partition table has a smaller NVS partition size than the non-OTA
             // partition table. This size mismatch may cause NVS initialization to fail.
             // If this happens, we erase NVS partition and initialize NVS again.
+            ESP_LOGW(TAG, "NVS init failed with %s, erasing partition...",
+                     esp_err_to_name(err));
             esp_err_t erase_err = nvs_flash_erase();
             if (erase_err == ESP_OK) {
                 err = nvs_flash_init();
@@ -99,7 +103,10 @@ int32_t fgr_nvs_get(const char *name, uint32_t *value)
     nvs_handle_t nvs_handle;
 
     if (name && value) {
-        err = nvs_open(FGR_NVS_STORAGE_AREA, NVS_READONLY, &nvs_handle);
+        // Use a "read/write" here rather than just a "read"
+        // as that will create FGR_NVS_STORAGE_AREA if it
+        // happend to be vaped to recover from flash corruption.
+        err = nvs_open(FGR_NVS_STORAGE_AREA, NVS_READWRITE, &nvs_handle);
         if (err == ESP_OK) {
             err = nvs_get_u32(nvs_handle, name, value);
             if (err == ESP_OK)  {
@@ -134,8 +141,10 @@ int32_t fgr_nvs_set(const char *name, uint32_t value)
             if (err == ESP_OK) {
                 err = nvs_commit(nvs_handle);
                 if (err == ESP_OK)  {
-                    ESP_LOGD(TAG, "Value %d commited to storage for \"%s\"",
-                             value, name);
+                    ESP_LOGD(TAG, "Value %d commited to storage for \"%s\""
+                             ", waiting %d ms for it to complete.",
+                             value, name, FGR_NVS_COMMIT_GUARD_MS);
+                    vTaskDelay(pdMS_TO_TICKS(FGR_NVS_COMMIT_GUARD_MS));
                 } else {
                     ESP_LOGW(TAG, "Unable to commit changes to NVS:"
                              " 0x%04x (\"%s\")!", err, esp_err_to_name(err));

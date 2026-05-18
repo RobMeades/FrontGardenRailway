@@ -390,7 +390,7 @@ CONFIG_IDF_TOOLCHAIN_GCC=y
 CONFIG_IDF_TARGET_ARCH_XTENSA=y
 CONFIG_IDF_TARGET_ARCH="xtensa"
 CONFIG_IDF_TARGET="esp32s3"
-CONFIG_IDF_INIT_VERSION="$IDF_INIT_VERSION"
+CONFIG_IDF_INIT_VERSION="5.5.2"
 CONFIG_IDF_TARGET_ESP32S3=y
 CONFIG_IDF_FIRMWARE_CHIP_ID=0x0009
 
@@ -605,7 +605,7 @@ CONFIG_PARTITION_TABLE_MD5=y
 #
 CONFIG_FGR_DEBUG_LED_PIN=21
 CONFIG_FGR_DEBUG_LED_SPI_NUM=2
-# CONFIG_FGR_DEBUG_LED_WS2812_GRB is not set
+CONFIG_FGR_DEBUG_LED_WS2812_GRB=y
 # end of FGR Debug Configuration
 
 #
@@ -682,6 +682,18 @@ CONFIG_COMPILER_ORPHAN_SECTIONS_WARNING=y
 
 #
 # Component config
+#
+
+#
+# !!! MINIMAL_BUILD is enabled !!!
+#
+
+#
+# Only common components and those transitively required by the main component are listed
+#
+
+#
+# If a component configuration is missing, please add it to the main component's requirements
 #
 
 #

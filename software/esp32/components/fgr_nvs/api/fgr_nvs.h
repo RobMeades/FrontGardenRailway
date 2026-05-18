@@ -35,6 +35,14 @@ extern "C" {
 #  define FGR_NVS_STORAGE_AREA "nvs"
 #endif
 
+#ifndef FGR_NVS_COMMIT_GUARD_MS
+// The guard time after calling nvs_commit() to wait for the
+// write to flash to complete: without some time here the DMA
+// may not complete if there is a reset and flash will come up
+// as not having enough space.
+#  define FGR_NVS_COMMIT_GUARD_MS 1000
+#endif
+
  /* ----------------------------------------------------------------
   * TYPES
   * -------------------------------------------------------------- */
@@ -64,6 +72,9 @@ int32_t fgr_nvs_init();
 int32_t fgr_nvs_get(const char *name, uint32_t *value);
 
 /** Store a uint32_t value to NVS.
+ *
+ * IMPORTANT: there will be a delay of at least FGR_NVS_COMMIT_GUARD_MS
+ * before this function returns.
  *
  * @param name  a null-terminated string that is the name of the
  *              value to store.
