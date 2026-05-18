@@ -39,6 +39,7 @@ import asyncio
 import json
 import threading
 import signal
+import re
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -87,6 +88,55 @@ NODES_PER_PAGE = 8
 # Log level names
 LOG_LEVEL_NAMES = ['DEBUG', 'INFO', 'WARN', 'ERROR']
 
+
+# Metrics display configuration
+METRICS_CONFIG = {
+    # Simple metrics (value is number)
+    'heap': {'type': 'simple', 'importance_threshold': 10000, 'order': 9},
+    'dbm': {'type': 'exclude'},  # Already displayed in heartbeat
+
+    # Event metrics (single counter with timestamp)
+    'lrb': {'type': 'event', 'importance_condition': 'value > 0', 'order': 1},
+    'panic': {'type': 'event', 'importance_condition': 'value > 0', 'order': 2},
+    'pwr': {'type': 'event', 'importance_condition': 'value > 0', 'order': 3},
+    'ip': {'type': 'event', 'importance_condition': 'special_ip', 'order': 5},
+    'ota_c': {'type': 'event', 'importance_condition': 'has_fail', 'order': 11},
+    'ota_w': {'type': 'event', 'importance_condition': 'has_fail', 'order': 12},
+    'log_c': {'type': 'event', 'importance_condition': 'has_fail', 'order': 6},
+    'cnt_c': {'type': 'event', 'importance_condition': 'has_fail', 'order': 7},
+    'cnt_tx': {'type': 'event', 'importance_condition': 'has_fail', 'order': 8},
+    'cnt_rx': {'type': 'event', 'importance_condition': 'has_fail', 'order': 10},
+    'ping_tx': {'type': 'event', 'importance_condition': 'has_fail', 'order': 13},
+    'ping_rx': {'type': 'event', 'importance_condition': 'has_fail', 'order': 14},
+    'nvs_w': {'type': 'event', 'importance_condition': 'has_fail', 'order': 15},
+
+    # Boolean event metrics (have +/-)
+    'w': {'type': 'boolean_event', 'importance_condition': 'has_fail', 'order': 4},
+
+    # Stack metrics (array of objects)
+    'stack': {'type': 'stack', 'importance_condition': 'first_value < 256', 'order': 16},
+}
+
+# Human-readable help text for metrics (for tooltips)
+METRICS_HELP = {
+    'lrb': 'Local ReBoot event - the last time (since power-up) of, and a count of, the node restarting itself (reboots commanded by the controller are not counted)',
+    'panic': 'Panic event - the last time (since power-up) of, and a count of, software panic(s)',
+    'pwr': 'Power problem event - the last time (since power-up) of, and a count of, brown-outs or power glitches',
+    'w': 'WiFi connection event - the last time of (since boot) and a count of (+) successful, (-) failed, connections',
+    'ip': 'IP address acquisition events - the last time of (since boot) and a count of IP address acqusition - the count should be the same as WiFi connection successes',
+    'dbm': 'WiFi signal strength in dBm',
+    'ota_c': 'OTA connection events - the last time of (since power-up) and a count of successful (+) and failed (-) connections to the OTA server',
+    'ota_w': 'OTA write events - the last time of (since power-up) and a count of successful (+) and failed (-) actual OTA updates (i.e. a new version of code loaded)',
+    'log_c': 'Log connection events- the last time of (since boot) and a count of  successful (+) and failed (-) log server connections',
+    'cnt_c': 'Controller connection events - the last time of (since boot) and a count of successful (+) and failed (-) connections to the controller',
+    'cnt_tx': 'Controller transmit events - the last time of (since boot) and a count of successful (+) and failed (-) transmits to the controller, value is byte count',
+    'cnt_rx': 'Controller receive events - the last time of (since boot) and a count of receives from the controller, value is byte count',
+    'ping_tx': 'Ping transmit events - the last time of (since boot) and a count of successful (+) and failed (-) pings sent to the controller',
+    'ping_rx': 'Ping receive events - the last time of (since boot) and a count of successful (+) and failed (-) pings received from the controller',
+    'nvs_w': 'NVS write events - the last time of (since boot) and a count of successful (+) and failed (-) writes to non-volatile storage',
+    'stack': 'The three tasks with the lowest minimum free stack values, in bytes',
+    'heap': 'The minimum free heap memory in (bytes)'
+}
 
 def format_fgr_state(state):
     """Format fgr_state_t value for display"""
@@ -207,6 +257,9 @@ class WebController(Controller):
         # Override the logger to capture controller logs
         self._setup_log_capture()
 
+        # Store metrics for each node
+        self.node_metrics: Dict[str, Dict[str, Any]] = {}
+
         # Record start time
         self._start_time = time.time()
 
@@ -309,7 +362,14 @@ class WebController(Controller):
                 message = entry.get('MESSAGE', '')
                 if message:
                     message = message.rstrip()
-                    existing_logs.append(message)
+
+                    self._add_node_log(message)
+
+                    # Parse metrics from new logs
+                    metrics_result = self._parse_metrics_from_log(message)
+                    if metrics_result:
+                        node_ip, metrics_data = metrics_result
+                        self._update_node_metrics(node_ip, metrics_data)
 
             # Add existing logs (newest first, reverse to oldest first)
             for msg in reversed(existing_logs):
@@ -332,10 +392,289 @@ class WebController(Controller):
                         message = entry.get('MESSAGE', '')
                         if message:
                             message = message.rstrip()
+
                             self._add_node_log(message)
+
+                            # Parse metrics from new logs
+                            metrics_result = self._parse_metrics_from_log(message)
+                            if metrics_result:
+                                node_ip, metrics_data = metrics_result
+                                self._update_node_metrics(node_ip, metrics_data)
+                            else:
+                                if 'metrics:' in message:
+                                    self._log_message(f"WARNING: Failed to parse metrics from message")
 
         except Exception as e:
             self._log_message(f"Journal reader error: {e}")
+
+    def _get_node_name_by_ip(self, ip: str) -> Optional[str]:
+        """Get node name from IP address"""
+        for name, node in self.nodes.items():
+            if node.ip == ip:
+                return name
+        self._log_message(f"Could not find node name for IP: {ip}")  # Debug line
+        self._log_message(f"Available node IPs: {[node.ip for node in self.nodes.values()]}")  # Debug line
+        return None
+
+    def _format_duration_compact(self, seconds: int) -> str:
+        """Format seconds as compact duration (e.g., '4h 16m 3s')"""
+        if seconds == 0:
+            return "0s"
+        days = seconds // 86400
+        hours = (seconds % 86400) // 3600
+        minutes = (seconds % 3600) // 60
+        secs = seconds % 60
+
+        parts = []
+        if days > 0:
+            parts.append(f"{days}d")
+        if hours > 0:
+            parts.append(f"{hours}h")
+        if minutes > 0:
+            parts.append(f"{minutes}m")
+        if secs > 0 or not parts:
+            parts.append(f"{secs}s")
+        return ' '.join(parts)
+
+    def _parse_metrics_from_log(self, log_line: str) -> Optional[Tuple[str, dict]]:
+        """Extract metrics JSON from log line and return (node_ip, metrics_dict)"""
+        # Look for "metrics:" pattern
+        if 'metrics:' not in log_line:
+            return None
+
+        # Extract node IP - log line starts with [IP] after [NODE] is stripped
+        node_match = re.search(r'^\[([0-9.]+)\]', log_line)
+        if not node_match:
+            return None
+        node_ip = node_match.group(1)
+
+        # Find the start of the JSON
+        metrics_pos = log_line.find('metrics:')
+        if metrics_pos == -1:
+            return None
+
+        # Get everything after 'metrics:'
+        after_metrics = log_line[metrics_pos + 8:]  # Skip 'metrics:'
+
+        # Find the first '{'
+        json_start = after_metrics.find('{')
+        if json_start == -1:
+            return None
+
+        # Extract the JSON string
+        json_str = after_metrics[json_start:]
+
+        # Parse JSON
+        try:
+            metrics_data = json.loads(json_str)
+            return (node_ip, metrics_data)
+        except json.JSONDecodeError as e:
+            return None
+
+    def _check_metric_importance(self, key: str, data: dict, all_metrics: dict) -> bool:
+        """Check if a metric should be highlighted (bold/black)"""
+        config = METRICS_CONFIG.get(key, {})
+        condition = config.get('importance_condition', '')
+
+        if condition == 'value > 0':
+            # Simple event: check if value (n) > 0
+            return data.get('n', 0) > 0
+
+        elif condition == 'has_fail':
+            # Check for fail events (-)
+            if isinstance(data, dict):
+                return '-' in data and data['-'].get('n', 0) > 0
+            return False
+
+        elif condition == 'special_ip':
+            # Compare ip count with w success count
+            ip_count = data.get('n', 0)
+            w_data = all_metrics.get('w', {})
+            if '+' in w_data:
+                w_success_count = w_data['+'].get('n', 0)
+                return ip_count != w_success_count
+            return ip_count > 0  # If no w data, highlight if ip has any count
+
+        elif condition == 'first_value < 256':
+            # Stack: check first task's value
+            if isinstance(data, list) and len(data) > 0:
+                first_item = data[0]
+                if isinstance(first_item, dict):
+                    first_value = list(first_item.values())[0]
+                    return first_value < 256
+            return False
+
+        elif key == 'heap' and config.get('type') == 'simple':
+            threshold = config.get('importance_threshold', 10000)
+            return data < threshold
+
+        return False
+
+    def _format_simple_metric(self, key: str, value: int, is_important: bool) -> str:
+        """Format a simple metric (just key: value)"""
+        help_text = METRICS_HELP.get(key, '')
+        if is_important:
+            return f'<span class="metric-important" title="{help_text}">{key}: {value}</span>'
+        else:
+            return f'<span class="metric-normal" title="{help_text}">{key}: {value}</span>'
+
+    def _format_event_metric(self, key: str, data: dict, is_important: bool) -> Optional[str]:
+        """Format an event metric (single timestamp counter, optional value)"""
+        # Skip if count is zero
+        if data.get('n', 0) == 0:
+            return None
+
+        # Determine timestamp type (tb or tp)
+        timestamp_type = 'tb' if 'tb' in data else 'tp' if 'tp' in data else None
+        if timestamp_type:
+            seconds = data[timestamp_type]
+            duration = self._format_duration_compact(seconds)
+        else:
+            duration = "0s"
+
+        count = data.get('n', 0)
+        value = data.get('v', 0)
+
+        help_text = METRICS_HELP.get(key, '')
+
+        if value != 0:
+            display = f"{duration} n {count} v {value}"
+        else:
+            display = f"{duration} n {count}"
+
+        if is_important:
+            return f'<span class="metric-important" title="{help_text}">{key}: {display}</span>'
+        else:
+            return f'<span class="metric-normal" title="{help_text}">{key}: {display}</span>'
+
+    def _format_boolean_event_metric(self, key: str, data: dict, is_important: bool) -> Optional[str]:
+        """Format a boolean event metric (+ and/or - events)"""
+        parts = []
+
+        # Format success events (+)
+        if '+' in data:
+            plus_data = data['+']
+            if plus_data.get('n', 0) > 0:
+                timestamp_type = 'tb' if 'tb' in plus_data else 'tp' if 'tp' in plus_data else None
+                if timestamp_type:
+                    seconds = plus_data[timestamp_type]
+                    duration = self._format_duration_compact(seconds)
+                else:
+                    duration = "0s"
+                count = plus_data.get('n', 0)
+                value = plus_data.get('v', 0)
+                if value != 0:
+                    parts.append(f"+{duration} n {count} v {value}")
+                else:
+                    parts.append(f"+{duration} n {count}")
+
+        # Format fail events (-)
+        if '-' in data:
+            minus_data = data['-']
+            if minus_data.get('n', 0) > 0:
+                timestamp_type = 'tb' if 'tb' in minus_data else 'tp' if 'tp' in minus_data else None
+                if timestamp_type:
+                    seconds = minus_data[timestamp_type]
+                    duration = self._format_duration_compact(seconds)
+                else:
+                    duration = "0s"
+                count = minus_data.get('n', 0)
+                value = minus_data.get('v', 0)
+                if value != 0:
+                    parts.append(f"-{duration} n {count} v {value}")
+                else:
+                    parts.append(f"-{duration} n {count}")
+
+        if not parts:
+            return None
+
+        help_text = METRICS_HELP.get(key, '')
+        display = ' '.join(parts)
+
+        if is_important:
+            return f'<span class="metric-important" title="{help_text}">{key}: {display}</span>'
+        else:
+            return f'<span class="metric-normal" title="{help_text}">{key}: {display}</span>'
+
+    def _format_stack_metric(self, key: str, data: list, is_important: bool) -> Optional[str]:
+        """Format stack metric (array of task:value objects)"""
+        if not isinstance(data, list) or len(data) == 0:
+            return None
+
+        task_parts = []
+        for item in data:
+            if isinstance(item, dict):
+                for task_name, value in item.items():
+                    task_parts.append(f"{task_name} {value}")
+
+        if not task_parts:
+            return None
+
+        help_text = METRICS_HELP.get(key, '')
+        display = ' '.join(task_parts)
+
+        if is_important:
+            return f'<span class="metric-important" title="{help_text}">{key}: {display}</span>'
+        else:
+            return f'<span class="metric-normal" title="{help_text}">{key}: {display}</span>'
+
+    def _format_metrics_display(self, node_ip: str, metrics: dict) -> Tuple[str, dict]:
+        """Format metrics for display, return (display_html, importance_map)"""
+        formatted_parts = []
+        importance_map = {}
+
+        # Get all metrics that are not excluded and have configuration
+        for key, config in sorted(METRICS_CONFIG.items(), key=lambda x: x[1].get('order', 999)):
+            if config.get('type') == 'exclude':
+                continue
+
+            if key not in metrics:
+                continue
+
+            metric_data = metrics[key]
+
+            # Check importance
+            is_important = self._check_metric_importance(key, metric_data, metrics)
+            importance_map[key] = is_important
+
+            # Format based on type
+            formatted = None
+            if config['type'] == 'simple':
+                if isinstance(metric_data, (int, float)):
+                    formatted = self._format_simple_metric(key, metric_data, is_important)
+            elif config['type'] == 'event':
+                if isinstance(metric_data, dict):
+                    formatted = self._format_event_metric(key, metric_data, is_important)
+            elif config['type'] == 'boolean_event':
+                if isinstance(metric_data, dict):
+                    formatted = self._format_boolean_event_metric(key, metric_data, is_important)
+            elif config['type'] == 'stack':
+                if isinstance(metric_data, list):
+                    formatted = self._format_stack_metric(key, metric_data, is_important)
+
+            if formatted:
+                formatted_parts.append(formatted)
+
+        if not formatted_parts:
+            return '<span class="metric-normal">Waiting for metrics data...</span>', importance_map
+
+        # Join with separators
+        display_html = ' | '.join(formatted_parts)
+        return display_html, importance_map
+
+    def _update_node_metrics(self, node_ip: str, metrics: dict):
+        """Update stored metrics for a node"""
+        node_name = self._get_node_name_by_ip(node_ip)
+        if node_name:
+            display_html, importance = self._format_metrics_display(node_ip, metrics)
+            self.node_metrics[node_name] = {
+                'display': display_html,
+                'importance': importance,
+                'raw': metrics,
+                'last_update': time.time()
+            }
+            # Also store for quick access by IP
+            self.node_metrics[f"__ip_{node_ip}"] = self.node_metrics[node_name]
 
     def update_node_custom_data(self, node_name: str, custom_data: Dict[str, Any]):
         """Store custom data from a node for web display and update card HTML"""
@@ -430,7 +769,6 @@ class WebController(Controller):
 
         # Get ordered node list based on layout (full order, not paginated)
         layout_order = self.node_grid_layout.get('order', [])
-        pages = self.node_grid_layout.get('pages', {})
         remaining_nodes = list(self.nodes.keys())
 
         # Count essential nodes that are in a working state
@@ -480,10 +818,9 @@ class WebController(Controller):
             else:
                 log_status = f"{'ON' if node.log_on else 'OFF'}/{LOG_LEVEL_NAMES[node.log_level] if node.log_level < 4 else '?'}"
 
-            if node.led_on is None or node.led_breathe_on is None:
-                led_status = ""
-            else:
-                led_status = f"{'ON' if node.led_on else 'OFF'} / {'ON' if node.led_breathe_on else 'OFF'}"
+            # Get metrics data
+            metrics_data = self.node_metrics.get(name, {})
+            metrics_display = metrics_data.get('display', '<span class="metric-normal">Waiting for metrics data...</span>')
 
             nodes_status.append({
                 'name': name,
@@ -503,7 +840,8 @@ class WebController(Controller):
                 'log_status': log_status,
                 'led_on': node.led_on,
                 'led_breathe_on': node.led_breathe_on,
-                'rssi': node.rssi if node.rssi is not None else '?'
+                'rssi': node.rssi if node.rssi is not None else '?',
+                'metrics_display': metrics_display,  # Add this line
             })
 
         return {
@@ -926,7 +1264,8 @@ class WebController(Controller):
             'log_level': node.log_level,
             'led_on': node.led_on,
             'led_breathe_on': node.led_breathe_on,
-            'rssi': node.rssi if node.rssi is not None else '?'
+            'rssi': node.rssi if node.rssi is not None else '?',
+            'metrics_display': self.node_metrics.get(node_name, {}).get('display', '<span class="metric-normal">Waiting for metrics data...</span>'),  # Add this
         }
 
         return web.json_response({'status': 'ok', 'data': node_data})
@@ -996,6 +1335,9 @@ class WebController(Controller):
 
         # Format connection duration for display
         connection_duration = format_connection_duration(node)
+
+        # Get metrics display
+        metrics_display = self.node_metrics.get(node_name, {}).get('display', '<span class="metric-normal">Waiting for metrics data...</span>')
 
         # Build the complete expanded footer with all rows
         expanded_footer_html = f'''
@@ -1482,6 +1824,55 @@ class WebController(Controller):
             align-items: center;
             gap: 8px;
             flex-wrap: wrap;
+        }
+
+        /* Node metrics data row */
+        .node-metrics-data {
+            font-family: 'Courier New', 'SF Mono', 'Monaco', 'Menlo', monospace;
+            font-size: 9px;
+            line-height: 1.2;
+            margin-top: 2px;
+            padding-top: 2px;
+            border-top: 1px solid #eee;
+            overflow: hidden;
+            white-space: nowrap;
+            height: 24px;
+            position: relative;
+        }
+
+        .node-metrics-data .ticker-content {
+            display: inline-block;
+            white-space: nowrap;
+        }
+
+        .node-metrics-data.scrolling .ticker-content {
+            animation: ticker 15s linear infinite;
+        }
+
+        @keyframes ticker {
+            /* 0% to 20% (First 3 seconds): Stationary pause */
+            0%, 20% {
+                transform: translateX(0);
+            }
+            /* 20% to 100% (Next 12 seconds): Smooth scroll */
+            100% {
+                transform: translateX(-100%);
+            }
+        }
+
+        .metric-normal {
+            color: #999;
+            font-weight: normal;
+        }
+
+        .metric-important {
+            color: #000;
+            font-weight: bold;
+        }
+
+        /* Tooltip styling */
+        [title] {
+            cursor: help;
         }
 
         /* Custom area - gets maximum space, supports custom HTML */
@@ -3122,6 +3513,15 @@ class WebController(Controller):
             }
         });
 
+        // Re-check all metrics rows on window resize
+        let resizeTimeout;
+        window.addEventListener('resize', function() {
+            clearTimeout(resizeTimeout);
+            resizeTimeout = setTimeout(() => {
+                setupMetricsTicker();
+            }, 250);
+        });
+
         function handleDragOver(e) {
             if (isExpanded) return;
             e.preventDefault();
@@ -3268,11 +3668,17 @@ class WebController(Controller):
                                 <div class="log-status-text">${logStatusText}</div>
                             </div>
                         </div>
+                        <div class="node-metrics-data">
+                            <div class="ticker-content">{node.metrics_display}</div>
+                        </div>
                     </div>
                 `;
             }
 
             grid.innerHTML = html;
+
+            // Setup ticker for new metrics rows
+            setupMetricsTicker();
 
             for (const nodeName of pageNodes) {
                 updateNodeCustomData(nodesData[nodeName]);
@@ -3407,11 +3813,39 @@ class WebController(Controller):
                     logStatusSpan.textContent = node.log_status;
                 }
 
+                // Update metrics data display - just update content
+                let tickerContent = card.querySelector('.ticker-content');
+                const metricsDataDiv = card.querySelector('.node-metrics-data');
+
+                if (!tickerContent && metricsDataDiv && node.metrics_display) {
+                    metricsDataDiv.innerHTML = '<div class="ticker-content">' + node.metrics_display + '</div>';
+                } else if (tickerContent && node.metrics_display) {
+                    if (tickerContent.innerHTML !== node.metrics_display) {
+                        tickerContent.innerHTML = node.metrics_display;
+                    }
+                }
+
+                // Check if scrolling needed
+                if (tickerContent && metricsDataDiv) {
+                    const needsScrolling = tickerContent.scrollWidth > metricsDataDiv.clientWidth;
+
+                    if (needsScrolling) {
+                        if (!metricsDataDiv.classList.contains('scrolling')) {
+                            metricsDataDiv.classList.add('scrolling');
+                        }
+                    } else {
+                        metricsDataDiv.classList.remove('scrolling');
+                    }
+                }
+
                 // Update custom data (the card's center area - only if not expanded or if it's a different node)
                 if (!isExpanded || (isExpanded && nodeName !== expandedNodeName)) {
                     updateNodeCustomData(node);
                 }
             }
+
+            // Re-check all metrics rows after updates
+            setupMetricsTicker();
         }
 
         function updateNodeCustomData(node) {
@@ -3422,6 +3856,16 @@ class WebController(Controller):
             const customContainer = card.querySelector('.node-custom-container');
             if (customContainer && node.custom_html && !isExpanded) {
                 customContainer.innerHTML = node.custom_html;
+            }
+        }
+
+        function updateNodeMetricsData(nodeName, metricsDisplay) {
+            const card = document.querySelector(`.node-card[data-node-name="${nodeName}"]`);
+            if (!card) return;
+
+            const metricsDataDiv = card.querySelector('.node-metrics-data');
+            if (metricsDataDiv && metricsDisplay) {
+                metricsDataDiv.innerHTML = metricsDisplay;
             }
         }
 
@@ -3630,6 +4074,32 @@ class WebController(Controller):
                 rssiValueSpan.textContent = rssiValue + ' dBm';
             }
 
+            // Update metrics data display in expanded view
+            let tickerContent = expandedCard.querySelector('.ticker-content');
+            const metricsDataDiv = expandedCard.querySelector('.node-metrics-data');
+
+            if (!tickerContent && metricsDataDiv && nodeData.metrics_display) {
+                metricsDataDiv.innerHTML = '<div class="ticker-content">' + nodeData.metrics_display + '</div>';
+            } else if (tickerContent && nodeData.metrics_display) {
+                if (tickerContent.innerHTML !== nodeData.metrics_display) {
+                    tickerContent.innerHTML = nodeData.metrics_display;
+                }
+            }
+
+            // Check if scrolling needed
+            if (tickerContent && metricsDataDiv) {
+                const currentDisplay = tickerContent.style.display;
+                tickerContent.style.display = 'inline-block';
+                const needsScrolling = tickerContent.scrollWidth > metricsDataDiv.clientWidth;
+                tickerContent.style.display = currentDisplay;
+
+                if (needsScrolling) {
+                    metricsDataDiv.classList.add('scrolling');
+                } else {
+                    metricsDataDiv.classList.remove('scrolling');
+                }
+            }
+
             // Update node-specific dynamic elements in custom container
             const customContainer = expandedCard.querySelector('.node-custom-container');
             if (customContainer) {
@@ -3669,6 +4139,18 @@ class WebController(Controller):
                 clearInterval(expandedRefreshInterval);
                 expandedRefreshInterval = null;
             }
+        }
+
+        function setupMetricsTicker() {
+            // Always add scrolling class to all cards with metrics
+            document.querySelectorAll('.node-metrics-data').forEach(container => {
+                const content = container.querySelector('.ticker-content');
+                if (content && content.scrollWidth > container.clientWidth) {
+                    container.classList.add('scrolling');
+                } else {
+                    container.classList.remove('scrolling');
+                }
+            });
         }
 
         function setupStatusStream() {

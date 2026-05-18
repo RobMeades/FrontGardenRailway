@@ -341,6 +341,16 @@ int32_t fgr_metrics_event_bool_get(fgr_metrics_t metric,
  */
 int32_t fgr_metrics_stack_min_free_lowest_get(fgr_metrics_stack_min_free_lowest_t *value);
 
+/** Get the averaged RSSI value: this is intended to be used as
+ * a callback function with fgr_msg_rssi_cb(), but may also be
+ * used generally.
+ *
+ * @param unused not used, only present so that this matches the
+ *               function signature fgr_msg_rssi_cb_t.
+ * @return       the averaged RSSI value in dBm (0 if not known).
+ */
+int8_t fgr_metrics_rssi_get(void *unused);
+
 #ifdef __cplusplus
 }
 #endif

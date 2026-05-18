@@ -1140,4 +1140,21 @@ int32_t fgr_metrics_stack_min_free_lowest_get(fgr_metrics_stack_min_free_lowest_
     return err;
 }
 
+// Get the RSSI value.
+int8_t fgr_metrics_rssi_get(void *unused)
+{
+    int32_t rssi_dbm = 0;
+
+    if (g_context.lock && g_context.metrics_list) {
+
+        CONTEXT_LOCK(g_context.lock, "fgr_metrics_rssi_get()");
+        metric_simple_get(g_context.metrics_list,
+                          FGR_METRIC_SIMPLE_WIFI_RSSI_DBM,
+                          &rssi_dbm);
+        CONTEXT_UNLOCK(g_context.lock, "fgr_metrics_rssi_get()");
+    }
+
+    return (int8_t) rssi_dbm;
+}
+
 // End of file

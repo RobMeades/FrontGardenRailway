@@ -349,6 +349,9 @@ static int32_t init(context_t *context)
                            CONFIG_FGR_MSG_PORT,
                            CONFIG_FGR_MSG_HEARTBEAT_SECONDS,
                            state_cb, context);
+        if (err == ESP_OK) {
+            err = fgr_msg_rssi_cb(fgr_metrics_rssi_get, NULL);
+        }
     }
 
     // For debug purposes, hook-in a message send callback
