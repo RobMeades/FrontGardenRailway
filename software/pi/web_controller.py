@@ -91,30 +91,23 @@ LOG_LEVEL_NAMES = ['DEBUG', 'INFO', 'WARN', 'ERROR']
 
 # Metrics display configuration
 METRICS_CONFIG = {
-    # Simple metrics (value is number)
-    'heap': {'type': 'simple', 'importance_threshold': 10000, 'order': 9},
-    'dbm': {'type': 'exclude'},  # Already displayed in heartbeat
-
-    # Event metrics (single counter with timestamp)
-    'lrb': {'type': 'event', 'importance_condition': 'value > 0', 'order': 1},
-    'panic': {'type': 'event', 'importance_condition': 'value > 0', 'order': 2},
-    'pwr': {'type': 'event', 'importance_condition': 'value > 0', 'order': 3},
-    'ip': {'type': 'event', 'importance_condition': 'special_ip', 'order': 5},
-    'ota_c': {'type': 'event', 'importance_condition': 'has_fail', 'order': 11},
-    'ota_w': {'type': 'event', 'importance_condition': 'has_fail', 'order': 12},
-    'log_c': {'type': 'event', 'importance_condition': 'has_fail', 'order': 6},
-    'cnt_c': {'type': 'event', 'importance_condition': 'has_fail', 'order': 7},
-    'cnt_tx': {'type': 'event', 'importance_condition': 'has_fail', 'order': 8},
-    'cnt_rx': {'type': 'event', 'importance_condition': 'has_fail', 'order': 10},
-    'ping_tx': {'type': 'event', 'importance_condition': 'has_fail', 'order': 13},
+    'lrb':     {'type': 'event', 'importance_condition': 'value > 0', 'order': 1},
+    'panic':   {'type': 'event', 'importance_condition': 'value > 0', 'order': 2},
+    'pwr':     {'type': 'event', 'importance_condition': 'value > 0', 'order': 3},
+    'w':       {'type': 'boolean_event', 'importance_condition': 'has_fail', 'order': 4},
+    'ip':      {'type': 'event', 'importance_condition': 'special_ip', 'order': 5},
+    'dbm':     {'type': 'exclude'},  # Already displayed in heartbeat
+    'ota_c':   {'type': 'boolean_event', 'importance_condition': 'has_fail', 'order': 7},
+    'ota_w':   {'type': 'boolean_event', 'importance_condition': 'has_fail', 'order': 8},
+    'log_c':   {'type': 'boolean_event', 'importance_condition': 'has_fail', 'order': 9},
+    'cnt_c':   {'type': 'boolean_event', 'importance_condition': 'has_fail', 'order': 10},
+    'cnt_tx':  {'type': 'boolean_event', 'importance_condition': 'has_fail', 'order': 11},
+    'cnt_rx':  {'type': 'event', 'importance_condition': 'has_fail', 'order': 12},
+    'ping_tx': {'type': 'boolean_event', 'importance_condition': 'has_fail', 'order': 13},
     'ping_rx': {'type': 'event', 'importance_condition': 'has_fail', 'order': 14},
-    'nvs_w': {'type': 'event', 'importance_condition': 'has_fail', 'order': 15},
-
-    # Boolean event metrics (have +/-)
-    'w': {'type': 'boolean_event', 'importance_condition': 'has_fail', 'order': 4},
-
-    # Stack metrics (array of objects)
-    'stack': {'type': 'stack', 'importance_condition': 'first_value < 256', 'order': 16},
+    'nvs_w':   {'type': 'boolean_event', 'importance_condition': 'has_fail', 'order': 15},
+    'stack':   {'type': 'stack', 'importance_condition': 'first_value < 256', 'order': 16},
+    'heap':    {'type': 'simple', 'importance_threshold': 10000, 'order': 17}
 }
 
 # Human-readable help text for metrics (for tooltips)
