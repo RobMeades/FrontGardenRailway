@@ -1842,6 +1842,10 @@ class WebController(Controller):
             animation: ticker 15s linear infinite;
         }
 
+        .node-metrics-data.scrolling .ticker-content:hover {
+            animation-play-state: paused;
+        }
+
         @keyframes ticker {
             /* 0% to 20% (First 3 seconds): Stationary pause */
             0%, 20% {

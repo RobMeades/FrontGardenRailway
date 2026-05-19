@@ -34,7 +34,9 @@
 #include "cJSON.h"
 
 #include "fgr_util.h"
+#include "fgr_time.h"
 #include "fgr_metrics.h"
+
 // Required for FGR_LOG_STRING_MAX_LEN
 #include "../../../../../protocol/fgr_protocol.h"
 
@@ -94,7 +96,6 @@ typedef struct {
 typedef struct {
     SemaphoreHandle_t lock;
     TaskHandle_t task_handle;
-    int64_t time_since_power_cycle_seconds;
     fgr_metrics_storage_t *metrics_list;
     int64_t last_update_us;
     int64_t last_rssi_measurement_us;
@@ -225,24 +226,6 @@ static context_t g_context = {0};
  * STATIC FUNCTIONS: MISC
  * -------------------------------------------------------------- */
 
-// Return the time since boot in seconds.
-static int64_t time_since_boot()
-{
-    return (esp_timer_get_time()) / 1000000ULL;
-}
-
-// Return the time since the last power cycle in seconds.
-static int64_t time_since_power_cycle(fgr_metrics_storage_t *metrics_list)
-{
-    int64_t time_seconds = time_since_boot();
-
-    if (metrics_list) {
-       time_seconds += (*(metrics_list + FGR_METRIC_EVENT_LOCAL_REBOOT)).event.time.seconds;
-    }
-
-    return time_seconds;
-}
-
 // Return true if the metric is known and is of the given type.
 static bool is_good(fgr_metrics_t metric, fgr_metrics_type_t type)
 {
@@ -287,11 +270,15 @@ static void metric_set_time(fgr_metrics_storage_t *metrics_list,
                             fgr_metrics_time_t *time)
 {
     if (metrics_list && time) {
-        time->seconds = time_since_power_cycle(metrics_list);
+        time_t time_since_power_on = fgr_time_since_power_on();
+        if (time_since_power_on < 0) {
+            time_since_power_on = 0;
+        }
+        time->seconds = time_since_power_on;
         if ((metric < FGR_UTIL_ARRAY_LENGTH(g_metric_reset_at_boot)) &&
             g_metric_reset_at_boot[metric]) {
             time->since_boot_not_power_cycle = true;
-            time->seconds = time_since_boot();
+            time->seconds = fgr_time_since_boot();
         }
     }
 }
@@ -371,13 +358,13 @@ static void reset_reason_set(fgr_metrics_storage_t *metrics_list)
         esp_reset_reason_t reset_reason = esp_reset_reason();
         for (size_t x = 0; x < FGR_UTIL_ARRAY_LENGTH(g_reset_reason_panic); x++) {
             if (reset_reason == g_reset_reason_panic[x]) {
-                fgr_metrics_event_set(FGR_METRIC_EVENT_PANIC, reset_reason);
+                metric_event_set(g_context.metrics_list, FGR_METRIC_EVENT_PANIC, reset_reason);
                 break;
             }
         }
         for (size_t x = 0; x < FGR_UTIL_ARRAY_LENGTH(g_reset_reason_bad_power); x++) {
             if (reset_reason == g_reset_reason_bad_power[x]) {
-                fgr_metrics_event_set(FGR_METRIC_EVENT_POWER_BAD, reset_reason);
+                metric_event_set(g_context.metrics_list, FGR_METRIC_EVENT_POWER_BAD, reset_reason);
                 break;
             }
         }
@@ -851,8 +838,8 @@ int32_t fgr_metrics_init(fgr_metrics_report_cb_t cb,
 
             // Start the metrics task
             err = fgr_util_task_create(&task_metrics_cb, &g_context, "metrics",
-                                        FGR_METRICS_TASK_STACK_SIZE,
-                                        3, &g_context.task_handle);
+                                       FGR_METRICS_TASK_STACK_SIZE,
+                                       3, &g_context.task_handle);
 
             CONTEXT_UNLOCK(g_context.lock, "fgr_metrics_init()");
         }
@@ -866,30 +853,34 @@ void fgr_metrics_log_cb(fgr_metrics_storage_t *list, size_t length,
                         void *unused)
 {
     int32_t err = -ESP_ERR_INVALID_ARG;
-    char buffer[FGR_LOG_STRING_MAX_LEN] = {0};
+    char *buffer = NULL;
 
     (void) unused;
 
     if (list && (length > 0)) {
         err = -ESP_ERR_NO_MEM;
-        cJSON *json = cJSON_CreateObject();
-        if (json) {
-            err = 0;
-            for (size_t x = 0; x < length && (err >= 0); x++) {
-                err = encode_json(list, x, json);
-            }
-            if (err >= 0) {
-                err = -ESP_ERR_NO_MEM;
-                char *json_str = cJSON_PrintUnformatted(json);
-                if (json_str) {
-                    // strlcpy() guarantees a terminator and returns the
-                    // length of the source string
-                    strlcpy(buffer, json_str, sizeof(buffer));
-                    cJSON_free(json_str);
-                    ESP_LOGI(TAG, "%s", buffer);
+        buffer = (char *) malloc(FGR_LOG_STRING_MAX_LEN);
+        if (buffer) {
+            cJSON *json = cJSON_CreateObject();
+            if (json) {
+                err = 0;
+                for (size_t x = 0; x < length && (err >= 0); x++) {
+                    err = encode_json(list, x, json);
                 }
+                if (err >= 0) {
+                    err = -ESP_ERR_NO_MEM;
+                    char *json_str = cJSON_PrintUnformatted(json);
+                    if (json_str) {
+                        // strlcpy() guarantees a terminator and returns the
+                        // length of the source string
+                        strlcpy(buffer, json_str, FGR_LOG_STRING_MAX_LEN);
+                        cJSON_free(json_str);
+                        ESP_LOGI(TAG, "%s", buffer);
+                    }
+                }
+                cJSON_Delete(json);
             }
-            cJSON_Delete(json);
+            free(buffer);
         }
     }
 }
@@ -953,27 +944,6 @@ int32_t fgr_metrics_encode_json_all(char *buffer, size_t length)
     }
 
     return err;
-}
-
-// Get the time since the last power cycle in seconds.
-int64_t fgr_metrics_time_since_power_cycle()
-{
-    int64_t time_seconds = 0;
-
-    if (g_context.lock && g_context.metrics_list) {
-
-        CONTEXT_LOCK(g_context.lock, "fgr_metrics_time_since_power_cycle()");
-        time_seconds = time_since_power_cycle(g_context.metrics_list);
-        CONTEXT_UNLOCK(g_context.lock, "fgr_metrics_time_since_power_cycle()");
-    }
-
-    return time_seconds;
-}
-
-// Get the time since boot in seconds.
-int64_t fgr_metrics_time_since_boot()
-{
-    return time_since_boot();
 }
 
 // Reset a single metric.

@@ -15,8 +15,8 @@ from typing import Optional, Union, Tuple, Any, Dict
 import socket
 
 FGR_PROTOCOL_VERSION = 1
-FGR_MSG_CONTENTS_MAX_LEN = 512
-FGR_LOG_STRING_MAX_LEN = 511
+FGR_MSG_CONTENTS_MAX_LEN = 1024
+FGR_LOG_STRING_MAX_LEN = 1023
 
 class FGRMsgType(IntEnum):
     """Message types (top 4 bits of type field)"""
@@ -283,7 +283,7 @@ class FGRMsgHeader:
 class FGRMsg:
     """Main FGR message class with variable-length body"
     All multi-byte fields are in network byte order (big-endian) on the wire"""
-    CONTENTS_MAX_LEN = 512
+    CONTENTS_MAX_LEN = 1024
 
     def __init__(self, msg_type: int = 0, msg_subtype: int = 0,
                  reference: int = 0, error_or_state: int = 0,

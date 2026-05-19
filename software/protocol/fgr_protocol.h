@@ -16,7 +16,7 @@
 
  #ifndef _FGR_PROTOCOL_H_
  #define _FGR_PROTOCOL_H_
- 
+
 /** @file
  * @brief Protocol definition for comms between an ESP32 node and
  * a controlling entity in the front garden railway.
@@ -29,7 +29,7 @@
  *
  * Note: the underlying transport is assumed to be perfect and ordered.
  */
- 
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -45,10 +45,10 @@ extern "C" {
 #define FGR_MSG_MAX_LEN (sizeof(fgr_msg_t))
 
 // The maximum length of a message contents field.
-#define FGR_MSG_CONTENTS_MAX_LEN 512
+#define FGR_MSG_CONTENTS_MAX_LEN 1024
 
 // The maximum length of a log string (excluding the null terminator).
-#define FGR_LOG_STRING_MAX_LEN   511
+#define FGR_LOG_STRING_MAX_LEN   1023
 
 #if FGR_MSG_CONTENTS_MAX_LEN < (FGR_LOG_STRING_MAX_LEN) + 1
 #  error "FGR_MSG_CONTENTS_MAX_LEN must be at least as large as FGR_LOG_STRING_MAX_LEN + 1"
@@ -59,7 +59,7 @@ extern "C" {
  * -------------------------------------------------------------- */
 
 // The message type; this is OR'ed with the top nibble of the request/
-// confirmation/indication/response/log message. 
+// confirmation/indication/response/log message.
 typedef enum {
     FGR_MSG_TYPE_NULL = 0,   // Never to be transmitted intentionally, always to be ignored when received; may be used internally
     FGR_MSG_TYPE_REQ  = 1,   // Sent from a controller to a node to initiate an action
@@ -208,9 +208,9 @@ typedef struct __attribute__((packed)) {
 #ifdef __cplusplus
 }
 #endif
- 
+
 /** @}*/
- 
+
 #endif // _FGR_PROTOCOL_H_
- 
+
  // End of file

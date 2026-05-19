@@ -138,8 +138,8 @@ typedef uint32_t (*fgr_msg_send_ping_body_cb_t)(uint8_t *buffer,
  *                          if this is zero then there will be no
  *                          way of detecting closure of a socket
  *                          by the far end.
- * @param cb                a pointer to a function that will return
- *                          the state of the node.  This will be called
+ * @param cb                a function that will return the state
+ *                          of the node.  This will be called
  *                          (a) to populate any indication messages sent
  *                          with fgr_msg_send_ind() or any heartbeat
  *                          messages sent automatically and (b) to

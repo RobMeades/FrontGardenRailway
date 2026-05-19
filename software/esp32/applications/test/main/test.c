@@ -28,20 +28,15 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "errno.h"
-#include "esp_timer.h"
 #include "esp_task_wdt.h"
 
 #include "../../../../protocol/fgr_protocol.h"
 #include "fgr_util.h"
-#include "fgr_nvs.h"
-#include "fgr_ota.h"
-#include "fgr_network.h"
-#include "fgr_socket.h"
 #include "fgr_msg.h"
 #include "fgr_debug.h"
 #include "fgr_metrics.h"
 #include "fgr_log.h"
-#include "fgr_ping.h"
+#include "fgr_lib.h"
 
 /* ----------------------------------------------------------------
  * COMPILE-TIME MACROS
@@ -115,63 +110,67 @@ static bool msg_receive_cb(fgr_msg_t *msg, void *param)
     context_t *context = (context_t *) param;
     bool handled = false;
     uint32_t length = 0;
-    uint8_t contents[FGR_MSG_CONTENTS_MAX_LEN];
+    uint8_t *contents = (uint8_t *) malloc(FGR_MSG_CONTENTS_MAX_LEN);
 
     fgr_error_t msg_error = FGR_ERROR_UNHANDLED_REQUEST;
 
-    if (IS_MSG_REQ(msg->header.req.type)) {
-        // REQUEST messages
-        handled = true;
-        switch (MSG_MASK(msg->header.req.type)) {
-            case FGR_REQ_CNF_CFG:
-                // No configuration, just confirm
-                state_set(context, FGR_STATE_STARTED);
-                msg_error = FGR_ERROR_NONE;
-            break;
-            case FGR_REQ_CNF_START:
-                state_set(context, FGR_STATE_STARTED);
-                msg_error = FGR_ERROR_NONE;
-            break;
-            case FGR_REQ_CNF_STOP:
-                state_set(context, FGR_STATE_STOPPED);
-                msg_error = FGR_ERROR_NONE;
-            break;
-            case FGR_REQ_CNF_REBOOT:
-                // Just reset the running flag and we will exit
-                context->running = false;
-                state_set(context, FGR_STATE_STOPPED);
-                msg_error = FGR_ERROR_NONE;
-            break;
-            default:
-                //
-                handled = false;
-            break;
+    if (contents) {
+        if (IS_MSG_REQ(msg->header.req.type)) {
+            // REQUEST messages
+            handled = true;
+            switch (MSG_MASK(msg->header.req.type)) {
+                case FGR_REQ_CNF_CFG:
+                    // No configuration, just confirm
+                    state_set(context, FGR_STATE_STARTED);
+                    msg_error = FGR_ERROR_NONE;
+                break;
+                case FGR_REQ_CNF_START:
+                    state_set(context, FGR_STATE_STARTED);
+                    msg_error = FGR_ERROR_NONE;
+                break;
+                case FGR_REQ_CNF_STOP:
+                    state_set(context, FGR_STATE_STOPPED);
+                    msg_error = FGR_ERROR_NONE;
+                break;
+                case FGR_REQ_CNF_REBOOT:
+                    // Just reset the running flag and we will exit
+                    context->running = false;
+                    state_set(context, FGR_STATE_STOPPED);
+                    msg_error = FGR_ERROR_NONE;
+                break;
+                default:
+                    //
+                    handled = false;
+                break;
+            }
+
+            if (handled) {
+                fgr_msg_send_queue_cnf(MSG_MASK(msg->header.req.type), msg_error,
+                                    msg->header.req.reference,
+                                    contents, length);
+            }
+        } else {
+            // RESPONSE messages
+            handled = true;
+            switch (MSG_MASK(msg->header.req.type)) {
+                case FGR_IND_RSP_NEEDS_CFG:
+                    // No configuration required, nothing to do,
+                    // just set state to started and indicate
+                    // that we have
+                    state_set(context, FGR_STATE_STARTED);
+                    fgr_msg_send_queue_ind(FGR_IND_RSP_START, contents, length);
+                break;
+                case FGR_IND_RSP_START:
+                case FGR_IND_RSP_STOP:
+                    // Ignore
+                break;
+                default:
+                    handled = false;
+                break;
+            }
         }
 
-        if (handled) {
-            fgr_msg_send_queue_cnf(MSG_MASK(msg->header.req.type), msg_error,
-                                   msg->header.req.reference,
-                                   contents, length);
-        }
-    } else {
-        // RESPONSE messages
-        handled = true;
-        switch (MSG_MASK(msg->header.req.type)) {
-            case FGR_IND_RSP_NEEDS_CFG:
-                // No configuration required, nothing to do,
-                // just set state to started and indicate
-                // that we have
-                state_set(context, FGR_STATE_STARTED);
-                fgr_msg_send_queue_ind(FGR_IND_RSP_START, contents, length);
-            break;
-            case FGR_IND_RSP_START:
-            case FGR_IND_RSP_STOP:
-                // Ignore
-            break;
-            default:
-                handled = false;
-            break;
-        }
+        free(contents);
     }
 
     if (handled) {
@@ -217,79 +216,11 @@ static int32_t init(context_t *context)
         }
     }
 
-    // Initialise utilities (needed for task creation)
+    // Initialise all of the libraries
     if (err == ESP_OK) {
-        err = fgr_util_init();
+        err = fgr_lib_init((const char *) g_server_cert_pem_start,
+                           state_cb, send_cb, context);
     }
-
-    // Configure metrics: needs tasks so has to come after
-    // fgr_util_init()
-    if (err == ESP_OK) {
-        err = fgr_metrics_init(fgr_metrics_log_cb, NULL);
-    }
-
-    // Initialise OTA: do this whether there is WiFi or not
-    // as it also initialises non-volatile storage (and you
-    // can't just separately iniitalise non-volatile storage
-    // as there are some OTA-related steps that need to be
-    // performed beforehand)
-    if (err == ESP_OK) {
-        err = fgr_ota_init();
-    }
-
-    // Configure our debug LED: do this after non-volatile
-    // storage has been initialised so that we can read
-    // settings from there.
-    if (err == ESP_OK) {
-        err = fgr_debug_init(state_cb, context);
-    }
-
-#if !defined(CONFIG_FGR_APP_NO_WIFI)
-    // Initialize networking
-    if (err == ESP_OK) {
-        err = fgr_network_init(CONFIG_FGR_NETWORK_WIFI_SSID,
-                               CONFIG_FGR_NETWORK_WIFI_PASSWORD,
-                               WIFI_AUTH_OPEN,
-                               CONFIG_FGR_NETWORK_WIFI_REDUCED_TX_POWER);
-    }
-
-    // Check for an OTA update, which may restart the system
-    if (err == ESP_OK) {
-        err = fgr_ota_update(CONFIG_FGR_OTA_FIRMWARE_UPGRADE_URL,
-                             (const char *) g_server_cert_pem_start,
-                             CONFIG_FGR_OTA_RECEIVE_TIMEOUT_MS);
-    }
-
-    // Forward logging to the server
-    if (err == ESP_OK) {
-        err = fgr_log_init(CONFIG_FGR_NETWORK_CONTROLLER_IP_ADDRESS,
-                           CONFIG_FGR_LOG_PORT, FGR_LOG_LEVEL_INFO);
-    }
-
-    // Initialise messaging
-    if (err == ESP_OK) {
-        err = fgr_msg_init(CONFIG_FGR_NETWORK_CONTROLLER_IP_ADDRESS,
-                           CONFIG_FGR_MSG_PORT,
-                           CONFIG_FGR_MSG_HEARTBEAT_SECONDS,
-                           state_cb, context);
-        if (err == ESP_OK) {
-            err = fgr_msg_rssi_cb(fgr_metrics_rssi_get, NULL);
-        }
-    }
-
-    // For debug purposes, hook-in a message send callback
-    if (err == ESP_OK) {
-        err = fgr_msg_send_cb(send_cb, context);
-    }
-
-    // Create a message send queue
-    if (err == ESP_OK) {
-        err = fgr_msg_send_queue_init(FGR_MSG_SEND_QUEUE_LENGTH);
-    }
-
-#else
-    ESP_LOGW(TAG, "CONFIG_FGR_APP_NO_WIFI is defined, not connecting to WiFi.");
-#endif
 
     // Node-specific initialisation goes here
 
@@ -301,12 +232,7 @@ static void deinit(context_t *context)
 {
     // Node-specific deinitialisation goes here
 
-    fgr_msg_deinit();
-    fgr_log_deinit();
-    fgr_network_deinit();
-    fgr_debug_deinit();
-    fgr_metrics_deinit();
-    fgr_util_deinit();
+    fgr_lib_deinit();
     vSemaphoreDelete(context->lock);
     esp_restart();
 }
@@ -318,9 +244,6 @@ static void deinit(context_t *context)
 // What this node does.
 static void do_node(context_t *context)
 {
-    // Allow us to feed the watchdog
-    esp_task_wdt_add(NULL);
-
     // Main loop
     while(context->running) {
 
@@ -329,8 +252,6 @@ static void do_node(context_t *context)
         vTaskDelay(pdMS_TO_TICKS(1000));
         esp_task_wdt_reset();
     }
-
-    esp_task_wdt_delete(NULL);
 }
 
 /* ----------------------------------------------------------------
@@ -378,12 +299,12 @@ void app_main(void)
     } else {
         // Only get here if there has been a problem
         state_set(&context, FGR_STATE_GENERIC_FAILED);
-        fgr_metrics_event_set(FGR_METRIC_EVENT_LOCAL_REBOOT, 0);
+        fgr_metrics_event_set(FGR_METRIC_EVENT_LOCAL_REBOOT, -err);
         ESP_LOGE(TAG, "Setup failed (%s), will restart soonish.", esp_err_to_name(-err));
     }
 
     // Wait a while to let any messages leave the building
-    vTaskDelay(pdMS_TO_TICKS(2000));
+    vTaskDelay(pdMS_TO_TICKS(1000));
 
     deinit(&context);
 }

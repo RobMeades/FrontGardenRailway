@@ -121,6 +121,7 @@ static void task_maintain_cb(void *param)
 {
     context_channel_t *context_channel = (context_channel_t *) param;
     void *context_connect = NULL;
+    bool down_cb_called = false;
 
     // Try to take lock with timeout
     if (xSemaphoreTake(context_channel->lock, pdMS_TO_TICKS(1000)) == pdTRUE) {
@@ -195,7 +196,6 @@ static void task_maintain_cb(void *param)
                         // Connect failed immediately
 
                         ESP_LOGE(TAG, "Connect failed immediately: %d (%s)", errno, strerror(errno));
-
                         CONTEXT_LOCK(context_channel->lock, "task_maintain_cb() 3");
                         fgr_socket_destroy(&context_channel->sock);
                         CONTEXT_UNLOCK(context_channel->lock, "task_maintain_cb() 3");
@@ -208,6 +208,7 @@ static void task_maintain_cb(void *param)
             }
 
             if (context_channel->connected) {
+                down_cb_called = false;
                 if (context_channel->cfg_cb) {
                     // If we have reconnected and there is a user configuration
                     // callback, call it
@@ -220,10 +221,13 @@ static void task_maintain_cb(void *param)
                     }
                 }
             } else {
-                if (context_channel->down_cb) {
+                if (context_channel->down_cb && !down_cb_called) {
                     // Call down_cb() so that the application knows we're having trouble
                     context_channel->down_cb(context_channel->cb_param);
+                    down_cb_called = true;
                 }
+                // Wait a little before trying again
+                vTaskDelay(pdMS_TO_TICKS(FGR_SOCKET_MAINTAIN_WAIT_MS));
             }
         }
     } else {
@@ -626,7 +630,7 @@ int32_t fgr_socket_connect_is_complete(void **context, int32_t timeout_ms)
             } else {
                 errno = so_error;  // Set errno to the socket error as getsockopt() doesn't set it
                 err = ESP_FAIL;
-                ESP_LOGE(TAG, "Connect failed: %d (%s)", (int) so_error, strerror(so_error));
+                ESP_LOGD(TAG, "Connect failed: %d (%s)", (int) so_error, strerror(so_error));
             }
         } else if (sel_rc < 0) {
             err = ESP_FAIL;

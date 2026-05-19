@@ -36,6 +36,7 @@
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "errno.h"
+#include "esp_task_wdt.h"
 
 #include "fgr_metrics.h"
 #include "fgr_nvs.h"
@@ -68,12 +69,14 @@
  * VARIABLES
  * -------------------------------------------------------------- */
 
+// The CA certificate for the OTA update server.
+extern const char g_server_cert_pem_start[] asm("_binary_ca_cert_pem_start");
+
 // An OTA data write buffer ready to write to the flash
 static char g_ota_write_data[OTA_BUFFER_SIZE + 1] = { 0 };
 
 // Buffer for accumulating header data
 static char g_header_buffer[OTA_FILE_HEADER_BUFFER_SIZE] = { 0 };
-extern const uint8_t g_server_cert_pem_start[] asm("_binary_ca_cert_pem_start");
 
 /* ----------------------------------------------------------------
  * STATIC FUNCTIONS
@@ -258,7 +261,7 @@ int32_t fgr_ota_update(const char *update_file_url,
 
     esp_http_client_config_t config = {
         .url = update_file_url,
-        .cert_pem = server_cert_pem,
+        .cert_pem = g_server_cert_pem_start,
         .timeout_ms = timeout_ms,
         .keep_alive_enable = true,
         .buffer_size = 2048
@@ -348,6 +351,10 @@ int32_t fgr_ota_update(const char *update_file_url,
                         ESP_LOGE(TAG, "esp_ota_write failed.");
                     }
                     binary_file_length += data_read;
+                }
+                if (esp_task_wdt_status(NULL) == ESP_OK) {
+                    // Feed the watchdog
+                    esp_task_wdt_reset();
                 }
             } else if (data_read == 0) {
                 // Handle zero read - this could be temporary or permanent

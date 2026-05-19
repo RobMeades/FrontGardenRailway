@@ -23,6 +23,8 @@ CONFIG_NVS_ENCRYPTION=n
 CONFIG_ESP_INT_WDT=y
 # Enable the Task WDT to catch stuck tasks (default anyway, but just in case)
 CONFIG_ESP_TASK_WDT=y
+# 10 second watchog time: long enough to connect to WiFi and do an OTA update
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=10
 # Make the Task WDT cause a panic (and thus a reset) on timeout
 CONFIG_ESP_TASK_WDT_PANIC=y
 

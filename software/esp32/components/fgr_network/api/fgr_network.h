@@ -41,8 +41,13 @@ extern "C" {
  * -------------------------------------------------------------- */
 
 /** Initialise networking; requires the default event loop to
- * have been created.  Note that this function will create a semaphore
- * that is never destroyed.
+ * have been created.
+ *
+ * Note: this will create a mutex that is never destroyed.
+ *
+ * Note: since this may run for a little while it internally sets
+ * the task watchdog to 60 seconds (and sets it back to
+ * CONFIG_ESP_TASK_WDT_TIMEOUT_S afterwards).
  *
  * @param ssid             the SSID of the Wi-Fi access point to
  *                         connect to e.g. FGR.

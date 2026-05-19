@@ -25,6 +25,8 @@
 extern "C" {
 #endif
 
+#include "time.h"
+
 /* ----------------------------------------------------------------
  * COMPILE-TIME MACROS
  * -------------------------------------------------------------- */
@@ -44,7 +46,7 @@ extern "C" {
 typedef struct {
     bool since_boot_not_power_cycle;  // If true, seconds is since boot,
                                       // else it is since power cycle.
-    int64_t seconds;                  // The time in seconds.
+    time_t seconds;                   // The time in seconds.
 } fgr_metrics_time_t;
 
 /** Structure to carry an "event" type metric.
@@ -243,18 +245,6 @@ int32_t fgr_metrics_encode_json(fgr_metrics_t metric,
  *               from esp_err_t will be returned.
  */
 int32_t fgr_metrics_encode_json_all(char *buffer, size_t length);
-
-/** Get the time since the last power cycle in seconds.
- *
- * @return the time since last power cycle in seconds.
- */
-int64_t fgr_metrics_time_since_power_cycle();
-
-/** Get the time since boot in seconds.
- *
- * @return the time since boot in seconds.
- */
-int64_t fgr_metrics_time_since_boot();
 
 /** Reset a single metric.
  *

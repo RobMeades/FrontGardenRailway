@@ -56,6 +56,9 @@ int32_t fgr_ota_init();
  * to have been established.  fgr_ota_init() must have been called
  * before this function.
  *
+ * Note: since this may run for a little while it internally calls
+ * esp_task_wdt_reset().
+ *
  * @param update_file_url   the URL of the binary file, e.g.
  *                          https://10.10.3.1:8070/stepper.bin.
  * @param server_cert_pem   a pointer to the start of the CA

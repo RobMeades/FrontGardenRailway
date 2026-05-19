@@ -470,27 +470,31 @@ static void socket_down_cb(void *param)
 // IMPORTANT the context MUST be locked before this is called.
 static void receive_handler_ping_locked(context_t *context, uint8_t reference)
 {
-    uint8_t buffer[FGR_MSG_CONTENTS_MAX_LEN];
+    uint8_t *buffer = (uint8_t *) malloc(FGR_MSG_CONTENTS_MAX_LEN);
     uint32_t length = 0;
 
-    fgr_metrics_event_set(FGR_METRIC_EVENT_PING_RX, 0);
+    if (buffer) {
+        fgr_metrics_event_set(FGR_METRIC_EVENT_PING_RX, 0);
 
-    // Populate the body
-    if (context->send_ping_body_cb) {
-        // Application wants to populate the body: let them do it
-        length = context->send_ping_body_cb(buffer, sizeof(buffer),
-                                            context->send_ping_body_cb_param);
-    } else {
-        if (context->state_cb) {
-            // Populate the body with a uint8_t containing the state
-            buffer[0] = context->state_cb(context->state_cb_param);
-            length = sizeof(uint8_t);
+        // Populate the body
+        if (context->send_ping_body_cb) {
+            // Application wants to populate the body: let them do it
+            length = context->send_ping_body_cb(buffer, FGR_MSG_CONTENTS_MAX_LEN,
+                                                context->send_ping_body_cb_param);
+        } else {
+            if (context->state_cb) {
+                // Populate the body with a uint8_t containing the state
+                buffer[0] = context->state_cb(context->state_cb_param);
+                length = sizeof(uint8_t);
+            }
         }
-    }
 
-    // Send the FGR_REQ_CNF_PING message
-    send_msg_locked(context, MSG_CNF(FGR_REQ_CNF_PING), FGR_ERROR_NONE,
-                    reference, buffer, length);
+        // Send the FGR_REQ_CNF_PING message
+        send_msg_locked(context, MSG_CNF(FGR_REQ_CNF_PING), FGR_ERROR_NONE,
+                        reference, buffer, length);
+
+        free(buffer);
+    }
 }
 
 // Callback to be called when data has been received.
