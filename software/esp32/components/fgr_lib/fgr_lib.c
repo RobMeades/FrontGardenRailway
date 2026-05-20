@@ -86,7 +86,7 @@ int32_t fgr_lib_init(const char *ota_server_cert_pem,
 
     // Initialise OTA: do this whether there is WiFi or not
     // as it also initialises non-volatile storage (and you
-    // can't just separately iniitalise non-volatile storage
+    // can't just separately initialise non-volatile storage
     // as there are some OTA-related steps that need to be
     // performed beforehand)
     if (err == ESP_OK) {
@@ -130,9 +130,11 @@ int32_t fgr_lib_init(const char *ota_server_cert_pem,
     }
 
     // Now that we have a connection to a log server,
-    // if there was perviously a panic resulting in a backtrace, log it
+    // if there was previously a panic resulting in a backtrace,
+    // or a stack overflow, log it
     if (err == ESP_OK) {
         fgr_debug_panic_log("Backtrace from previous panic ", ESP_LOG_WARN);
+        fgr_debug_stack_overflow_log("Stack overlow was in task ", ESP_LOG_WARN);
     }
 
     // Initialise messaging

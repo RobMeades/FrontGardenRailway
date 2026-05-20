@@ -27,6 +27,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
+#include "esp_system.h"
 #include "esp_task_wdt.h"
 #include "esp_log.h"
 #include "errno.h"
@@ -202,12 +203,17 @@ typedef struct {
     flash_state_t flash_state;
 } context_t;
 
+typedef struct {
+    uint8_t length;
+    uint32_t address_list[FGR_DEBUG_BACKTRACE_DEPTH_MAX];
+} backtrace_t;
+
 // Storage in retained RAM.
 typedef struct {
     int32_t magic;
-    uint8_t count;
-    uint32_t backtrace[FGR_DEBUG_BACKTRACE_DEPTH_MAX];
-} fgr_debug_retained_ram_t;
+    backtrace_t backtrace;
+    char stack_overflow_task_name[FGR_DEBUG_TASK_NAME_MAX_LENGTH];
+} retained_ram_t;
 
 /* ----------------------------------------------------------------
  * VARIABLES
@@ -259,7 +265,7 @@ static const fgr_debug_colour_t g_state_to_breathe_colour[] = {FGR_DEBUG_LED_COL
 #endif    // #  if defined(CONFIG_FGR_DEBUG_LED_SPI_NUM) && (CONFIG_FGR_DEBUG_LED_SPI_NUM > 1)
 
 // Storage for backtrace in retained RAM
-RTC_NOINIT_ATTR fgr_debug_retained_ram_t g_debug_retained_ram;
+RTC_NOINIT_ATTR retained_ram_t g_debug_retained_ram;
 
 /* ----------------------------------------------------------------
  * STATIC FUNCTIONS: WS2812 RELATED
@@ -714,6 +720,35 @@ void led_breathe_enabled(context_t *context, bool enabled)
     }
 }
 
+// Log a debug string, used by the panic and stack overflow
+// reporting functions.
+void debug_log(char *prefix, char *string, esp_log_level_t level)
+{
+    if (string && (level > ESP_LOG_NONE)) {
+        if (!prefix) {
+            prefix = "";
+        }
+        switch (level) {
+            case ESP_LOG_ERROR:
+                ESP_LOGE(TAG, "%s%s", prefix, string);
+            break;
+            case ESP_LOG_WARN:
+                ESP_LOGW(TAG, "%s%s", prefix, string);
+            break;
+            case ESP_LOG_INFO:
+                ESP_LOGI(TAG, "%s%s", prefix, string);
+            break;
+            case ESP_LOG_DEBUG:
+                ESP_LOGD(TAG, "%s%s", prefix, string);
+            break;
+            case ESP_LOG_VERBOSE:
+                ESP_LOGD(TAG, "%s%s", prefix, string);
+            default:
+            break;
+        }
+    }
+}
+
 /* ----------------------------------------------------------------
  * PUBLIC FUNCTIONS: INITIALISE/DEINITIALISE
  * -------------------------------------------------------------- */
@@ -733,6 +768,12 @@ int32_t fgr_debug_init(fgr_debug_state_cb_t cb, void *cb_param)
         if (!g_context.queue_handle) {
 
             CONTEXT_LOCK(g_context.lock, "fgr_debug_init()");
+
+            // Set up retained storage if required
+            if (g_debug_retained_ram.magic != FGR_UTIL_RETAINED_RAM_MAGIC_MARKER) {
+                memset(&g_debug_retained_ram, 0, sizeof(g_debug_retained_ram));
+                g_debug_retained_ram.magic = FGR_UTIL_RETAINED_RAM_MAGIC_MARKER;
+            }
 
             g_context.led_masked_off = false;
             g_context.breathe_state.enabled = true;
@@ -982,15 +1023,19 @@ void IRAM_ATTR __wrap_esp_panic_handler(void *param)
     frame.next_pc = next_pc;
     frame.exc_frame = NULL;
 
+    // Use a local stack variable for unwinding to isolate ourselves
+    // the from the vagaries of RTC memory access.
+    backtrace_t backtrace = {0};
+
     // The first two addresses will be those of this function and
     // esp_backtrace_get_start(), so we discard them
     uint8_t count = 0;
     uint8_t stored = 0;
-    while ((frame.next_pc != 0) && (stored < FGR_UTIL_ARRAY_LENGTH(g_debug_retained_ram.backtrace))) {
+    while ((frame.next_pc != 0) && (stored < FGR_UTIL_ARRAY_LENGTH(backtrace.address_list))) {
         if (count >= 2) {
             // Strip the hardware window bits (top 2 bits) and map to the
             // actual ESP32-S3 instruction space (0x40000000)
-            g_debug_retained_ram.backtrace[stored] = (frame.pc & 0x3FFFFFFF) | 0x40000000;
+            backtrace.address_list[stored] = (frame.pc & 0x3FFFFFFF) | 0x40000000;
             stored++;
         }
         if (!esp_backtrace_get_next_frame(&frame)) {
@@ -999,8 +1044,12 @@ void IRAM_ATTR __wrap_esp_panic_handler(void *param)
         count++;
     }
 
-    g_debug_retained_ram.count = stored;
-    g_debug_retained_ram.magic = FGR_UTIL_RETAINED_RAM_MAGIC_MARKER;
+    backtrace.length = stored;
+
+    // Commit to retained RAM
+    if (stored > 0) {
+        g_debug_retained_ram.backtrace = backtrace;
+    }
 
     // Pass control back to the real ESP-IDF panic handler
     __real_esp_panic_handler(param);
@@ -1009,41 +1058,43 @@ void IRAM_ATTR __wrap_esp_panic_handler(void *param)
 // Get backtrace.
 int32_t fgr_debug_panic_get(uint32_t *backtrace)
 {
-    int32_t count = 0;
+    int32_t length = 0;
 
     if (g_debug_retained_ram.magic == FGR_UTIL_RETAINED_RAM_MAGIC_MARKER) {
+        // Block-copy retained RAM and work on it locally
+        backtrace_t backtrace_copy = g_debug_retained_ram.backtrace;
         // Just in case
-        if (g_debug_retained_ram.count > FGR_UTIL_ARRAY_LENGTH(g_debug_retained_ram.backtrace)) {
-            g_debug_retained_ram.count = FGR_UTIL_ARRAY_LENGTH(g_debug_retained_ram.backtrace);
+        if (backtrace_copy.length > FGR_UTIL_ARRAY_LENGTH(backtrace_copy.address_list)) {
+            backtrace_copy.length = FGR_UTIL_ARRAY_LENGTH(backtrace_copy.address_list);
         }
-        count = g_debug_retained_ram.count;
+        length = backtrace_copy.length;
         if (backtrace) {
-            memcpy(backtrace, g_debug_retained_ram.backtrace, count * sizeof(g_debug_retained_ram.backtrace[0]));
-            g_debug_retained_ram.magic = ~FGR_UTIL_RETAINED_RAM_MAGIC_MARKER;
+            memcpy(backtrace, backtrace_copy.address_list, length * sizeof(backtrace_copy.address_list[0]));
+            g_debug_retained_ram.backtrace.length = 0;
         }
     }
 
-    return count;
+    return length;
 }
 
 // Populates a buffer with a backtrace as a string.
 int32_t fgr_debug_panic_str_get(char *buffer)
 {
-    int32_t count = fgr_debug_panic_get(NULL);
-    int32_t length = count * FGR_DEBUG_BACKTRACE_NUMBER_LENGTH;
+    int32_t length = fgr_debug_panic_get(NULL);
+    int32_t length_str = length * FGR_DEBUG_BACKTRACE_NUMBER_LENGTH;
 
-    if ((count > 0) && buffer) {
-        uint32_t backtrace[count];
+    if ((length > 0) && buffer) {
+        uint32_t backtrace[length];
         fgr_debug_panic_get(backtrace);
         char *p = buffer;
-        for (size_t x = 0; x < count; x++) {
+        for (size_t x = 0; x < length; x++) {
             snprintf(p, FGR_DEBUG_BACKTRACE_NUMBER_LENGTH + 1,
                      FGR_DEBUG_BACKTRACE_FORMAT_STRING, (int) backtrace[x]);
             p += FGR_DEBUG_BACKTRACE_NUMBER_LENGTH;
         }
     }
 
-    return length;
+    return length_str;
 }
 
 // Log a backtrace.
@@ -1051,40 +1102,59 @@ int32_t fgr_debug_panic_log(char *prefix, esp_log_level_t level)
 {
     int32_t err = -ESP_ERR_NOT_FOUND;
 
-    if (level > ESP_LOG_NONE) {
-        int32_t length = fgr_debug_panic_str_get(NULL);
-        if (length > 0) {
-            if (prefix) {
-                length += strlen(prefix);
-            } else {
-                prefix = "";
-            }
-            err = -ESP_ERR_NO_MEM;
-            char *buffer = malloc(length);
-            if (buffer) {
-                fgr_debug_panic_str_get(buffer);
-                switch (level) {
-                    case ESP_LOG_ERROR:
-                        ESP_LOGE(TAG, "%s%s", prefix, buffer);
-                    break;
-                    case ESP_LOG_WARN:
-                        ESP_LOGW(TAG, "%s%s", prefix, buffer);
-                    break;
-                    case ESP_LOG_INFO:
-                        ESP_LOGI(TAG, "%s%s", prefix, buffer);
-                    break;
-                    case ESP_LOG_DEBUG:
-                        ESP_LOGD(TAG, "%s%s", prefix, buffer);
-                    break;
-                    case ESP_LOG_VERBOSE:
-                        ESP_LOGD(TAG, "%s%s", prefix, buffer);
-                    default:
-                    break;
-                }
-                err = ESP_OK;
-                free(buffer);
-            }
+    int32_t length = fgr_debug_panic_str_get(NULL);
+    if (length > 0) {
+        err = -ESP_ERR_NO_MEM;
+        char *buffer = malloc(length);
+        if (buffer) {
+            fgr_debug_panic_str_get(buffer);
+            debug_log(prefix, buffer, level);
+            err = ESP_OK;
+            free(buffer);
         }
+    }
+
+    return err;
+}
+
+/* ----------------------------------------------------------------
+ * PUBLIC FUNCTIONS: STACK OVERFLOW
+ * -------------------------------------------------------------- */
+
+// Stack overflow callback.
+void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
+{
+    strlcpy(g_debug_retained_ram.stack_overflow_task_name, pcTaskName,
+            sizeof(g_debug_retained_ram.stack_overflow_task_name));
+}
+
+// Get the name of a task that had a stack overflow.
+int32_t fgr_debug_stack_overflow_get(char *buffer)
+{
+    int32_t length = 0;
+
+    if (g_debug_retained_ram.magic == FGR_UTIL_RETAINED_RAM_MAGIC_MARKER) {
+        length = strlen(g_debug_retained_ram.stack_overflow_task_name);
+        if (buffer && (length > 0)) {
+            strlcpy(buffer, g_debug_retained_ram.stack_overflow_task_name,
+                    FGR_DEBUG_BACKTRACE_BUFFER_LENGTH);
+            g_debug_retained_ram.stack_overflow_task_name[0] = 0;
+        }
+    }
+
+    return length;
+}
+
+// Log the name of a task that had a stack overflow.
+int32_t fgr_debug_stack_overflow_log(char *prefix, esp_log_level_t level)
+{
+    int32_t err = -ESP_ERR_NOT_FOUND;
+    char buffer[FGR_DEBUG_TASK_NAME_MAX_LENGTH];
+
+    int32_t length = fgr_debug_stack_overflow_get(buffer);
+    if (length > 0) {
+        debug_log(prefix, buffer, level);
+        err = ESP_OK;
     }
 
     return err;

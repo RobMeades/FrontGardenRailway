@@ -121,6 +121,7 @@ typedef struct {
     QueueHandle_t queue_handle;
     buffer_t buffer;
     size_t queue_full_count;
+    fgr_msg_t *log_msg; // Used by task_log_cb
 } context_t;
 
 /* ----------------------------------------------------------------
@@ -193,6 +194,7 @@ static void clean_up()
 
         CONTEXT_LOCK(g_context.lock, "clean_up() log");
 
+        free(g_context.log_msg);
         g_context.connected = false;
 
         if (g_context.queue_handle) {
@@ -374,15 +376,18 @@ static void log_buffer_add(buffer_t *buffer,
 // IMPORTANT: context should be locked before this is called.
 static void log_replay_marker(const char *str, context_t *context)
 {
-    fgr_msg_t marker_msg;
+    fgr_msg_t *marker_msg = (fgr_msg_t *) malloc(sizeof(*marker_msg));
 
-    marker_msg.header.log.type = htons(((uint16_t) FGR_MSG_TYPE_LOG) << 12);
-    marker_msg.header.log.level = FGR_LOG_LEVEL_INFO;
-    marker_msg.body.length = htonl(strlen(str));
-    memcpy(marker_msg.body.contents, str, strlen(str));
+    if (marker_msg){
+        marker_msg->header.log.type = htons(((uint16_t) FGR_MSG_TYPE_LOG) << 12);
+        marker_msg->header.log.level = FGR_LOG_LEVEL_INFO;
+        marker_msg->body.length = htonl(strlen(str));
+        memcpy(marker_msg->body.contents, str, strlen(str));
 
-    fgr_socket_send_no_log(context->sock, &marker_msg,
-                           sizeof(marker_msg.header) + sizeof(marker_msg.body.length) + strlen(str), 0);
+        fgr_socket_send_no_log(context->sock, &marker_msg,
+                               sizeof(marker_msg->header) + sizeof(marker_msg->body.length) + strlen(str), 0);
+       free(marker_msg);
+    }
 }
 
 // Replay buffered messages from when we were disconnected.
@@ -391,7 +396,7 @@ static void log_buffer_replay(context_t *context,
                               char *marker_buffer, // Passed in just to save stack
                               size_t marker_buffer_length)
 {
-    fgr_msg_t replay_msg;
+    fgr_msg_t *replay_msg = (fgr_msg_t *) malloc(sizeof(*replay_msg));
     uint16_t count = 0;
     uint16_t sent = 0;
     uint16_t idx = 0;
@@ -399,7 +404,7 @@ static void log_buffer_replay(context_t *context,
     uint16_t cleanup_idx = 0;
     buffer_t *buffer = &context->buffer;
 
-    if (buffer->headers && !buffer->replay_active) {
+    if (buffer->headers && !buffer->replay_active && replay_msg) {
         buffer->replay_active = true;
         // All manual semaphore calls in this function,
         // since we need to give the semaphore as much
@@ -435,15 +440,15 @@ static void log_buffer_replay(context_t *context,
                     idx = 0;
                 }
 
-                replay_msg.header.log = *buffer->headers[idx];
+                replay_msg->header.log = *buffer->headers[idx];
                 uint32_t body_length_network = buffer->bodies[idx]->length;
                 size_t body_length = ntohl(body_length_network) + sizeof(body_length_network);
-                memcpy(&replay_msg.body, buffer->bodies[idx], body_length);
+                memcpy(&replay_msg->body, buffer->bodies[idx], body_length);
 
                 xSemaphoreGive(context->lock);
 
                 fgr_socket_send_no_log(context->sock, &replay_msg,
-                                       sizeof(replay_msg.header) + body_length, 0);
+                                       sizeof(replay_msg->header) + body_length, 0);
 
                 idx++;
                 sent++;
@@ -482,6 +487,8 @@ static void log_buffer_replay(context_t *context,
 
         buffer->replay_active = false;
     }
+
+    free(replay_msg);
 }
 
 /* ----------------------------------------------------------------
@@ -492,14 +499,13 @@ static void log_buffer_replay(context_t *context,
 static void task_log_cb(void *param)
 {
     context_t *context = (context_t *) param;
-    fgr_msg_t log_msg;
     queue_msg_t queue_msg;
     char marker_buffer[128];
 
     CONTEXT_LOCK(context->lock, "task_log_cb()");
 
     // Process all pending messages (non-blocking)
-    while (xQueueReceive(context->queue_handle, &queue_msg, 0) == pdTRUE) {
+    while (context->log_msg && (xQueueReceive(context->queue_handle, &queue_msg, 0) == pdTRUE)) {
 
         // Check if this is an FGR_MSG_TYPE_NULL message type (internal replay signal)
         uint16_t msg_type = ntohs(queue_msg.header.type);
@@ -511,10 +517,11 @@ static void task_log_cb(void *param)
             xSemaphoreTake(context->lock, portMAX_DELAY);
         } else {
             if (context->connected) {
-                log_msg.header.log = queue_msg.header;
-                memcpy(&log_msg.body, queue_msg.body, queue_msg.body_length);
-                if (fgr_socket_send_no_log(context->sock, &log_msg,
-                                            sizeof(log_msg.header) + queue_msg.body_length, 0) == ESP_OK) {
+                fgr_msg_t *log_msg = context->log_msg;
+                log_msg->header.log = queue_msg.header;
+                memcpy(&log_msg->body, queue_msg.body, queue_msg.body_length);
+                if (fgr_socket_send_no_log(context->sock, log_msg,
+                                           sizeof(log_msg->header) + queue_msg.body_length, 0) == ESP_OK) {
                     fgr_socket_channel_activity(&context->context_sock);
                 } else {
                     fgr_socket_channel_failed(&context->context_sock);
@@ -756,9 +763,13 @@ int32_t fgr_log_init(const char *server_ip, uint16_t port,
                             // Continue without it
                             err = ESP_OK;
                         }
-                        err = fgr_util_task_create(&task_log_cb, &g_context, "log",
-                                                   FGR_MSG_TASK_LOG_STACK_SIZE,
-                                                   5, &g_context.task_handle);
+                        err = -ESP_ERR_NO_MEM;
+                        g_context.log_msg = (fgr_msg_t *) malloc(sizeof(*g_context.log_msg));
+                        if (g_context.log_msg) {
+                            err = fgr_util_task_create(&task_log_cb, &g_context, "log",
+                                                       FGR_MSG_TASK_LOG_STACK_SIZE,
+                                                       5, &g_context.task_handle);
+                        }
                         if (err != ESP_OK) {
                             vQueueDelete(g_context.queue_handle);
                             g_context.queue_handle = NULL;

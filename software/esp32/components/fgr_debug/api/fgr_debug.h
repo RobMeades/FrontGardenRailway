@@ -182,6 +182,12 @@ extern "C" {
 #  define FGR_DEBUG_BACKTRACE_NUMBER_LENGTH 11
 #endif
 
+#ifndef FGR_DEBUG_TASK_NAME_MAX_LENGTH
+// The maximum length of a task name (for stack overflows) including
+// room for a null terminator.
+#  define FGR_DEBUG_TASK_NAME_MAX_LENGTH (16 + 1)
+#endif
+
 // The length of buffer required to encode the maximum length
 // backtrace, including room for a null terminator, enough space
 // for FGR_DEBUG_BACKTRACE_BUFFER_NUMBER_LENGTH characters N times
@@ -338,8 +344,9 @@ void fgr_debug_led_breathe_set(fgr_debug_colour_t colour);
  *                   the backtrace storage is emptied on return.
  * @return           if there have been one or more panics since
  *                   power-on, the number of uint32_t values
- *                   populated in backtrace, ESP_OK if there
- *                   have been no panics.
+ *                   that would be populated in backtrace if it
+ *                   were non-NULL, ESP_OK if there have been no
+ *                   panics.
  */
 int32_t fgr_debug_panic_get(uint32_t *backtrace);
 
@@ -351,19 +358,20 @@ int32_t fgr_debug_panic_get(uint32_t *backtrace);
  *
  * @param buffer a pointer to storage for up to
  *               FGR_DEBUG_BACKTRACE_BUFFER_LENGTH that will be
- *               populated with the backtrace string.; may be NULL,
+ *               populated with the backtrace string; may be NULL,
  *               in which case the backtrace is retained and you
  *               might use the return value to size your storage
  *               before calling this function again.  If non-NULL
  *               the backtrace storage is emptied on return.
  * @return       if there have been one or more panics since
- *               power-on, the number of characters populated in
- *               buffer (i.e. what strlen() would return), ESP_OK
- *               if there have been no panics.
+ *               power-on, the number of characters that would be
+ *               populated in buffer (i.e. what strlen() would
+ *               return) if it were not NULL, ESP_OK if there have
+ *               been no panics.
  */
 int32_t fgr_debug_panic_str_get(char *buffer);
 
-/** As fgr_debug_panic_str_get() but instead of returing a
+/** As fgr_debug_panic_str_get() but instead of returning a
  * string, logs the backtrace string (if present) to an ESP_LOGx()
  * macro with the given ESP-IDF log level.
  *
@@ -376,6 +384,42 @@ int32_t fgr_debug_panic_str_get(char *buffer);
  *               -ESP_ERR_NOT_FOUND if there was no backtrace.
  */
 int32_t fgr_debug_panic_log(char *prefix, esp_log_level_t level);
+
+/* ----------------------------------------------------------------
+ * FUNCTIONS: STACK OVERFLOW
+ * -------------------------------------------------------------- */
+
+/** Get the name of a task that had a stack overflow; you might call
+ * this at boot to see if the boot was actually a reboot resulting
+ * from a stack overflow.
+ *
+ * @param buffer a pointer to storage for up to
+ *               FGR_DEBUG_TASK_NAME_MAX_LENGTH characters that will
+ *               be populated with the task name; may be NULL,
+ *               in which case the task name is retained and you
+ *               might use the return value to size your storage
+ *               before calling this function again.  If non-NULL
+ *               the task name is emptied on return.
+ * @return       if a stack overflow occurred, the number
+ *               characters that would be populated in buffer
+ *               (i.e. what strlen() would return) if it were
+ *               non-NULL, ESP_OK if there was no stack overflow.
+ */
+int32_t fgr_debug_stack_overflow_get(char *buffer);
+
+/** As fgr_debug_stack_overflow_get() but instead of returning
+ * the task name string, logs the task name string (if present) to
+ * an ESP_LOGx() macro with the given ESP-IDF log level.
+ *
+ * @param prefix a prefix to put in front of the task name string;
+ *               may be NULL.
+ * @param level  the log level to log the string as.
+ * @return       UNLIKE fgr_debug_stack_overflow_get(), this
+ *               returns ESP_OK if a log message was sent, else
+ *               negative error code from esp_err_t and specifically
+ *               -ESP_ERR_NOT_FOUND if there was no stack overflow.
+ */
+int32_t fgr_debug_stack_overflow_log(char *prefix, esp_log_level_t level);
 
 /* ----------------------------------------------------------------
  * FUNCTIONS: MISC
