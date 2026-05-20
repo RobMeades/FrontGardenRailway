@@ -72,6 +72,12 @@ int32_t fgr_network_init(const char *ssid, const char *password,
  */
 void fgr_network_deinit();
 
+/** Determine if networking is connected.
+ *
+ * @return true if networking is connected, else false.
+ */
+bool fgr_network_is_connected();
+
 /** Return a hostname string from a URL.  The string is
  * returned in the given buffer and the string length
  * (i.e. what strlen() would return) is the return value.

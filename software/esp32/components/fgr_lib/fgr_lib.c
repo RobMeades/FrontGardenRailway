@@ -69,6 +69,12 @@ int32_t fgr_lib_init(const char *ota_server_cert_pem,
     // Allow us to feed the watchdog
     esp_task_wdt_add(NULL);
 
+#if defined(FGR_LIB_INITIALISATION_DELAY_SECONDS) && (FGR_LIB_INITIALISATION_DELAY_SECONDS > 0)
+    ESP_LOGI(TAG, "Pausing for %d second(s).", FGR_LIB_INITIALISATION_DELAY_SECONDS);
+    vTaskDelay(pdMS_TO_TICKS(FGR_LIB_INITIALISATION_DELAY_SECONDS * 1000));
+    esp_task_wdt_reset();
+#endif
+
     // Initialise utilities (needed for task creation)
     int32_t err = fgr_util_init();
 
@@ -123,6 +129,12 @@ int32_t fgr_lib_init(const char *ota_server_cert_pem,
                            CONFIG_FGR_LOG_PORT, FGR_LOG_LEVEL_INFO);
     }
 
+    // Now that we have a connection to a log server,
+    // if there was perviously a panic resulting in a backtrace, log it
+    if (err == ESP_OK) {
+        fgr_debug_panic_log("Backtrace from previous panic ", ESP_LOG_WARN);
+    }
+
     // Initialise messaging
     if (err == ESP_OK) {
         err = fgr_msg_init(CONFIG_FGR_NETWORK_CONTROLLER_IP_ADDRESS,
@@ -130,7 +142,16 @@ int32_t fgr_lib_init(const char *ota_server_cert_pem,
                            CONFIG_FGR_MSG_HEARTBEAT_SECONDS,
                            state_cb, cb_param);
         if (err == ESP_OK) {
+            // Allow msg access to RSSI (so that it is included in heartbeats)
             err = fgr_msg_rssi_cb(fgr_metrics_rssi_get, NULL);
+        }
+        if (err == ESP_OK) {
+            // Add the logging received message handler
+            err = fgr_msg_receive_handler_add(0, fgr_log_msg_receive_cb, NULL);
+        }
+        if (err == ESP_OK) {
+            // Add the debug received message handler
+            err = fgr_msg_receive_handler_add(0, fgr_debug_msg_receive_cb, NULL);
         }
     }
 

@@ -32,6 +32,13 @@ extern "C" {
  * COMPILE-TIME MACROS
  * -------------------------------------------------------------- */
 
+#ifndef FGR_LIB_INITIALISATION_DELAY_SECONDS
+// The Raspberry Pi access point can get upset if it sees a node
+// disconnect without clean-up and reconnect frequently,
+// therefore we pause at boot to make it happy.
+#  define FGR_LIB_INITIALISATION_DELAY_SECONDS 5
+#endif
+
 /* ----------------------------------------------------------------
  * TYPES
  * -------------------------------------------------------------- */

@@ -275,14 +275,6 @@ void app_main(void)
         err = fgr_msg_receive_start();
     }
     if (err == ESP_OK) {
-        // Add the logging received message handler
-        err = fgr_msg_receive_handler_add(0, fgr_log_msg_receive_cb, NULL);
-    }
-    if (err == ESP_OK) {
-        // Add the debug received message handler
-        err = fgr_msg_receive_handler_add(0, fgr_debug_msg_receive_cb, NULL);
-    }
-    if (err == ESP_OK) {
         // Add our received message handler
         err = fgr_msg_receive_handler_add(0, msg_receive_cb, &context);
     }

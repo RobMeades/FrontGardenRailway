@@ -83,6 +83,12 @@ extern "C" {
                                           }
 #endif
 
+
+#ifndef FGR_UTIL_RETAINED_RAM_MAGIC_MARKER
+// Marker to store in an int32_t indicating that a retained RAM area is populated.
+#  define FGR_UTIL_RETAINED_RAM_MAGIC_MARKER 0xdeadface
+#endif
+
 /* ----------------------------------------------------------------
  * TYPES
  * -------------------------------------------------------------- */

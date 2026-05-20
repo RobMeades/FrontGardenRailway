@@ -166,6 +166,28 @@ extern "C" {
 #  define FGR_DEBUG_LED_COLOUR_MSG_SENT FGR_DEBUG_LED_COLOUR_BLUE
 #endif
 
+#ifndef FGR_DEBUG_BACKTRACE_DEPTH_MAX
+// The maximim depth of a backtrace.
+#  define FGR_DEBUG_BACKTRACE_DEPTH_MAX 32
+#endif
+
+#ifndef FGR_DEBUG_BACKTRACE_FORMAT_STRING
+// The printf() format string for an item in a backtrace.
+#  define FGR_DEBUG_BACKTRACE_FORMAT_STRING "0x%08x "
+#endif
+
+#ifndef FGR_DEBUG_BACKTRACE_NUMBER_LENGTH
+// The length of buffer required for the format string
+// FGR_DEBUG_BACKTRACE_FORMAT_STRING **WITHOUT** a terminator.
+#  define FGR_DEBUG_BACKTRACE_NUMBER_LENGTH 11
+#endif
+
+// The length of buffer required to encode the maximum length
+// backtrace, including room for a null terminator, enough space
+// for FGR_DEBUG_BACKTRACE_BUFFER_NUMBER_LENGTH characters N times
+// plus the terminator.
+#define FGR_DEBUG_BACKTRACE_BUFFER_LENGTH ((FGR_DEBUG_BACKTRACE_DEPTH_MAX * FGR_DEBUG_BACKTRACE_NUMBER_LENGTH) + 1)
+
 /* ----------------------------------------------------------------
  * TYPES
  * -------------------------------------------------------------- */
@@ -280,6 +302,80 @@ void fgr_debug_led_on(void);
  * @param colour the LED colour.
  */
 void fgr_debug_led_breathe_set(fgr_debug_colour_t colour);
+
+/* ----------------------------------------------------------------
+ * FUNCTIONS: PANIC
+ * -------------------------------------------------------------- */
+
+/** Function to obtain any backtrace captured after a panic.
+ * For this to work, the main project CMakeLists.txt file
+ * must have:
+ *
+ * idf_build_set_property(LINK_OPTIONS "-Wl,--wrap=esp_panic_handler" APPEND)
+ *
+ * ...which will wrap calls to esp_panic_handler().
+ *
+ * You might call this function on boot and log the result so that,
+ * if you have the ELF file, the function call tree leading
+ * to the panic can be printed using the Espressif ESP-IDF tools:
+ *
+ * xtensa-esp-elf-addr2line -pfiaC -e my_binary.elf <backtrace in hex>
+ *
+ * e.g.:
+ *
+ * xtensa-esp-elf-addr2line -pfiaC -e test.elf 0x400D1234 0x400D5678 ...
+ *
+ *
+ * See also fgr_debug_panic_str_get() ,fgr_debug_panic_str_get()
+ * and fgr_debug_panic_log(.)
+ *
+ * @param backtrace  a pointer to storage for
+ *                   FGR_DEBUG_BACKTRACE_DEPTH_MAX uint32_t values
+ *                   that are the backtrace; may be NULL, in which
+ *                   case the backtrace is retained and you might
+ *                   use the return value to size your storage
+ *                   before calling this function again.  If non-NULL
+ *                   the backtrace storage is emptied on return.
+ * @return           if there have been one or more panics since
+ *                   power-on, the number of uint32_t values
+ *                   populated in backtrace, ESP_OK if there
+ *                   have been no panics.
+ */
+int32_t fgr_debug_panic_get(uint32_t *backtrace);
+
+/** As fgr_debug_panic_get() but populates a buffer with
+ * a string that can be passed straight to xtensa-esp-elf-addr2line,
+ * e.g. "0x400D1234 0x400D5678..."
+ *
+ * See also fgr_debug_panic_str_get();
+ *
+ * @param buffer a pointer to storage for up to
+ *               FGR_DEBUG_BACKTRACE_BUFFER_LENGTH that will be
+ *               populated with the backtrace string.; may be NULL,
+ *               in which case the backtrace is retained and you
+ *               might use the return value to size your storage
+ *               before calling this function again.  If non-NULL
+ *               the backtrace storage is emptied on return.
+ * @return       if there have been one or more panics since
+ *               power-on, the number of characters populated in
+ *               buffer (i.e. what strlen() would return), ESP_OK
+ *               if there have been no panics.
+ */
+int32_t fgr_debug_panic_str_get(char *buffer);
+
+/** As fgr_debug_panic_str_get() but instead of returing a
+ * string, logs the backtrace string (if present) to an ESP_LOGx()
+ * macro with the given ESP-IDF log level.
+ *
+ * @param prefix a prefix to put in front of the backtrace string;
+ *               may be NULL.
+ * @param level  the log level to log the string as.
+ * @return       UNLIKE THE OTHER backtrace calls, this one returns
+ *               ESP_OK if a log message was sent, else negative
+ *               error code from esp_err_t and specifically
+ *               -ESP_ERR_NOT_FOUND if there was no backtrace.
+ */
+int32_t fgr_debug_panic_log(char *prefix, esp_log_level_t level);
 
 /* ----------------------------------------------------------------
  * FUNCTIONS: MISC

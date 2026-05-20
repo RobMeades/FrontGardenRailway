@@ -90,24 +90,25 @@ LOG_LEVEL_NAMES = ['DEBUG', 'INFO', 'WARN', 'ERROR']
 
 
 # Metrics display configuration
+# Metrics display configuration
 METRICS_CONFIG = {
-    'lrb':     {'type': 'event', 'importance_condition': 'value > 0', 'order': 1},
-    'panic':   {'type': 'event', 'importance_condition': 'value > 0', 'order': 2},
-    'pwr':     {'type': 'event', 'importance_condition': 'value > 0', 'order': 3},
-    'w':       {'type': 'boolean_event', 'importance_condition': 'has_fail', 'order': 4},
-    'ip':      {'type': 'event', 'importance_condition': 'special_ip', 'order': 5},
-    'dbm':     {'type': 'exclude'},  # Already displayed in heartbeat
-    'ota_c':   {'type': 'boolean_event', 'importance_condition': 'has_fail', 'order': 7},
-    'ota_w':   {'type': 'boolean_event', 'importance_condition': 'has_fail', 'order': 8},
-    'log_c':   {'type': 'boolean_event', 'importance_condition': 'has_fail', 'order': 9},
-    'cnt_c':   {'type': 'boolean_event', 'importance_condition': 'has_fail', 'order': 10},
-    'cnt_tx':  {'type': 'boolean_event', 'importance_condition': 'has_fail', 'order': 11},
-    'cnt_rx':  {'type': 'event', 'importance_condition': 'has_fail', 'order': 12},
-    'ping_tx': {'type': 'boolean_event', 'importance_condition': 'has_fail', 'order': 13},
-    'ping_rx': {'type': 'event', 'importance_condition': 'has_fail', 'order': 14},
-    'nvs_w':   {'type': 'boolean_event', 'importance_condition': 'has_fail', 'order': 15},
-    'stack':   {'type': 'stack', 'importance_condition': 'first_value < 256', 'order': 16},
-    'heap':    {'type': 'simple', 'importance_threshold': 10000, 'order': 17}
+    'lrb':     {'type': 'event', 'importance_condition': 'value > 0', 'order': 1, 'display_format': 'hex'},
+    'panic':   {'type': 'event', 'importance_condition': 'value > 0', 'order': 2, 'display_format': 'decimal'},
+    'pwr':     {'type': 'event', 'importance_condition': 'value > 0', 'order': 3, 'display_format': 'decimal'},
+    'w':       {'type': 'boolean_event', 'importance_condition': 'has_fail', 'order': 4, 'display_format': 'decimal'},
+    'ip':      {'type': 'event', 'importance_condition': 'special_ip', 'order': 5, 'display_format': 'decimal'},
+    'dbm':     {'type': 'exclude', 'display_format': 'decimal'},
+    'ota_c':   {'type': 'boolean_event', 'importance_condition': 'has_fail', 'order': 7, 'display_format': 'decimal'},
+    'ota_w':   {'type': 'boolean_event', 'importance_condition': 'has_fail', 'order': 8, 'display_format': 'decimal'},
+    'log_c':   {'type': 'boolean_event', 'importance_condition': 'has_fail', 'order': 9, 'display_format': 'decimal'},
+    'cnt_c':   {'type': 'boolean_event', 'importance_condition': 'has_fail', 'order': 10, 'display_format': 'decimal'},
+    'cnt_tx':  {'type': 'boolean_event', 'importance_condition': 'has_fail', 'order': 11, 'display_format': 'decimal'},
+    'cnt_rx':  {'type': 'event', 'importance_condition': 'has_fail', 'order': 12, 'display_format': 'decimal'},
+    'ping_tx': {'type': 'boolean_event', 'importance_condition': 'has_fail', 'order': 13, 'display_format': 'decimal'},
+    'ping_rx': {'type': 'event', 'importance_condition': 'has_fail', 'order': 14, 'display_format': 'decimal'},
+    'nvs_w':   {'type': 'boolean_event', 'importance_condition': 'has_fail', 'order': 15, 'display_format': 'decimal'},
+    'stack':   {'type': 'stack', 'importance_condition': 'first_value < 256', 'order': 16, 'display_format': 'decimal'},
+    'heap':    {'type': 'simple', 'importance_threshold': 10000, 'order': 17, 'display_format': 'decimal'}
 }
 
 # Human-readable help text for metrics (for tooltips)
@@ -503,19 +504,36 @@ class WebController(Controller):
 
         return False
 
+    def _format_number(self, value: int, display_format: str) -> str:
+        """Format a number according to display format (hex or decimal)"""
+        if display_format == 'hex':
+            return f"0x{value:X}"
+        else:  # decimal (default)
+            return str(value)
+
     def _format_simple_metric(self, key: str, value: int, is_important: bool) -> str:
         """Format a simple metric (just key: value)"""
+        # Get display format from config
+        config = METRICS_CONFIG.get(key, {})
+        display_format = config.get('display_format', 'decimal')
+
         help_text = METRICS_HELP.get(key, '')
+        formatted_value = self._format_number(value, display_format)
+
         if is_important:
-            return f'<span class="metric-important" title="{help_text}">{key}: {value}</span>'
+            return f'<span class="metric-important" title="{help_text}">{key}: {formatted_value}</span>'
         else:
-            return f'<span class="metric-normal" title="{help_text}">{key}: {value}</span>'
+            return f'<span class="metric-normal" title="{help_text}">{key}: {formatted_value}</span>'
 
     def _format_event_metric(self, key: str, data: dict, is_important: bool) -> Optional[str]:
         """Format an event metric (single timestamp counter, optional value)"""
         # Skip if count is zero
         if data.get('n', 0) == 0:
             return None
+
+        # Get display format from config
+        config = METRICS_CONFIG.get(key, {})
+        display_format = config.get('display_format', 'decimal')
 
         # Determine timestamp type (tb or tp)
         timestamp_type = 'tb' if 'tb' in data else 'tp' if 'tp' in data else None
@@ -531,7 +549,8 @@ class WebController(Controller):
         help_text = METRICS_HELP.get(key, '')
 
         if value != 0:
-            display = f"{duration} n {count} v {value}"
+            formatted_value = self._format_number(value, display_format)
+            display = f"{duration} n {count} v {formatted_value}"
         else:
             display = f"{duration} n {count}"
 
@@ -542,6 +561,10 @@ class WebController(Controller):
 
     def _format_boolean_event_metric(self, key: str, data: dict, is_important: bool) -> Optional[str]:
         """Format a boolean event metric (+ and/or - events)"""
+        # Get display format from config
+        config = METRICS_CONFIG.get(key, {})
+        display_format = config.get('display_format', 'decimal')
+
         parts = []
 
         # Format success events (+)
@@ -557,7 +580,8 @@ class WebController(Controller):
                 count = plus_data.get('n', 0)
                 value = plus_data.get('v', 0)
                 if value != 0:
-                    parts.append(f"+ {duration} n {count} v {value}")
+                    formatted_value = self._format_number(value, display_format)
+                    parts.append(f"+ {duration} n {count} v {formatted_value}")
                 else:
                     parts.append(f"+ {duration} n {count}")
 
@@ -574,7 +598,8 @@ class WebController(Controller):
                 count = minus_data.get('n', 0)
                 value = minus_data.get('v', 0)
                 if value != 0:
-                    parts.append(f"- {duration} n {count} v {value}")
+                    formatted_value = self._format_number(value, display_format)
+                    parts.append(f"- {duration} n {count} v {formatted_value}")
                 else:
                     parts.append(f"- {duration} n {count}")
 

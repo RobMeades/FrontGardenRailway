@@ -35,6 +35,7 @@
 
 #include "fgr_util.h"
 #include "fgr_time.h"
+#include "fgr_network.h"
 #include "fgr_metrics.h"
 
 // Required for FGR_LOG_STRING_MAX_LEN
@@ -62,9 +63,6 @@
 // data in retained RAM can be reset.
 #  define FGR_METRICS_STRUCTURE_VERSION 1
 #endif
-
-// Magic number to check state of retained RAM.
-#define RETAINED_RAM_MAGIC   0xabcddcba
 
 /* ----------------------------------------------------------------
  * TYPES
@@ -403,7 +401,7 @@ static void update_rssi(buffer_rssi_t *buffer_rssi,
                         fgr_metrics_storage_t *metrics_list,
                         fgr_metrics_t metric)
 {
-    if (buffer_rssi && metrics_list) {
+    if (buffer_rssi && metrics_list && fgr_network_is_connected()) {
         // Shift readings (from highest index down)
         for (int32_t x = buffer_rssi->count - 1; x >= 0; x--) {
             buffer_rssi->readings[x + 1] = buffer_rssi->readings[x];
@@ -818,7 +816,7 @@ int32_t fgr_metrics_init(fgr_metrics_report_cb_t cb,
             CONTEXT_LOCK(g_context.lock, "fgr_metrics_init()");
 
             g_context.metrics_list = g_metrics_retained_ram.metrics_list;
-            if ((g_metrics_retained_ram.magic == RETAINED_RAM_MAGIC) &&
+            if ((g_metrics_retained_ram.magic == FGR_UTIL_RETAINED_RAM_MAGIC_MARKER) &&
                 (g_metrics_retained_ram.structure_version == FGR_METRICS_STRUCTURE_VERSION)) {
                 for (size_t x = 0; x < FGR_UTIL_ARRAY_LENGTH(g_metric_reset_at_boot); x++) {
                     if (g_metric_reset_at_boot[x]) {
@@ -827,7 +825,7 @@ int32_t fgr_metrics_init(fgr_metrics_report_cb_t cb,
                 }
             } else {
                 memset(&g_metrics_retained_ram, 0, sizeof(g_metrics_retained_ram));
-                g_metrics_retained_ram.magic = RETAINED_RAM_MAGIC;
+                g_metrics_retained_ram.magic = FGR_UTIL_RETAINED_RAM_MAGIC_MARKER;
                 g_metrics_retained_ram.structure_version = FGR_METRICS_STRUCTURE_VERSION;
             }
 

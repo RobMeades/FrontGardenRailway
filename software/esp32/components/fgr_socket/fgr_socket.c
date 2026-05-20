@@ -184,9 +184,6 @@ static void task_maintain_cb(void *param)
                             context_channel->last_activity_time_us = esp_timer_get_time();
                             ESP_LOGI(TAG, "Reconnected after %" PRId32 " ms.", elapsed_ms);
                         } else {
-                            if (err == -ESP_ERR_NOT_FINISHED) {
-                                ESP_LOGE(TAG, "Connect timeout after %" PRId32 " ms", elapsed_ms);
-                            }
                             fgr_socket_connect_stop(&context_connect);
                             fgr_socket_destroy(&context_channel->sock);
                         }

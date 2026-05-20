@@ -40,9 +40,6 @@
  // Logging prefix
  #define TAG "time"
 
-// Magic number to check state of retained RAM.
-#define RETAINED_RAM_MAGIC   0xbadfacee
-
 /* ----------------------------------------------------------------
  * TYPES
  * -------------------------------------------------------------- */
@@ -70,9 +67,9 @@ static void time_sync_cb(struct timeval *tv)
     char buffer[64];
     struct tm local;
 
-    if (g_power_on_time.magic != RETAINED_RAM_MAGIC) {
+    if (g_power_on_time.magic != FGR_UTIL_RETAINED_RAM_MAGIC_MARKER) {
         g_power_on_time.utc = tv->tv_sec - fgr_time_since_boot();
-        g_power_on_time.magic = RETAINED_RAM_MAGIC;
+        g_power_on_time.magic = FGR_UTIL_RETAINED_RAM_MAGIC_MARKER;
     }
 
     localtime_r(&tv->tv_sec, &local);
@@ -127,7 +124,7 @@ time_t fgr_time_since_power_on()
     time_t time = -ESP_ERR_NOT_FOUND;
     time_t utc = fgr_time_utc();
 
-    if ((g_power_on_time.magic == RETAINED_RAM_MAGIC) && (utc >= 0)) {
+    if ((g_power_on_time.magic == FGR_UTIL_RETAINED_RAM_MAGIC_MARKER) && (utc >= 0)) {
         time = utc - g_power_on_time.utc;
     }
 
@@ -139,7 +136,7 @@ time_t fgr_time_utc()
 {
     time_t now = 0;
     time(&now);
-    return (g_power_on_time.magic == RETAINED_RAM_MAGIC) ? now : -ESP_ERR_NOT_FOUND;
+    return (g_power_on_time.magic == FGR_UTIL_RETAINED_RAM_MAGIC_MARKER) ? now : -ESP_ERR_NOT_FOUND;
 }
 
 // Get the local time.

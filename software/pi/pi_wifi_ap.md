@@ -78,6 +78,35 @@ I found the Pi Zero W on-board Wifi to be far too unstable, see these posts for 
 
 Hence I switched to a Pi Zero I happened to have spare (could also use a Pi Zero W and switch to `wlan1`) and plugged in an AR9271 USB Wifi dongle: be careful which you choose!  the TPLink AC600 (`rtl8811au` chipset) looks good but only one of the three Linux drivers (which you must build yourself for Linux kernel versions > 6.14 (Trixie is 6.12)) I tried worked and the working one did not support transmission of TIM information elements which are required for a standards-compliant Wifi AP (ESP32 refused to connect).  The AR9271 dongle is huge but is known to work with Linux which has built-in drivers for it.  It _will_ extend the restart time of the Network Manager service to several minutes, but what can you do...
 
+# Broadcomm Driver Instability
+There appears to be [a\[nother\] bug](https://github.com/raspberrypi/linux/issues/6975) in the `brcmfmac` driver, in that the driver holds onto a station that has disconnected without notice for anywhere from 27 to 90+ seconds. No matter how many times the device boots up within this time, if it sends an association frame while that stale kernel window is active, the Pi completely ignores it.  Because the Pi ignores the frames indefinitely while the old session decays, the device connection times out, resulting in a persistent Wifi 201 error.  More details here:
+
+To fix this, Google Gemini wrote me a bash script `clear_node_ghosts.sh` which scans the output of `iw dev wlan0 station dump` every second and deletes any inactive MAC addresses.  You will need to `sudo chmod +x clear_node_ghosts.sh` to make the script executable and then `sudo nano /etc/systemd/system/clear_node_ghosts.service`, paste the following in:
+
+```
+[Unit]
+Description=Force-Clear Ghost Node Connections from Station Table
+After=NetworkManager.service
+
+[Service]
+Type=simple
+ExecStart=/home/<your home directory name>/FrontGardenRailway/software/pi/clear_node_ghosts.sh
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+```
+
+...then:
+
+```
+sudo systemctl daemon-reload
+sudo systemctl start clear_node_ghosts
+sudo systemctl enable clear_node_ghosts
+```
+
+...to run it and have it start at boot.
+
 # HTTPS Server Setup
 All of the ESP32 nodes will want to make an HTTPS connection to the access point to download updates to their programs; this is what the Python script `https_server.py` does.  To get it running with the ESP32s, connect a serial terminal to the Pi and do the following:
 

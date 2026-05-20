@@ -1,5 +1,5 @@
 # Debug utilities for the front garden railway
 idf_component_register(SRCS "fgr_debug.c"
                        INCLUDE_DIRS "api"
-                       PRIV_REQUIRES esp_driver_gpio esp_driver_spi fgr_util fgr_nvs fgr_msg)
+                       PRIV_REQUIRES esp_driver_gpio esp_driver_spi esp_system fgr_util fgr_nvs fgr_msg)
 target_compile_options(${COMPONENT_LIB} PRIVATE -Wall -Wextra -Werror)
