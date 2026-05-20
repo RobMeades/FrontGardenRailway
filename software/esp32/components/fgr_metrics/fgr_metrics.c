@@ -293,7 +293,7 @@ static int32_t metric_event_set(fgr_metrics_storage_t *metrics_list,
         fgr_metrics_event_t *event = &(*(metrics_list + metric)).event;
         event->count++;
         metric_set_time(metrics_list, metric, &event->time);
-        event->amount += amount;
+        event->amount = amount;
         err = ESP_OK;
     }
 
@@ -329,7 +329,7 @@ static int32_t metric_event_bool_set(fgr_metrics_storage_t *metrics_list,
         }
         event->count++;
         metric_set_time(metrics_list, metric, &event->time);
-        event->amount += amount;
+        event->amount = amount;
         err = ESP_OK;
     }
 
