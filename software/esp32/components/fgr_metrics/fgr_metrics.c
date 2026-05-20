@@ -1027,7 +1027,7 @@ int32_t fgr_metrics_simple_get(fgr_metrics_t metric, int32_t *value)
     return err;
 }
 
-// Indicate that an event has occurred.
+// Indicate that an event has occurred and set its amount
 int32_t fgr_metrics_event_set(fgr_metrics_t metric, int32_t amount)
 {
     int32_t err = -ESP_ERR_INVALID_STATE;
@@ -1036,6 +1036,26 @@ int32_t fgr_metrics_event_set(fgr_metrics_t metric, int32_t amount)
 
         CONTEXT_LOCK(g_context.lock, "fgr_metrics_event_set()");
         err = metric_event_set(g_context.metrics_list, metric, amount);
+        CONTEXT_UNLOCK(g_context.lock, "fgr_metrics_event_set()");
+    }
+
+    return err;
+}
+
+// Indicate that an event has occurred and add to its amount
+int32_t fgr_metrics_event_add(fgr_metrics_t metric, int32_t amount)
+{
+    int32_t err = -ESP_ERR_INVALID_STATE;
+
+    if (g_context.lock && g_context.metrics_list) {
+
+        CONTEXT_LOCK(g_context.lock, "fgr_metrics_event_set()");
+        fgr_metrics_event_t event = {0};
+        err = metric_event_get(g_context.metrics_list, metric, &event);
+        if (err == ESP_OK) {
+            amount += event.amount;
+            err = metric_event_set(g_context.metrics_list, metric, amount);
+        }
         CONTEXT_UNLOCK(g_context.lock, "fgr_metrics_event_set()");
     }
 
@@ -1058,7 +1078,7 @@ int32_t fgr_metrics_event_get(fgr_metrics_t metric,
     return err;
 }
 
-// Indicate that a Boolean event has occurred.
+// Indicate that a Boolean event has occurred and set its amount.
 int32_t fgr_metrics_event_bool_set(fgr_metrics_t metric, bool value,
                                    int32_t amount)
 {
@@ -1069,6 +1089,28 @@ int32_t fgr_metrics_event_bool_set(fgr_metrics_t metric, bool value,
         CONTEXT_LOCK(g_context.lock, "fgr_metrics_event_bool_set()");
         err = metric_event_bool_set(g_context.metrics_list, metric, value, amount);
         CONTEXT_UNLOCK(g_context.lock, "fgr_metrics_event_bool_set()");
+    }
+
+    return err;
+}
+
+// Indicate that a Boolean event has occurred and add to its amount.
+int32_t fgr_metrics_event_bool_add(fgr_metrics_t metric, bool value,
+                                   int32_t amount)
+{
+    int32_t err = -ESP_ERR_INVALID_STATE;
+
+    if (g_context.lock && g_context.metrics_list) {
+
+        CONTEXT_LOCK(g_context.lock, "fgr_metrics_event_bool_add()");
+        fgr_metrics_event_bool_t event_bool = {0};
+        err = metric_event_bool_get(g_context.metrics_list, metric, &event_bool);
+        if (err == ESP_OK) {
+            amount += event_bool.event[value].amount;
+            err = metric_event_bool_set(g_context.metrics_list, metric,
+                                        value, amount);
+        }
+        CONTEXT_UNLOCK(g_context.lock, "fgr_metrics_event_bool_add()");
     }
 
     return err;

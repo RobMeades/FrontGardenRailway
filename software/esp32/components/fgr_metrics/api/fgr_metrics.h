@@ -284,7 +284,7 @@ int32_t fgr_metrics_simple_add(fgr_metrics_t metric, int32_t value);
  */
 int32_t fgr_metrics_simple_get(fgr_metrics_t metric, int32_t *value);
 
-/** Indicate that an event has occurred.
+/** Indicate that an event has occurred and set an assoicated amount.
  *
  * @param metric the event metric to set.
  * @param amount an amount associated with the event: use zero
@@ -292,6 +292,15 @@ int32_t fgr_metrics_simple_get(fgr_metrics_t metric, int32_t *value);
  * @return       ESP_OK on success, else a negative value from esp_err_t.
  */
 int32_t fgr_metrics_event_set(fgr_metrics_t metric, int32_t amount);
+
+/** Indicate that an event has occurred and add to an associated amount.
+ *
+ * @param metric the event metric to set.
+ * @param amount an amount that will be added to any previous amount
+ *               associated with the event.
+ * @return       ESP_OK on success, else a negative value from esp_err_t.
+ */
+int32_t fgr_metrics_event_add(fgr_metrics_t metric, int32_t amount);
 
 /** Get an event metric.
  *
@@ -303,7 +312,8 @@ int32_t fgr_metrics_event_set(fgr_metrics_t metric, int32_t amount);
 int32_t fgr_metrics_event_get(fgr_metrics_t metric,
                               fgr_metrics_event_t *value);
 
-/** Indicate that a Boolean event has occurred.
+/** Indicate that a Boolean event has occurred and set an associated
+ * amount.
  *
  * @param metric the Boolean event metric to set.
  * @param value  whether the Boolean event was true or false.
@@ -312,6 +322,18 @@ int32_t fgr_metrics_event_get(fgr_metrics_t metric,
  * @return       ESP_OK on success, else a negative value from esp_err_t.
  */
 int32_t fgr_metrics_event_bool_set(fgr_metrics_t metric, bool value,
+                                   int32_t amount);
+
+/** Indicate that a Boolean event has occurred and and add to an associated
+ * amount.
+ *
+ * @param metric the Boolean event metric to set.
+ * @param value  whether the Boolean event was true or false.
+ * @param amount an amount that will be added to any previous amount
+ *               associated with the event.
+ * @return       ESP_OK on success, else a negative value from esp_err_t.
+ */
+int32_t fgr_metrics_event_bool_add(fgr_metrics_t metric, bool value,
                                    int32_t amount);
 
 /** Get a Boolean event metric.

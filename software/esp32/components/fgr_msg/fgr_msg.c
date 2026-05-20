@@ -354,7 +354,7 @@ static int32_t send_msg_locked(context_t *context,
     } else {
         fgr_socket_channel_failed(&context->context_sock);
     }
-    fgr_metrics_event_bool_set(FGR_METRIC_EVENT_BOOL_CONTROLLER_SOCKET_TX, err == ESP_OK, total_bytes);
+    fgr_metrics_event_bool_add(FGR_METRIC_EVENT_BOOL_CONTROLLER_SOCKET_TX, err == ESP_OK, total_bytes);
 
     return err;
 }
@@ -504,7 +504,7 @@ static void receive_cb(void *buffer, size_t length, void *param)
 
     if (context->lock && buffer && (length > 0)) {
 
-        fgr_metrics_event_set(FGR_METRIC_EVENT_CONTROLLER_SOCKET_RX, length);
+        fgr_metrics_event_add(FGR_METRIC_EVENT_CONTROLLER_SOCKET_RX, length);
 
         CONTEXT_LOCK(context->lock, "receive_cb()");
         fgr_msg_t *msg = NULL;
