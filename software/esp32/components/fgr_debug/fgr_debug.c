@@ -37,6 +37,9 @@
 #include "driver/spi_common.h"
 #include "driver/spi_master.h"
 #include "esp_attr.h"
+#include "esp_core_dump.h"
+#include "esp_partition.h"
+#include "mbedtls/base64.h"
 
 #include "fgr_util.h"
 #include "fgr_nvs.h"
@@ -151,6 +154,25 @@ void __wrap_esp_panic_handler(void *info) __attribute__((used));
 
 // The buffer size (in bytes) to hold a WS2812 RGB/GRB transaction
 #define SPI_TRANSACTION_BUFFER_LENGTH_BYTES ((SPI_BITS_PER_WS2812_TRANSACTION / 8) + 1)
+
+#ifndef CORE_DUMP_BASE64_CHUNK_LENGTH
+// The maximum length of chunk of a core dump to base64 encode; the
+// raw chunk length before base64 encoding will be 3/4 of this size.
+#  define CORE_DUMP_BASE64_CHUNK_LENGTH 512
+#endif
+
+// The amount of core dump raw data that can be base64 encoded
+// into CORE_DUMP_BASE64_CHUNK_LENGTH.
+#define CORE_DUMP_CHUNK_LENGTH (CORE_DUMP_BASE64_CHUNK_LENGTH * 3 / 4)
+
+// The base64 chunk length must be a multiple of four to
+// accommodate base64 cleanly.
+#if CORE_DUMP_BASE64_CHUNK_LENGTH % 4 != 0
+#  error CORE_DUMP_CHUNK_LENGTH must be such that CORE_DUMP_BASE64_CHUNK_LENGTH is a multiple of four
+#endif
+
+// mbedTLS requires room for a null terminator in the buffer
+#define CORE_DUMP_BASE64_CHUNK_LENGTH_MBEDTLS (CORE_DUMP_BASE64_CHUNK_LENGTH + 1)
 
 /* ----------------------------------------------------------------
  * TYPES
@@ -680,7 +702,7 @@ static void task_led_cb(void *param)
  * -------------------------------------------------------------- */
 
 // Set whether the LED is masked off or not.
-void led_masked_off(context_t *context, bool masked)
+static void led_masked_off(context_t *context, bool masked)
 {
     if (context->lock) {
 
@@ -692,7 +714,7 @@ void led_masked_off(context_t *context, bool masked)
 }
 
 // Set whether LED "breathing" is enabled.
-void led_breathe_enabled(context_t *context, bool enabled)
+static void led_breathe_enabled(context_t *context, bool enabled)
 {
     if (context->lock) {
 
@@ -720,29 +742,33 @@ void led_breathe_enabled(context_t *context, bool enabled)
     }
 }
 
-// Log a debug string, used by the panic and stack overflow
-// reporting functions.
-void debug_log(char *prefix, char *string, esp_log_level_t level)
+// Log a debug string, used by the panic, stack overflow
+// and core dump reporting functions.
+static void debug_log(const char *tag, const char *prefix,
+                      const char *string, esp_log_level_t level)
 {
     if (string && (level > ESP_LOG_NONE)) {
+        if (!tag) {
+            tag = TAG;
+        }
         if (!prefix) {
             prefix = "";
         }
         switch (level) {
             case ESP_LOG_ERROR:
-                ESP_LOGE(TAG, "%s%s", prefix, string);
+                ESP_LOGE(tag, "%s%s", prefix, string);
             break;
             case ESP_LOG_WARN:
-                ESP_LOGW(TAG, "%s%s", prefix, string);
+                ESP_LOGW(tag, "%s%s", prefix, string);
             break;
             case ESP_LOG_INFO:
-                ESP_LOGI(TAG, "%s%s", prefix, string);
+                ESP_LOGI(tag, "%s%s", prefix, string);
             break;
             case ESP_LOG_DEBUG:
-                ESP_LOGD(TAG, "%s%s", prefix, string);
+                ESP_LOGD(tag, "%s%s", prefix, string);
             break;
             case ESP_LOG_VERBOSE:
-                ESP_LOGD(TAG, "%s%s", prefix, string);
+                ESP_LOGD(tag, "%s%s", prefix, string);
             default:
             break;
         }
@@ -1098,9 +1124,10 @@ int32_t fgr_debug_panic_str_get(char *buffer)
 }
 
 // Log a backtrace.
-int32_t fgr_debug_panic_log(char *prefix, esp_log_level_t level)
+int32_t fgr_debug_panic_log(const char *tag, const char *prefix,
+                            esp_log_level_t level)
 {
-    int32_t err = -ESP_ERR_NOT_FOUND;
+    int32_t err = ESP_OK;
 
     int32_t length = fgr_debug_panic_str_get(NULL);
     if (length > 0) {
@@ -1108,8 +1135,8 @@ int32_t fgr_debug_panic_log(char *prefix, esp_log_level_t level)
         char *buffer = malloc(length);
         if (buffer) {
             fgr_debug_panic_str_get(buffer);
-            debug_log(prefix, buffer, level);
-            err = ESP_OK;
+            debug_log(tag, prefix, buffer, level);
+            err = 1;
             free(buffer);
         }
     }
@@ -1146,15 +1173,91 @@ int32_t fgr_debug_stack_overflow_get(char *buffer)
 }
 
 // Log the name of a task that had a stack overflow.
-int32_t fgr_debug_stack_overflow_log(char *prefix, esp_log_level_t level)
+int32_t fgr_debug_stack_overflow_log(const char *tag, const char *prefix,
+                                     esp_log_level_t level)
 {
-    int32_t err = -ESP_ERR_NOT_FOUND;
+    int32_t err = ESP_OK;
     char buffer[FGR_DEBUG_TASK_NAME_MAX_LENGTH];
 
     int32_t length = fgr_debug_stack_overflow_get(buffer);
     if (length > 0) {
-        debug_log(prefix, buffer, level);
-        err = ESP_OK;
+        debug_log(tag, prefix, buffer, level);
+        err = 1;
+    }
+
+    return err;
+}
+
+/* ----------------------------------------------------------------
+ * PUBLIC FUNCTIONS: CORE DUMP
+ * -------------------------------------------------------------- */
+
+// Send a core dump to logging.
+int32_t fgr_debug_core_dump_get(const char *tag, esp_log_level_t level)
+{
+    int32_t err = ESP_OK;
+    size_t address = 0;
+    size_t length = 0;
+
+    // 1. Locate the physical image details in flash
+    if (esp_core_dump_image_get(&address, &length) == ESP_OK && length > 0) {
+        err = -ESP_ERR_NOT_FOUND;
+
+        // 2. Fetch the corresponding partition struct
+        const esp_partition_t* partition = esp_partition_find_first(ESP_PARTITION_TYPE_DATA,
+                                                                    ESP_PARTITION_SUBTYPE_DATA_COREDUMP,
+                                                                    NULL);
+        if (partition) {
+            err = -ESP_ERR_NO_MEM;
+            if (!tag) {
+                tag = TAG;
+            }
+
+            uint8_t *buffer = (uint8_t *) malloc(CORE_DUMP_CHUNK_LENGTH);
+            char *base64 = (char *) malloc(CORE_DUMP_BASE64_CHUNK_LENGTH_MBEDTLS);
+
+            if (buffer && base64) {
+                err = 1; // Core dump successfully located and ready
+                size_t count = 0;
+
+                // Calculate the true offset inside the partition where the image begins
+                size_t offset = address - partition->address;
+
+                debug_log(tag, NULL, "================ CORE DUMP START ================", level);
+
+                int32_t err = 0;
+                while ((count < length) && (err == 0)) {
+                    size_t read = length - count;
+                    if (read > CORE_DUMP_CHUNK_LENGTH) {
+                        read = CORE_DUMP_CHUNK_LENGTH;
+                    }
+
+                    // Read data relative to the partition boundary
+                    esp_partition_read(partition, offset + count, buffer, read);
+
+                    // Process base64 chunk
+                    size_t written = 0;
+                    err = mbedtls_base64_encode((unsigned char *) base64,
+                                                CORE_DUMP_BASE64_CHUNK_LENGTH_MBEDTLS,
+                                                &written, buffer, read);
+                    if (err == 0) {
+                        debug_log(tag, NULL, base64, level);
+                    } else {
+                        ESP_LOGE(TAG, "Base64 encoding failed with error %d", err);
+                        err = -ESP_FAIL;
+                    }
+                    count += read;
+                }
+
+                debug_log(tag, NULL, "================ CORE DUMP END ================", level);
+            }
+
+            // Always clear the flag so we do not loop panics dynamically on boot
+            esp_core_dump_image_erase();
+
+            free(base64);
+            free(buffer);
+        }
     }
 
     return err;

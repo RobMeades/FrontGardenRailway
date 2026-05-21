@@ -47,7 +47,9 @@ extern "C" {
  * FUNCTIONS
  * -------------------------------------------------------------- */
 
-/** Initialise all libraries.
+/** Initialise all libraries.  It is always safe to call this at any
+ * time.  Note that there will be a delay of
+ * FGR_LIB_INITIALISATION_DELAY_SECONDS before acting.
  *
  * Note: this will also enable the task watchdog.
  *
@@ -82,7 +84,7 @@ int32_t fgr_lib_init(const char *ota_server_cert_pem,
                      fgr_msg_state_cb_t state_cb, fgr_msg_send_cb_t send_cb,
                      void *cb_param);
 
-/** Deinitialise all libraries.
+/** Deinitialise all libraries.  It is always safe to call this at any time.
  */
 void fgr_lib_deinit();
 

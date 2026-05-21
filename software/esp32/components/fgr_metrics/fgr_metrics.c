@@ -813,37 +813,55 @@ int32_t fgr_metrics_init(fgr_metrics_report_cb_t cb,
 
         if (g_context.lock) {
 
+            err = ESP_OK;
+
             CONTEXT_LOCK(g_context.lock, "fgr_metrics_init()");
 
-            g_context.metrics_list = g_metrics_retained_ram.metrics_list;
-            if ((g_metrics_retained_ram.magic == FGR_UTIL_RETAINED_RAM_MAGIC_MARKER) &&
-                (g_metrics_retained_ram.structure_version == FGR_METRICS_STRUCTURE_VERSION)) {
-                for (size_t x = 0; x < FGR_UTIL_ARRAY_LENGTH(g_metric_reset_at_boot); x++) {
-                    if (g_metric_reset_at_boot[x]) {
-                        metric_reset(g_context.metrics_list, x);
+            if (!g_context.task_handle) {
+                g_context.metrics_list = g_metrics_retained_ram.metrics_list;
+                if ((g_metrics_retained_ram.magic == FGR_UTIL_RETAINED_RAM_MAGIC_MARKER) &&
+                    (g_metrics_retained_ram.structure_version == FGR_METRICS_STRUCTURE_VERSION)) {
+                    for (size_t x = 0; x < FGR_UTIL_ARRAY_LENGTH(g_metric_reset_at_boot); x++) {
+                        if (g_metric_reset_at_boot[x]) {
+                            metric_reset(g_context.metrics_list, x);
+                        }
                     }
+                } else {
+                    memset(&g_metrics_retained_ram, 0, sizeof(g_metrics_retained_ram));
+                    g_metrics_retained_ram.magic = FGR_UTIL_RETAINED_RAM_MAGIC_MARKER;
+                    g_metrics_retained_ram.structure_version = FGR_METRICS_STRUCTURE_VERSION;
                 }
-            } else {
-                memset(&g_metrics_retained_ram, 0, sizeof(g_metrics_retained_ram));
-                g_metrics_retained_ram.magic = FGR_UTIL_RETAINED_RAM_MAGIC_MARKER;
-                g_metrics_retained_ram.structure_version = FGR_METRICS_STRUCTURE_VERSION;
+
+                reset_reason_set(g_context.metrics_list);
+
+                g_context.cb = cb;
+                g_context.cb_param = cb_param;
+
+                // Start the metrics task
+                err = fgr_util_task_create(&task_metrics_cb, &g_context, "metrics",
+                                           FGR_METRICS_TASK_STACK_SIZE,
+                                           3, &g_context.task_handle);
             }
-
-            reset_reason_set(g_context.metrics_list);
-
-            g_context.cb = cb;
-            g_context.cb_param = cb_param;
-
-            // Start the metrics task
-            err = fgr_util_task_create(&task_metrics_cb, &g_context, "metrics",
-                                       FGR_METRICS_TASK_STACK_SIZE,
-                                       3, &g_context.task_handle);
 
             CONTEXT_UNLOCK(g_context.lock, "fgr_metrics_init()");
         }
     }
 
     return err;
+}
+
+// Deinitialise metrics.
+void fgr_metrics_deinit()
+{
+    if (g_context.lock) {
+
+        CONTEXT_LOCK(g_context.lock, "fgr_metrics_deinit()");
+        g_context.cb = NULL;
+        g_context.cb_param = NULL;
+        // Leave everything else alone so that we can continue
+        // to capture metrics during deinitialisation
+        CONTEXT_UNLOCK(g_context.lock, "fgr_metrics_deinit()");
+    }
 }
 
 // Callback to log all of the metrics as an ESP_LOGI message.
@@ -880,20 +898,6 @@ void fgr_metrics_log_cb(fgr_metrics_storage_t *list, size_t length,
             }
             free(buffer);
         }
-    }
-}
-
-// Deinitialise metrics.
-void fgr_metrics_deinit()
-{
-    if (g_context.lock) {
-
-        CONTEXT_LOCK(g_context.lock, "fgr_metrics_deinit()");
-        g_context.cb = NULL;
-        g_context.cb_param = NULL;
-        // Leave everything else alone so that we can continue
-        // to capture metrics during deinitialisation
-        CONTEXT_UNLOCK(g_context.lock, "fgr_metrics_deinit()");
     }
 }
 

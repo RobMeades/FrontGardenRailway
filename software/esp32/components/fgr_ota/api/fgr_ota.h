@@ -43,7 +43,7 @@ extern "C" {
   * -------------------------------------------------------------- */
 
 /** Initialise OTA; fgr_nvs_init() MUST have been called first for
- * this to work.
+ * this to work.  This function should be called ONCE at start of day.
  *
  * @return  ESP_OK on success, else a negative value from esp_err_t.
  */

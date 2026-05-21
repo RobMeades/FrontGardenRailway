@@ -152,7 +152,8 @@ static inline bool fgr_util_is_valid_ptr_to_ptr(void **pptr, const char *tag,
  * FUNCTIONS
  * -------------------------------------------------------------- */
 
-/** Initialise debug.
+/** Initialise utils.  This function should be called ONCE at start
+ * of day
  *
  * Note: this will create a semaphore that is never destroyed.
  *
@@ -160,7 +161,8 @@ static inline bool fgr_util_is_valid_ptr_to_ptr(void **pptr, const char *tag,
  */
 int32_t fgr_util_init();
 
-/** Deinitialise utils.
+/** Deinitialise utils.  This function should be called ONCE at
+ * end of day.
  */
 void fgr_util_deinit();
 

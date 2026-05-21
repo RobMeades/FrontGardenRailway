@@ -68,6 +68,9 @@ static esp_netif_t *g_sta_netif = NULL;
 // Whether Wifi has successfully connected or not
 static bool is_connected = false;
 
+// Flag to track initialisation
+static bool g_initialised = false;
+
 /* ----------------------------------------------------------------
  * STATIC FUNCTIONS: EVENT HANDLERS
  * -------------------------------------------------------------- */
@@ -129,175 +132,181 @@ int32_t fgr_network_init(const char *ssid, const char *password,
                          wifi_auth_mode_t auth_mode,
                          bool reduced_tx_power)
 {
-    esp_err_t err = ESP_ERR_INVALID_ARG;
-    wifi_config_t wifi_config = {0};
+    esp_err_t err = ESP_OK;
 
-    // Continue if there is no password or, if there is a
-    // password, the authentication mode is not "open",
-    // also if ssid and password are within length
-    if ((((password == NULL) || (strlen(password) == 0)) ||
-         (auth_mode != WIFI_AUTH_OPEN)) &&
-         ((ssid != NULL) && (strlen(ssid) < sizeof(wifi_config.sta.ssid))) &&
-         ((password == NULL) || (strlen(password) < sizeof(wifi_config.sta.password))))  {
+    if (!g_initialised) {
+        g_initialised = true;
+        err = ESP_ERR_INVALID_ARG;
+        wifi_config_t wifi_config = {0};
 
-        // Initialize network interface
-        err = esp_netif_init();
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to initialize network interface: %s.", esp_err_to_name(err));
-        }
+        // Continue if there is no password or, if there is a
+        // password, the authentication mode is not "open",
+        // also if ssid and password are within length
+        if ((((password == NULL) || (strlen(password) == 0)) ||
+            (auth_mode != WIFI_AUTH_OPEN)) &&
+            ((ssid != NULL) && (strlen(ssid) < sizeof(wifi_config.sta.ssid))) &&
+            ((password == NULL) || (strlen(password) < sizeof(wifi_config.sta.password))))  {
 
-        // Create semaphore for WiFi synchronization
-        if (err == ESP_OK && g_wifi_semaphore == NULL) {
-            g_wifi_semaphore = xSemaphoreCreateBinary();
-            if (g_wifi_semaphore == NULL) {
-                ESP_LOGE(TAG, "Failed to create WiFi semaphore.");
-                err = ESP_ERR_NO_MEM;
-            }
-        }
-
-        // Create default WiFi station
-        if (err == ESP_OK) {
-            g_sta_netif = esp_netif_create_default_wifi_sta();
-            if (g_sta_netif == NULL) {
-                ESP_LOGE(TAG, "Failed to create default WiFi station.");
-                err = ESP_ERR_NO_MEM;
-            }
-        }
-
-        // Initialize WiFi
-        if (err == ESP_OK) {
-            wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-            err = esp_wifi_init(&cfg);
+            // Initialize network interface
+            err = esp_netif_init();
             if (err != ESP_OK) {
-                ESP_LOGE(TAG, "Failed to initialize WiFi: %s.", esp_err_to_name(err));
+                ESP_LOGE(TAG, "Failed to initialize network interface: %s.", esp_err_to_name(err));
             }
-        }
 
-        // Register event handlers for WiFi and IP
-        if (err == ESP_OK) {
-            err = esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
-                                             &wifi_event_handler, NULL);
-            if (err != ESP_OK) {
-                ESP_LOGE(TAG, "Failed to register WiFi event handler: %s.", esp_err_to_name(err));
+            // Create semaphore for WiFi synchronization
+            if (err == ESP_OK && g_wifi_semaphore == NULL) {
+                g_wifi_semaphore = xSemaphoreCreateBinary();
+                if (g_wifi_semaphore == NULL) {
+                    ESP_LOGE(TAG, "Failed to create WiFi semaphore.");
+                    err = ESP_ERR_NO_MEM;
+                }
             }
-        }
-        if (err == ESP_OK) {
-            err = esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
-                                            &ip_event_handler, g_wifi_semaphore);
-            if (err != ESP_OK) {
-                ESP_LOGE(TAG, "Failed to register IP event handler: %s.", esp_err_to_name(err));
-            }
-        }
 
-        // Set WiFi to station mode
-        if (err == ESP_OK) {
-            err = esp_wifi_set_mode(WIFI_MODE_STA);
-            if (err != ESP_OK) {
-                ESP_LOGE(TAG, "Failed to set WiFi mode: %s.", esp_err_to_name(err));
-            }
-        }
-
-        // Configure WiFi connection
-        if (err == ESP_OK) {
-            strncpy((char *) wifi_config.sta.ssid, ssid, sizeof(wifi_config.sta.ssid));
-            if (password != NULL && (strlen(password) > 0)) {
-                strncpy((char *) wifi_config.sta.password, password, sizeof(wifi_config.sta.password));
-            }
-            wifi_config.sta.threshold.authmode = auth_mode;
-            wifi_config.sta.pmf_cfg.capable = true;
-            wifi_config.sta.pmf_cfg.required = false;
-            wifi_config.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
-            wifi_config.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
-            wifi_config.sta.threshold.rssi = -127;
-            err = esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
-            if (err != ESP_OK) {
-                ESP_LOGE(TAG, "Failed to set WiFi configuration: %s.", esp_err_to_name(err));
-            }
-        }
-
-        // Make sure we can everything
-        wifi_country_t country_config = {
-            .cc = "ALL",          // Use a global/open country code
-            .schan = 1,           // Start channel
-            .nchan = 14,          // Scan all the way up to channel 14
-            .policy = WIFI_COUNTRY_POLICY_MANUAL
-        };
-        esp_wifi_set_country(&country_config);
-
-        // Start WiFi
-        if (err == ESP_OK) {
-            err = esp_wifi_start();
-            if (err != ESP_OK) {
-                ESP_LOGE(TAG, "Failed to start WiFi: %s.", esp_err_to_name(err));
-            } else {
-                ESP_LOGI(TAG, "WiFi connecting to %s...", ssid);
-            }
-        }
-
-        // Disable WiFi power save mode for best OTA operation
-        if (err == ESP_OK) {
-            esp_err_t ps_err = esp_wifi_set_ps(WIFI_PS_NONE);
-            if (ps_err != ESP_OK) {
-                ESP_LOGW(TAG, "Failed to disable WiFi power save: %s.", esp_err_to_name(ps_err));
-                // Continue anyway, this is not fatal
-            }
-        }
-
-        if (reduced_tx_power) {
-            // Set max TX power to 8 dBm
+            // Create default WiFi station
             if (err == ESP_OK) {
-                // The parameter to esp_wifi_set_max_tx_power() is in quarters of a dB
-                esp_err_t ps_err = esp_wifi_set_max_tx_power(34);
+                g_sta_netif = esp_netif_create_default_wifi_sta();
+                if (g_sta_netif == NULL) {
+                    ESP_LOGE(TAG, "Failed to create default WiFi station.");
+                    err = ESP_ERR_NO_MEM;
+                }
+            }
+
+            // Initialize WiFi
+            if (err == ESP_OK) {
+                wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+                err = esp_wifi_init(&cfg);
+                if (err != ESP_OK) {
+                    ESP_LOGE(TAG, "Failed to initialize WiFi: %s.", esp_err_to_name(err));
+                }
+            }
+
+            // Register event handlers for WiFi and IP
+            if (err == ESP_OK) {
+                err = esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
+                                                &wifi_event_handler, NULL);
+                if (err != ESP_OK) {
+                    ESP_LOGE(TAG, "Failed to register WiFi event handler: %s.", esp_err_to_name(err));
+                }
+            }
+            if (err == ESP_OK) {
+                err = esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
+                                                &ip_event_handler, g_wifi_semaphore);
+                if (err != ESP_OK) {
+                    ESP_LOGE(TAG, "Failed to register IP event handler: %s.", esp_err_to_name(err));
+                }
+            }
+
+            // Set WiFi to station mode
+            if (err == ESP_OK) {
+                err = esp_wifi_set_mode(WIFI_MODE_STA);
+                if (err != ESP_OK) {
+                    ESP_LOGE(TAG, "Failed to set WiFi mode: %s.", esp_err_to_name(err));
+                }
+            }
+
+            // Configure WiFi connection
+            if (err == ESP_OK) {
+                strncpy((char *) wifi_config.sta.ssid, ssid, sizeof(wifi_config.sta.ssid));
+                if (password != NULL && (strlen(password) > 0)) {
+                    strncpy((char *) wifi_config.sta.password, password, sizeof(wifi_config.sta.password));
+                }
+                wifi_config.sta.threshold.authmode = auth_mode;
+                wifi_config.sta.pmf_cfg.capable = true;
+                wifi_config.sta.pmf_cfg.required = false;
+                wifi_config.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
+                wifi_config.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
+                wifi_config.sta.threshold.rssi = -127;
+                err = esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
+                if (err != ESP_OK) {
+                    ESP_LOGE(TAG, "Failed to set WiFi configuration: %s.", esp_err_to_name(err));
+                }
+            }
+
+            // Make sure we can everything
+            wifi_country_t country_config = {
+                .cc = "ALL",          // Use a global/open country code
+                .schan = 1,           // Start channel
+                .nchan = 14,          // Scan all the way up to channel 14
+                .policy = WIFI_COUNTRY_POLICY_MANUAL
+            };
+            esp_wifi_set_country(&country_config);
+
+            // Start WiFi
+            if (err == ESP_OK) {
+                err = esp_wifi_start();
+                if (err != ESP_OK) {
+                    ESP_LOGE(TAG, "Failed to start WiFi: %s.", esp_err_to_name(err));
+                } else {
+                    ESP_LOGI(TAG, "WiFi connecting to %s...", ssid);
+                }
+            }
+
+            // Disable WiFi power save mode for best OTA operation
+            if (err == ESP_OK) {
+                esp_err_t ps_err = esp_wifi_set_ps(WIFI_PS_NONE);
                 if (ps_err != ESP_OK) {
-                    ESP_LOGW(TAG, "Unable to set TX max power to 8 dBm: %s.", esp_err_to_name(ps_err));
+                    ESP_LOGW(TAG, "Failed to disable WiFi power save: %s.", esp_err_to_name(ps_err));
                     // Continue anyway, this is not fatal
                 }
             }
-        }
 
-        // Wait to connect and obtain IP address (with timeout)
-        if (err == ESP_OK) {
-            // Set the watchdog timer to max (60 seconds) while we do this
-            bool watchdog_running = false;
-            esp_task_wdt_config_t wdt_cfg = {
-                .timeout_ms = 60 * 1000,
+            if (reduced_tx_power) {
+                // Set max TX power to 8 dBm
+                if (err == ESP_OK) {
+                    // The parameter to esp_wifi_set_max_tx_power() is in quarters of a dB
+                    esp_err_t ps_err = esp_wifi_set_max_tx_power(34);
+                    if (ps_err != ESP_OK) {
+                        ESP_LOGW(TAG, "Unable to set TX max power to 8 dBm: %s.", esp_err_to_name(ps_err));
+                        // Continue anyway, this is not fatal
+                    }
+                }
+            }
+
+            // Wait to connect and obtain IP address (with timeout)
+            if (err == ESP_OK) {
+                // Set the watchdog timer to max (60 seconds) while we do this
+                bool watchdog_running = false;
+                esp_task_wdt_config_t wdt_cfg = {
+                    .timeout_ms = 60 * 1000,
 #if defined CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0
-                .idle_core_mask = 1 << CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0,
+                    .idle_core_mask = 1 << CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0,
 #else
-                .idle_core_mask = 0,
+                    .idle_core_mask = 0,
 #endif
 #if defined CONFIG_ESP_TASK_WDT_PANIC
-                .trigger_panic = true
+                    .trigger_panic = true
 #else
-                .trigger_panic = false
+                    .trigger_panic = false
 #endif
-            };
-            if (esp_task_wdt_status(NULL) == ESP_OK) {
-                watchdog_running = true;
-                esp_task_wdt_reconfigure(&wdt_cfg);
+                };
+                if (esp_task_wdt_status(NULL) == ESP_OK) {
+                    watchdog_running = true;
+                    esp_task_wdt_reconfigure(&wdt_cfg);
+                }
+                ESP_LOGI(TAG, "Waiting %d second(s) to connect and be assigned IP address.",
+                        FGR_NETWORK_IP_ADDRESS_ASSIGNMENT_WAIT_SECONDS);
+                if (xSemaphoreTake(g_wifi_semaphore,
+                                pdMS_TO_TICKS(FGR_NETWORK_IP_ADDRESS_ASSIGNMENT_WAIT_SECONDS * 1000)) == pdTRUE) {
+                    ESP_LOGI(TAG, "WiFi connected, IP obtained.");
+                } else {
+                    ESP_LOGE(TAG, "Failed to obtain IP address within timeout.");
+                    err = ESP_ERR_TIMEOUT;
+                }
+                if (watchdog_running) {
+                    // Put the watchdog timer back
+                    wdt_cfg.timeout_ms = CONFIG_ESP_TASK_WDT_TIMEOUT_S * 1000;
+                    esp_task_wdt_reconfigure(&wdt_cfg);
+                }
             }
-            ESP_LOGI(TAG, "Waiting %d second(s) to connect and be assigned IP address.",
-                     FGR_NETWORK_IP_ADDRESS_ASSIGNMENT_WAIT_SECONDS);
-            if (xSemaphoreTake(g_wifi_semaphore,
-                               pdMS_TO_TICKS(FGR_NETWORK_IP_ADDRESS_ASSIGNMENT_WAIT_SECONDS * 1000)) == pdTRUE) {
-                ESP_LOGI(TAG, "WiFi connected, IP obtained.");
-            } else {
-                ESP_LOGE(TAG, "Failed to obtain IP address within timeout.");
-                err = ESP_ERR_TIMEOUT;
-            }
-            if (watchdog_running) {
-                // Put the watchdog timer back
-                wdt_cfg.timeout_ms = CONFIG_ESP_TASK_WDT_TIMEOUT_S * 1000;
-                esp_task_wdt_reconfigure(&wdt_cfg);
-            }
-        }
 
-        // Clean-up on error
-        if (err != ESP_OK) {
-            if (g_sta_netif) {
-                esp_netif_destroy_default_wifi(g_sta_netif);
-                g_sta_netif = NULL;
-                // Can't clean up g_wifi_semaphore as it may still be taken
+            // Clean-up on error
+            if (err != ESP_OK) {
+                g_initialised = false;
+                if (g_sta_netif) {
+                    esp_netif_destroy_default_wifi(g_sta_netif);
+                    g_sta_netif = NULL;
+                    // Can't clean up g_wifi_semaphore as it may still be taken
+                }
             }
         }
     }

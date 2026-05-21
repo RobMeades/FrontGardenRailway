@@ -41,7 +41,8 @@ extern "C" {
  * -------------------------------------------------------------- */
 
 /** Initialise networking; requires the default event loop to
- * have been created.
+ * have been created.  This function should be called ONCE at start
+ * of day.
  *
  * Note: this will create a mutex that is never destroyed.
  *
@@ -68,7 +69,8 @@ int32_t fgr_network_init(const char *ssid, const char *password,
                          wifi_auth_mode_t auth_mode,
                          bool reduced_tx_power);
 
-/** Deinitialise networking.
+/** Deinitialise networking.  This function should be called ONCE
+ * at end of day.
  */
 void fgr_network_deinit();
 

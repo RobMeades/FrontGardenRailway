@@ -164,7 +164,8 @@ typedef void (*fgr_metrics_report_cb_t)(fgr_metrics_storage_t *list,
  * -------------------------------------------------------------- */
 
 /** Initialise metrics.  Needs a task, so fgr_util_init() must
- * have been called first.
+ * have been called first.  It is always safe to call this at any
+ * time; if already initialised it will do nothing and return success.
  *
  * Note: this will create a semaphore that is never destroyed.
  *
@@ -189,6 +190,11 @@ typedef void (*fgr_metrics_report_cb_t)(fgr_metrics_storage_t *list,
 int32_t fgr_metrics_init(fgr_metrics_report_cb_t cb,
                          void *cb_param);
 
+/** Deinitialise metrics.  It is always safe to call this at any
+ * time.
+ */
+void fgr_metrics_deinit();
+
 /** A callback that may be hooked-in as the cb parameter to
  * fgr_metrics_init(): NOT TO BE CALLED DIRECTLY.  This callback
  * will log all of the metrics as an ESP_LOGI message.
@@ -202,10 +208,6 @@ int32_t fgr_metrics_init(fgr_metrics_report_cb_t cb,
  */
 void fgr_metrics_log_cb(fgr_metrics_storage_t *list, size_t length,
                         void *unused);
-
-/** Deinitialise metrics.
- */
-void fgr_metrics_deinit();
 
 /** Encode a single metric into a null-terminated JSON string.
  *

@@ -606,37 +606,42 @@ int32_t fgr_msg_init(const char *server_ip, uint16_t port,
 
         if (g_context.lock) {
 
+            err = ESP_OK;
+
             CONTEXT_LOCK(g_context.lock, "fgr_msg_init()");
 
-            g_context.state_cb = cb;
-            g_context.state_cb_param = cb_param;
+            if (g_context.sock < 0) {
 
-            // Create connection to server
-            err = fgr_socket_channel_start(server_ip, port,
-                                           &g_context.sock,
-                                           &g_context.context_sock);
-            if (err == ESP_OK) {
+                g_context.state_cb = cb;
+                g_context.state_cb_param = cb_param;
 
-                fgr_metrics_event_bool_set(FGR_METRIC_EVENT_BOOL_CONTROLLER_CONNECTION,
-                                           true, 0);
+                // Create connection to server
+                err = fgr_socket_channel_start(server_ip, port,
+                                            &g_context.sock,
+                                            &g_context.context_sock);
+                if (err == ESP_OK) {
 
-                xSemaphoreGive(g_context.lock);
-                // Do initial extra socket configuration
-                socket_reconnect_cb(g_context.sock, &g_context);
-                xSemaphoreTake(g_context.lock, pdMS_TO_TICKS(1000));
+                    fgr_metrics_event_bool_set(FGR_METRIC_EVENT_BOOL_CONTROLLER_CONNECTION,
+                                            true, 0);
 
-                // Maintain the connection
-                err = fgr_socket_channel_maintain(&g_context.context_sock,
-                                                  heartbeat_seconds,
-                                                  socket_heartbeat_cb,
-                                                  socket_reconnect_cb,
-                                                  socket_down_cb,
-                                                  &g_context);
-                if (err != ESP_OK) {
-                    fgr_socket_channel_stop(&g_context.context_sock);
-                    g_context.sock = -1;
-                    g_context.state_cb = NULL;
-                    g_context.state_cb_param = NULL;
+                    xSemaphoreGive(g_context.lock);
+                    // Do initial extra socket configuration
+                    socket_reconnect_cb(g_context.sock, &g_context);
+                    xSemaphoreTake(g_context.lock, pdMS_TO_TICKS(1000));
+
+                    // Maintain the connection
+                    err = fgr_socket_channel_maintain(&g_context.context_sock,
+                                                    heartbeat_seconds,
+                                                    socket_heartbeat_cb,
+                                                    socket_reconnect_cb,
+                                                    socket_down_cb,
+                                                    &g_context);
+                    if (err != ESP_OK) {
+                        fgr_socket_channel_stop(&g_context.context_sock);
+                        g_context.sock = -1;
+                        g_context.state_cb = NULL;
+                        g_context.state_cb_param = NULL;
+                    }
                 }
             }
 
@@ -651,6 +656,12 @@ int32_t fgr_msg_init(const char *server_ip, uint16_t port,
     }
 
     return err;
+}
+
+// Deinitialise the messaging interface.
+void fgr_msg_deinit()
+{
+    clean_up();
 }
 
 // Set a callback that will return an RSSI reading.
@@ -668,12 +679,6 @@ int32_t fgr_msg_rssi_cb(fgr_msg_rssi_cb_t cb, void *cb_param)
     }
 
     return err;
-}
-
-// Deinitialise the messaging interface.
-void fgr_msg_deinit()
-{
-    clean_up();
 }
 
 /* ----------------------------------------------------------------

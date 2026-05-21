@@ -218,7 +218,8 @@ typedef fgr_state_t (*fgr_debug_state_cb_t)(void *param);
  * -------------------------------------------------------------- */
 
 /** Initialise debug.  Needs a task so fgr_util_init() must
- * have been called first.
+ * have been called first.  It is always safe to call this at any
+ * time: if already initialised it will do nothing and return success.
  *
  * Note: this will create a semaphore that is never destroyed.
  *
@@ -248,7 +249,7 @@ int32_t fgr_debug_init(fgr_debug_state_cb_t cb, void *cb_param);
 
 /** Deinitialise debug.  This will also free any remaining tasks,
  * and do so in a coooperative way, waiting for any task callbacks
- * to return, no crowbars.
+ * to return, no crowbars.  It is always safe to call this at any time.
  */
 void fgr_debug_deinit();
 
@@ -375,15 +376,17 @@ int32_t fgr_debug_panic_str_get(char *buffer);
  * string, logs the backtrace string (if present) to an ESP_LOGx()
  * macro with the given ESP-IDF log level.
  *
+ * @param tag    the tag to apply to the log message; may be NULL
+ *               in which case whatever is the default tag for
+ *               debug messages will be employed.
  * @param prefix a prefix to put in front of the backtrace string;
  *               may be NULL.
  * @param level  the log level to log the string as.
- * @return       UNLIKE THE OTHER backtrace calls, this one returns
- *               ESP_OK if a log message was sent, else negative
- *               error code from esp_err_t and specifically
- *               -ESP_ERR_NOT_FOUND if there was no backtrace.
+ * @return       1 if there was a panic, ESP_OK if not, else a
+ *               negative error code from esp_err_t.
  */
-int32_t fgr_debug_panic_log(char *prefix, esp_log_level_t level);
+int32_t fgr_debug_panic_log(const char *tag, const char *prefix,
+                            esp_log_level_t level);
 
 /* ----------------------------------------------------------------
  * FUNCTIONS: STACK OVERFLOW
@@ -411,15 +414,44 @@ int32_t fgr_debug_stack_overflow_get(char *buffer);
  * the task name string, logs the task name string (if present) to
  * an ESP_LOGx() macro with the given ESP-IDF log level.
  *
- * @param prefix a prefix to put in front of the task name string;
+ * @param tag    the tag to apply to the log message; may be NULL
+ *               in which case whatever is the default tag for
+ *               debug messages will be employed.
+ * @param prefix a prefix to put in front of the backtrace string;
  *               may be NULL.
  * @param level  the log level to log the string as.
- * @return       UNLIKE fgr_debug_stack_overflow_get(), this
- *               returns ESP_OK if a log message was sent, else
- *               negative error code from esp_err_t and specifically
- *               -ESP_ERR_NOT_FOUND if there was no stack overflow.
+ * @return       1 if there was a stack overflow, ESP_OK if not,
+ *               else a negative error code from esp_err_t.
  */
-int32_t fgr_debug_stack_overflow_log(char *prefix, esp_log_level_t level);
+int32_t fgr_debug_stack_overflow_log(const char *tag, const char *prefix,
+                                     esp_log_level_t level);
+
+/* ----------------------------------------------------------------
+ * FUNCTIONS: CORE DUMP
+ * -------------------------------------------------------------- */
+
+/** Send a core dump to logging; you might call this at boot to see
+ * if there is a core dump stored to flash.  The core dump will be sent
+ * in ESP_LOGx() messages, base64 encoded.
+ *
+ * For this to work, you must have a flash partition of at least
+ * 64 kbytes dedicated for core dumps, e.g. like this:
+ *
+ * coredump,   data, coredump,0x3E0000, 64K
+ *
+ * ...and you must have set CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
+ * and likely CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y in your sdkconfig
+ * file.  With this configuration, core dumps are automatically sent
+ * by ESP-IDF when a crash occurs.
+ *
+ * @param tag    the tag to apply to the log message; may be NULL
+ *               in which case whatever is the default tag for
+ *               debug messages will be employed.
+ * @param level  the log level to log the string as.
+ * @return       1 if a core dump as present, ESP_OK if not,
+ *               else a negative error code from esp_err_t.
+ */
+int32_t fgr_debug_core_dump_get(const char *tag, esp_log_level_t level);
 
 /* ----------------------------------------------------------------
  * FUNCTIONS: MISC

@@ -53,7 +53,8 @@ extern "C" {
  * FUNCTIONS
  * -------------------------------------------------------------- */
 
-/** Initialise time.
+/** Initialise time.  This function should be called ONCE at start
+ * of day.
  *
  * Note: this will create a semaphore that is never destroyed.
  *
@@ -88,7 +89,8 @@ int32_t fgr_time_init(const char *ntp_server_ip_address,
                       const char *timezone,
                       size_t ntp_sync_interval_seconds);
 
-/** Deinitialise time.
+/** Deinitialise time.  This function should be called ONCE at end
+ * and of day.
  */
 void fgr_time_deinit();
 

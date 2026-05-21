@@ -76,7 +76,8 @@ extern "C" {
  */
 int32_t fgr_log_init(const char *server_ip, uint16_t port, fgr_log_level_t level_min);
 
-/** Return back to the normal ESP32 logging.
+/** Return back to the normal ESP32 logging.  It is always safe to call
+ * this at any time.
  */
 void fgr_log_deinit();
 

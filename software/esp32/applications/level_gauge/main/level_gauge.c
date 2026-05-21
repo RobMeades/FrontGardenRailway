@@ -314,13 +314,11 @@ static int32_t init(context_t *context)
 // Shutdown.
 static void deinit(context_t *context)
 {
-
     fgr_rcwl9610a_deinit();
 
     fgr_lib_deinit();
     vSemaphoreDelete(context->lock);
     esp_restart();
-
 }
 
 /* ----------------------------------------------------------------

@@ -124,7 +124,8 @@ typedef uint32_t (*fgr_msg_send_ping_body_cb_t)(uint8_t *buffer,
 
 /** Initialise the messaging interface: connects to the controller,
  * allowing messages to be exchanged.  Needs a task so fgr_util_init()
- * must have been called first.
+ * must have been called first.  It is always safe to call this at any
+ * time; if already initialised it will do nothing and return success.
  *
  * Note: this will create a mutex that is never destroyed.
  *
@@ -159,6 +160,15 @@ int32_t fgr_msg_init(const char *server_ip, uint16_t port,
                      size_t heartbeat_seconds, fgr_msg_state_cb_t cb,
                      void *cb_param);
 
+/** Deinitialise the messaging interface; after this has been called
+ * the state callback passed to fgr_msg_init() will no longer be called,
+ * any RSSI callback registered with fgr_msg_rssi_cb() will no longer
+ * be called and any message handler callbacks added through
+ * fgr_msg_receive_handler_add() will be removed also.  It is always safe
+ * to call this at any time.
+ */
+void fgr_msg_deinit();
+
 /** Set a callback that will return an RSSI reading; once this has
  * been called the reading will be included in the body of the heartbeat
  * message.
@@ -170,14 +180,6 @@ int32_t fgr_msg_init(const char *server_ip, uint16_t port,
  * @return          ESP_OK on success, else a negative value from esp_err_t.
  */
 int32_t fgr_msg_rssi_cb(fgr_msg_rssi_cb_t cb, void *cb_param);
-
-/** Deinitialise the messaging interface; after this has been called
- * the state callback passed to fgr_msg_init() will no longer be called,
- * any RSSI callback registered with fgr_msg_rssi_cb() will no longer
- * be called and any message handler callbacks added through
- * fgr_msg_receive_handler_add() will be removed also.
- */
-void fgr_msg_deinit();
 
 /* ----------------------------------------------------------------
  * FUNCTIONS: SENDING

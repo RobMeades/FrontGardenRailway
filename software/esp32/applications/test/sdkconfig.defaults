@@ -30,3 +30,7 @@ CONFIG_ESP_TASK_WDT_PANIC=y
 
 # Enable panic handler to print backtrace to serial console (default anyway, but just in case)
 CONFIG_ESP_SYSTEM_PANIC_PRINT_BACKTRACE=y
+
+# Enable core dumps (needs coredump region of size at least 64 kbytes in partitions.csv)
+CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
+CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y
