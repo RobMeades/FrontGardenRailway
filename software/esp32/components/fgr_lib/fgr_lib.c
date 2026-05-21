@@ -134,8 +134,8 @@ int32_t fgr_lib_init(const char *ota_server_cert_pem,
     // or a stack overflow, and maybe an associated core dump,
     // log the lot
     if (err == ESP_OK) {
-        fgr_debug_panic_log("BACKTRACE", "Backtrace from previous panic ", ESP_LOG_WARN);
-        fgr_debug_stack_overflow_log("STACK_OVERFLOW", "Stack overlow was in task ", ESP_LOG_WARN);
+        fgr_debug_panic_log("BACKTRACE", "From previous panic ", ESP_LOG_WARN);
+        fgr_debug_stack_overflow_log("STACK_OVERFLOW", "In task ", ESP_LOG_WARN);
         fgr_debug_core_dump_get("CORE_DUMP", ESP_LOG_INFO);
     }
 

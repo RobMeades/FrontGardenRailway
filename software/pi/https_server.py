@@ -178,35 +178,31 @@ class HandleFirmware:
 
         limiter = request.app.rate_limiter
 
+        wait_time = 0.0
         async with limiter['lock']:
             current_time = time.time()
 
-            # FIRST: Global rate limiting - ensure minimum time between ANY connections
+            # Global checking
             time_since_last_global = current_time - limiter['last_global_accept']
             if time_since_last_global < limiter['min_global_interval'] and limiter['last_global_accept'] > 0:
-                wait_time = limiter['min_global_interval'] - time_since_last_global
-                logger.info(f"Global rate limit: waiting {wait_time:.2f}s before accepting request from {client_ip}")
-                await asyncio.sleep(wait_time)
-                current_time = time.time()  # Update after sleep
+                wait_time = max(wait_time, limiter['min_global_interval'] - time_since_last_global)
 
-            # SECOND: Per-IP staggering for reconnections
+            # Per-IP checking
             last_time = limiter['last_accept_per_ip'].get(client_ip, 0)
             if last_time > 0 and current_time - last_time < limiter['min_per_ip_interval']:
-                wait_time = limiter['min_per_ip_interval'] - (current_time - last_time)
-                logger.info(f"Per-IP staggering for {client_ip}: waiting {wait_time:.2f}s")
-                await asyncio.sleep(wait_time)
-                current_time = time.time()  # Update after sleep
+                wait_time = max(wait_time, limiter['min_per_ip_interval'] - (current_time - last_time))
 
-            # THIRD: Add random jitter for first connections to desynchronize
+            # Jitter
             if client_ip not in limiter['last_accept_per_ip']:
-                random_delay = random.uniform(0, 0.5)
-                logger.info(f"First connection from {client_ip}, adding {random_delay:.2f}s random jitter")
-                await asyncio.sleep(random_delay)
-                current_time = time.time()  # Update after sleep
+                wait_time = max(wait_time, random.uniform(0, 0.5))
 
             # Update tracking
-            limiter['last_global_accept'] = current_time
-            limiter['last_accept_per_ip'][client_ip] = current_time
+            limiter['last_global_accept'] = current_time + wait_time
+            limiter['last_accept_per_ip'][client_ip] = current_time + wait_time
+
+        if wait_time > 0:
+            logger.info(f"Rate limiting {client_ip}: sleeping for {wait_time:.2f}s")
+            await asyncio.sleep(wait_time)
 
         #  Set the full file path
         filename_mapped = self.map_filename(filename, client_ip)
@@ -238,12 +234,14 @@ class HandleFirmware:
 
         try:
             await response.prepare(request)
-        except ConnectionResetError:
+        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
+            # The client walked away; bubble it up so aiohttp recycles the socket immediately
             logger.info(f"Client {client_ip} disconnected during prepare")
-            return web.Response(status=499)
+            raise
         except Exception as e:
+            # Something broke on our end, but the socket is alive, tell the client we messed up.
             logger.error(f"Error preparing response for {client_ip}: {e}")
-            return web.Response(status=500)
+            return web.Response(status=500, text="Internal Server Error")
 
         # Use robust sender
         sender = RobustFileSender(request, response, filepath, file_size)

@@ -19,7 +19,7 @@
 INTERFACE="wlan0"
 
 # Announce startup cleanly to syslog
-logger -t wifi-evictor "Daemon started cleanly. Monitoring $INTERFACE state tables..."
+logger -t clear-node-ghosts "Daemon started cleanly. Monitoring $INTERFACE state tables..."
 
 while true; do
     # Scrape the kernel's wireless tables directly
@@ -33,7 +33,7 @@ while true; do
 
             if (assoc == "no") {
                 # 1. Build a custom log action message
-                log_msg = "logger -t wifi-evictor \"🔥 Evicted zombie client [" mac "] - Found stuck in associated:no state.\""
+                log_msg = "logger -t clear-node-ghosts \"🔥 Evicted zombie client [" mac "] - Found stuck in associated:no state.\""
                 system(log_msg)
 
                 # 2. Execute the actual low-level driver purge
