@@ -133,9 +133,12 @@ int32_t fgr_lib_init(const char *ota_server_cert_pem,
     // if there was previously a panic resulting in a backtrace,
     // or a stack overflow, and maybe an associated core dump,
     // log the lot
+    // IMPORTANT: the tags used below are parsed out by log_server.py
+    // when writing to database, so if you change them you will need to
+    // change that script also.
     if (err == ESP_OK) {
-        fgr_debug_panic_log("BACKTRACE", "From previous panic ", ESP_LOG_WARN);
-        fgr_debug_stack_overflow_log("STACK_OVERFLOW", "In task ", ESP_LOG_WARN);
+        fgr_debug_panic_log("BACKTRACE", NULL, ESP_LOG_WARN);
+        fgr_debug_stack_overflow_log("STACK_OVERFLOW", NULL, ESP_LOG_WARN);
         fgr_debug_core_dump_get("CORE_DUMP", ESP_LOG_INFO);
     }
 
