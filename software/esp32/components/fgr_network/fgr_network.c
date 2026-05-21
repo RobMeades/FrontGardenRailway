@@ -206,12 +206,23 @@ int32_t fgr_network_init(const char *ssid, const char *password,
             wifi_config.sta.threshold.authmode = auth_mode;
             wifi_config.sta.pmf_cfg.capable = true;
             wifi_config.sta.pmf_cfg.required = false;
-
+            wifi_config.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
+            wifi_config.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
+            wifi_config.sta.threshold.rssi = -127;
             err = esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
             if (err != ESP_OK) {
                 ESP_LOGE(TAG, "Failed to set WiFi configuration: %s.", esp_err_to_name(err));
             }
         }
+
+        // Make sure we can everything
+        wifi_country_t country_config = {
+            .cc = "ALL",          // Use a global/open country code
+            .schan = 1,           // Start channel
+            .nchan = 14,          // Scan all the way up to channel 14
+            .policy = WIFI_COUNTRY_POLICY_MANUAL
+        };
+        esp_wifi_set_country(&country_config);
 
         // Start WiFi
         if (err == ESP_OK) {
