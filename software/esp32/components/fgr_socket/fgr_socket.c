@@ -139,22 +139,23 @@ static void task_maintain_cb(void *param)
             }
         } else {
             ESP_LOGW(TAG, "%s:%d connection lost, reconnecting...",
-                        context_channel->server_ip, context_channel->port);
+                     context_channel->server_ip, context_channel->port);
 
             // Close old socket if it exists
             fgr_socket_destroy(&context_channel->sock);
 
-            // Create new socket
-            int32_t err = fgr_socket_create(&context_channel->sock);
+            // Create new socket into a thread-local variable
+            int local_sock = -1;
+            int32_t err = fgr_socket_create(&local_sock);
             if (err == ESP_OK) {
                 // Make socket non-blocking
-                err = fgr_socket_set_non_blocking(context_channel->sock, 0);
+                err = fgr_socket_set_non_blocking(local_sock, 0);
                 if (err == ESP_OK) {
-                    // Initiate non-blocking connect
-                    err = fgr_socket_connect_start(context_channel->sock,
-                                                    context_channel->server_ip,
-                                                    context_channel->port,
-                                                    &context_connect);
+                    // Initiate non-blocking connect using local variable
+                    err = fgr_socket_connect_start(local_sock,
+                                                   context_channel->server_ip,
+                                                   context_channel->port,
+                                                   &context_connect);
 
                     xSemaphoreGive(context_channel->lock);
 
@@ -162,6 +163,7 @@ static void task_maintain_cb(void *param)
                         // Connected immediately
 
                         CONTEXT_LOCK(context_channel->lock, "task_maintain_cb() 1");
+                        context_channel->sock = local_sock; // Safely publish to context
                         context_channel->connected = true;
                         context_channel->last_activity_time_us = esp_timer_get_time();
                         CONTEXT_UNLOCK(context_channel->lock, "task_maintain_cb() 1");
@@ -172,7 +174,7 @@ static void task_maintain_cb(void *param)
                         int32_t elapsed_ms = 0;
                         while ((err == -ESP_ERR_NOT_FINISHED) && (elapsed_ms < FGR_SOCKET_RECONNECT_TIMEOUT_MS) && context_channel->task_handle) {
                             int32_t timeout_ms = 100;
-                            err = fgr_socket_connect_is_complete(&context_connect, timeout_ms);
+                            err = fgr_socket_connect_is_complete(timeout_ms, &context_connect);
                             elapsed_ms += timeout_ms;
                             vTaskDelay(pdMS_TO_TICKS(FGR_UTIL_WATCHDOG_FEED_TIME_MS));
                             esp_task_wdt_reset();
@@ -180,12 +182,17 @@ static void task_maintain_cb(void *param)
 
                         CONTEXT_LOCK(context_channel->lock, "task_maintain_cb() 2");
                         if (err == ESP_OK) {
+                            context_channel->sock = local_sock; // Safely publish to context
                             context_channel->connected = true;
                             context_channel->last_activity_time_us = esp_timer_get_time();
                             ESP_LOGI(TAG, "Reconnected after %" PRId32 " ms.", elapsed_ms);
                         } else {
-                            fgr_socket_connect_stop(&context_connect);
-                            fgr_socket_destroy(&context_channel->sock);
+                            if (context_connect != NULL) {
+                                fgr_socket_connect_stop(&context_connect);
+                            }
+                            if (local_sock >= 0) {
+                                close(local_sock);
+                            }
                         }
                         CONTEXT_UNLOCK(context_channel->lock, "task_maintain_cb() 2");
 
@@ -194,11 +201,19 @@ static void task_maintain_cb(void *param)
 
                         ESP_LOGE(TAG, "Connect failed immediately: %d (%s)", errno, strerror(errno));
                         CONTEXT_LOCK(context_channel->lock, "task_maintain_cb() 3");
-                        fgr_socket_destroy(&context_channel->sock);
+                        if (context_connect != NULL) {
+                            fgr_socket_connect_stop(&context_connect);
+                        }
+                        if (local_sock >= 0) {
+                            close(local_sock);
+                        }
                         CONTEXT_UNLOCK(context_channel->lock, "task_maintain_cb() 3");
                     }
                 } else {
                     xSemaphoreGive(context_channel->lock);
+                    if (local_sock >= 0) {
+                        close(local_sock);
+                    }
                 }
             } else {
                 xSemaphoreGive(context_channel->lock);
@@ -586,7 +601,7 @@ int32_t fgr_socket_connect_start(int sock, const char *server_ip,
 }
 
 // Check the progress of a non-blocking connection
-int32_t fgr_socket_connect_is_complete(void **context, int32_t timeout_ms)
+int32_t fgr_socket_connect_is_complete(int32_t timeout_ms, void **context)
 {
     int32_t err = -ESP_ERR_INVALID_ARG;
 

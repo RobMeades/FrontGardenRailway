@@ -121,7 +121,7 @@ typedef struct {
     QueueHandle_t queue_handle;
     buffer_t buffer;
     size_t queue_full_count;
-    fgr_msg_t *log_msg; // Used by task_log_cb
+    fgr_msg_t log_msg; // Used by task_log_cb
 } context_t;
 
 /* ----------------------------------------------------------------
@@ -194,7 +194,6 @@ static void clean_up()
 
         CONTEXT_LOCK(g_context.lock, "clean_up() log");
 
-        free(g_context.log_msg);
         g_context.connected = false;
 
         if (g_context.queue_handle) {
@@ -505,7 +504,7 @@ static void task_log_cb(void *param)
     CONTEXT_LOCK(context->lock, "task_log_cb()");
 
     // Process all pending messages (non-blocking)
-    while (context->log_msg && (xQueueReceive(context->queue_handle, &queue_msg, 0) == pdTRUE)) {
+    while (xQueueReceive(context->queue_handle, &queue_msg, 0) == pdTRUE) {
 
         // Check if this is an FGR_MSG_TYPE_NULL message type (internal replay signal)
         uint16_t msg_type = ntohs(queue_msg.header.type);
@@ -517,7 +516,7 @@ static void task_log_cb(void *param)
             xSemaphoreTake(context->lock, portMAX_DELAY);
         } else {
             if (context->connected) {
-                fgr_msg_t *log_msg = context->log_msg;
+                fgr_msg_t *log_msg = &context->log_msg;
                 log_msg->header.log = queue_msg.header;
                 memcpy(&log_msg->body, queue_msg.body, queue_msg.body_length);
                 if (fgr_socket_send_no_log(context->sock, log_msg,
@@ -763,13 +762,9 @@ int32_t fgr_log_init(const char *server_ip, uint16_t port,
                             // Continue without it
                             err = ESP_OK;
                         }
-                        err = -ESP_ERR_NO_MEM;
-                        g_context.log_msg = (fgr_msg_t *) malloc(sizeof(*g_context.log_msg));
-                        if (g_context.log_msg) {
-                            err = fgr_util_task_create(&task_log_cb, &g_context, "log",
-                                                       FGR_MSG_TASK_LOG_STACK_SIZE,
-                                                       5, &g_context.task_handle);
-                        }
+                        err = fgr_util_task_create(&task_log_cb, &g_context, "log",
+                                                    FGR_MSG_TASK_LOG_STACK_SIZE,
+                                                    5, &g_context.task_handle);
                         if (err != ESP_OK) {
                             vQueueDelete(g_context.queue_handle);
                             g_context.queue_handle = NULL;

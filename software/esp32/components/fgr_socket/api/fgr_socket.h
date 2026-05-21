@@ -223,15 +223,15 @@ int32_t fgr_socket_connect_start(int sock, const char *server_ip,
  * may choose to give up and call fgr_socket_connect_stop()
  * (then probably close the socket and try again).
  *
+ * @param timeout_ms  how long to do the check for in milliseconds.
  * @param context     the same pointer as was passed to
  *                    fgr_socket_connect_start().
- * @param timeout_ms  how long to do the check for in milliseconds.
  * @return            ESP_OK on success, -ESP_ERR_NOT_FINISHED
  *                    if the connection attempt is continuing
  *                    in the background, otherwise another
  *                    negative error code from esp_err_t.
  */
-int32_t fgr_socket_connect_is_complete(void **context, int32_t timeout_ms);
+int32_t fgr_socket_connect_is_complete(int32_t timeout_ms, void **context);
 
 /** Stop connecting to a socket.
  *
