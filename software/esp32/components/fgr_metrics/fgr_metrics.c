@@ -34,6 +34,7 @@
 #include "cJSON.h"
 
 #include "fgr_util.h"
+#include "fgr_task.h"
 #include "fgr_time.h"
 #include "fgr_network.h"
 #include "fgr_metrics.h"
@@ -473,20 +474,20 @@ static void update_stack_min_free_lowest(fgr_metrics_storage_t *metrics_list)
         // Get all of the minimum stack extents into a temporary linked list
         fgr_metrics_stack_min_free_bytes_entry_t *entry = (fgr_metrics_stack_min_free_bytes_entry_t *) malloc(sizeof(*entry));
         if (entry) {
-            int32_t err = fgr_util_min_free_stack_start(&entry->task.name, &entry->task.min_free_bytes);
+            int32_t err = fgr_task_min_free_stack_start(&entry->task.name, &entry->task.min_free_bytes);
             if (err >= 0) {
                 do {
                     update_stack_min_free_insert_sorted(&list, entry);
                     if (err > 0) {
                         entry = (fgr_metrics_stack_min_free_bytes_entry_t *) malloc(sizeof(*entry));
                         if (!entry) {
-                            fgr_util_min_free_stack_stop();
+                            fgr_task_min_free_stack_stop();
                             break;
                         }
                     }
-                    err = fgr_util_min_free_stack_next(&entry->task.name, &entry->task.min_free_bytes);
+                    err = fgr_task_min_free_stack_next(&entry->task.name, &entry->task.min_free_bytes);
                 } while (err >= 0);
-                fgr_util_min_free_stack_stop();
+                fgr_task_min_free_stack_stop();
             }
         }
 
@@ -838,9 +839,9 @@ int32_t fgr_metrics_init(fgr_metrics_report_cb_t cb,
                 g_context.cb_param = cb_param;
 
                 // Start the metrics task
-                err = fgr_util_task_create(&task_metrics_cb, &g_context, "metrics",
-                                           FGR_METRICS_TASK_STACK_SIZE,
-                                           3, &g_context.task_handle);
+                err = fgr_task_create(&task_metrics_cb, &g_context, "metrics",
+                                      FGR_METRICS_TASK_STACK_SIZE,
+                                      3, &g_context.task_handle);
             }
 
             CONTEXT_UNLOCK(g_context.lock, "fgr_metrics_init()");

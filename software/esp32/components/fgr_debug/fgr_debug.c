@@ -42,6 +42,7 @@
 #include "mbedtls/base64.h"
 
 #include "fgr_util.h"
+#include "fgr_task.h"
 #include "fgr_nvs.h"
 #include "fgr_msg.h"
 #include "fgr_debug.h"
@@ -839,9 +840,9 @@ int32_t fgr_debug_init(fgr_debug_state_cb_t cb, void *cb_param)
                     err = ESP_ERR_NO_MEM;
                     g_context.queue_handle = xQueueCreate(10, sizeof(led_cmd_t));
                     if (g_context.queue_handle) {
-                        err = fgr_util_task_create(&task_led_cb, &g_context, "led",
-                                                   FGR_DEBUG_TASK_LED_STACK_SIZE,
-                                                   3, &g_context.task_handle);
+                        err = fgr_task_create(&task_led_cb, &g_context, "led",
+                                              FGR_DEBUG_TASK_LED_STACK_SIZE,
+                                              3, &g_context.task_handle);
                         if (err == ESP_OK) {
                             // Only now add the callback, when we know we can use it
                             g_context.cb = cb;
@@ -909,7 +910,7 @@ void fgr_debug_deinit()
 
         // Need to do this before taking the lock or we
         // will lock-up the task exit
-        fgr_util_task_destroy(g_context.task_handle);
+        fgr_task_destroy(g_context.task_handle);
         g_context.task_handle = NULL;
 
         CONTEXT_LOCK(g_context.lock, "fgr_debug_deinit()");

@@ -2,7 +2,7 @@
 idf_component_register(SRCS "fgr_metrics.c"
                        INCLUDE_DIRS "api"
                        # esp_wifi is only here for esp_wifi_sta_get_rssi()
-                       PRIV_REQUIRES esp_timer esp_wifi fgr_util fgr_time fgr_network)
+                       PRIV_REQUIRES esp_timer esp_wifi fgr_util fgr_task fgr_time fgr_network)
 target_compile_options(${COMPONENT_LIB} PRIVATE -Wall -Wextra -Werror)
 
 # Add the cJSON source file directly

@@ -35,6 +35,7 @@
 #include "sys/queue.h"
 
 #include "fgr_util.h"
+#include "fgr_task.h"
 #include "fgr_debug.h"
 #include "fgr_metrics.h"
 #include "fgr_socket.h"
@@ -738,10 +739,10 @@ int32_t fgr_msg_send_queue_init(size_t length)
         if (!g_context_send.queue_send) {
             g_context_send.queue_send = xQueueCreate(length, sizeof(msg_send_t));
             if (g_context_send.queue_send) {
-                err = fgr_util_task_create(&task_send_queue_cb, &g_context_send,
-                                            "send_queue",
-                                            FGR_MSG_TASK_SEND_QUEUE_STACK_SIZE,
-                                            5, &g_context_send.task_send_handle);
+                err = fgr_task_create(&task_send_queue_cb, &g_context_send,
+                                      "send_queue",
+                                      FGR_MSG_TASK_SEND_QUEUE_STACK_SIZE,
+                                      5, &g_context_send.task_send_handle);
                 if (err != ESP_OK) {
                     vQueueDelete(g_context_send.queue_send);
                     g_context_send.queue_send = NULL;
@@ -868,7 +869,7 @@ void fgr_msg_send_queue_deinit()
 
         // Need to do this before taking the lock or we
         // will lock-up the task exit
-        fgr_util_task_destroy(g_context_send.task_send_handle);
+        fgr_task_destroy(g_context_send.task_send_handle);
         g_context_send.task_send_handle = NULL;
 
         CONTEXT_LOCK(g_context_send.lock, "fgr_msg_send_queue_deinit()");

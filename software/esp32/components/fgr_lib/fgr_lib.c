@@ -28,6 +28,7 @@
 #include "esp_task_wdt.h"
 
 #include "fgr_util.h"
+#include "fgr_task.h"
 #include "fgr_time.h"
 #include "fgr_nvs.h"
 #include "fgr_ota.h"
@@ -75,8 +76,8 @@ int32_t fgr_lib_init(const char *ota_server_cert_pem,
     esp_task_wdt_reset();
 #endif
 
-    // Initialise utilities (needed for task creation)
-    int32_t err = fgr_util_init();
+    // Initialise tasking
+    int32_t err = fgr_task_init();
 
     // Configure metrics: needs tasks so has to come after
     // fgr_util_init()
@@ -188,7 +189,7 @@ void fgr_lib_deinit(void)
     fgr_network_deinit();
     fgr_debug_deinit();
     fgr_metrics_deinit();
-    fgr_util_deinit();
+    fgr_task_deinit();
 
     esp_task_wdt_delete(NULL);
 }

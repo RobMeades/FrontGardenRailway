@@ -34,9 +34,10 @@
 #include "errno.h"
 #include "lwip/sockets.h"
 
-#include "fgr_socket.h"
 #include "fgr_util.h"
+#include "fgr_task.h"
 #include "fgr_debug.h"
+#include "fgr_socket.h"
 
 /* ----------------------------------------------------------------
  * COMPILE-TIME MACROS
@@ -749,9 +750,9 @@ int32_t fgr_socket_channel_maintain(void **context,
         context_channel->down_cb = down_cb;
         context_channel->cfg_cb = cfg_cb;
         context_channel->cb_param = cb_param;
-        err = fgr_util_task_create(&task_maintain_cb, context_channel, "socket_maintain",
-                                   FGR_SOCKET_TASK_MAINTAIN_STACK_SIZE,
-                                   5, &context_channel->task_handle);
+        err = fgr_task_create(&task_maintain_cb, context_channel, "socket_maintain",
+                              FGR_SOCKET_TASK_MAINTAIN_STACK_SIZE,
+                              5, &context_channel->task_handle);
         if (err == ESP_OK) {
             char buffer[32];
             snprintf(buffer, sizeof(buffer), "heartbeat %d second(s)", context_channel->heartbeat_seconds);
@@ -816,7 +817,7 @@ void fgr_socket_channel_stop(void **context)
 
             // Need to do this before taking the lock or we
             // will lock-up the task exit
-            fgr_util_task_destroy(context_channel->task_handle);
+            fgr_task_destroy(context_channel->task_handle);
             context_channel->task_handle = NULL;
 
             CONTEXT_LOCK(context_channel->lock, "fgr_socket_stop()");
@@ -878,9 +879,9 @@ int32_t fgr_socket_receive_start(int sock,
             context_rx->reconnect_cb_param = reconnect_cb_param;
             context_rx->rx_cb = rx_cb;
             context_rx->rx_cb_param = rx_cb_param;
-            err = fgr_util_task_create(&task_rx_cb, context_rx, "socket_rx",
-                                       FGR_SOCKET_TASK_RX_STACK_SIZE,
-                                       5, &context_rx->task_handle);
+            err = fgr_task_create(&task_rx_cb, context_rx, "socket_rx",
+                                  FGR_SOCKET_TASK_RX_STACK_SIZE,
+                                  5, &context_rx->task_handle);
         }
         if ((err != ESP_OK) && context) {
             free(*context);
@@ -898,7 +899,7 @@ void fgr_socket_receive_stop(void **context)
         context_rx_t *context_rx = (context_rx_t *) *context;
         if (context_rx && context_rx->task_handle) {
 
-            fgr_util_task_destroy(context_rx->task_handle);
+            fgr_task_destroy(context_rx->task_handle);
             context_rx->task_handle = NULL;
             free(*context);
             *context = NULL;

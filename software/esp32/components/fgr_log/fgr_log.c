@@ -35,6 +35,7 @@
 #include "errno.h"
 
 #include "fgr_util.h"
+#include "fgr_task.h"
 #include "fgr_metrics.h"
 #include "fgr_socket.h"
 #include "fgr_msg.h"
@@ -65,8 +66,8 @@
 #  define LOG_SOCKET_TCP_KEEP_ALIVE_COUNT   3
 #endif
 
-#ifndef FGR_MSG_TASK_LOG_STACK_SIZE
-#  define FGR_MSG_TASK_LOG_STACK_SIZE (1024 * 4)
+#ifndef FGR_LOG_TASK_STACK_SIZE
+#  define FGR_LOG_TASK_STACK_SIZE (1024 * 4)
 #endif
 
 #ifndef LOG_QUEUE_LENGTH
@@ -189,7 +190,7 @@ static void clean_up()
 
         // Need to do this before taking the lock or we
         // will lock-up the task exit
-        fgr_util_task_destroy(g_context.task_handle);
+        fgr_task_destroy(g_context.task_handle);
         g_context.task_handle = NULL;
 
         CONTEXT_LOCK(g_context.lock, "clean_up() log");
@@ -762,9 +763,9 @@ int32_t fgr_log_init(const char *server_ip, uint16_t port,
                             // Continue without it
                             err = ESP_OK;
                         }
-                        err = fgr_util_task_create(&task_log_cb, &g_context, "log",
-                                                    FGR_MSG_TASK_LOG_STACK_SIZE,
-                                                    5, &g_context.task_handle);
+                        err = fgr_task_create(&task_log_cb, &g_context, "log",
+                                              FGR_LOG_TASK_STACK_SIZE,
+                                              5, &g_context.task_handle);
                         if (err != ESP_OK) {
                             vQueueDelete(g_context.queue_handle);
                             g_context.queue_handle = NULL;
