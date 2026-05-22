@@ -51,10 +51,12 @@ typedef void (*fgr_task_cb_t)(void *param);
  *
  * @param state  the task state.
  * @param handle the handle of the task.
+ * @param name   the task name, may be NULL.
  * @param param  cb_param as passed to fgr_task_state_cb().
  */
 typedef void (*fgr_task_state_cb_t)(fgr_task_state_t state,
                                     void *handle,
+                                    const char *name,
                                     void *param);
 
 /* ----------------------------------------------------------------
@@ -134,8 +136,6 @@ bool fgr_task_is_running(void *handle);
  * called every on every task loop, and do not call into the
  * task API from the callback as that will cause a deadlock.
  *
- * @param handle    the handle of the task whose state is
- *                  required; cannot be NULL.
  * @param cb        the callback; use NULL to cancel a previous
  *                  callback.
  * @param cb_param  parameter that will be passed to cb()
@@ -143,7 +143,7 @@ bool fgr_task_is_running(void *handle);
  * @return          ESP_OK on success, else a negative value
  *                  from esp_err_t.
  */
-int32_t fgr_task_state_cb(void *handle, fgr_task_state_cb_t cb,
+int32_t fgr_task_state_cb(fgr_task_state_cb_t cb,
                           void *cb_param);
 
 /** Get the stack high watermark, i.e. the smallest

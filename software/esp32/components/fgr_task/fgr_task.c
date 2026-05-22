@@ -44,18 +44,24 @@
  * TYPES
  * -------------------------------------------------------------- */
 
+// Structure to allow monitoring of a task's state.
+typedef struct {
+    SemaphoreHandle_t lock;
+    fgr_task_state_cb_t cb;
+    void *cb_param;
+} task_state_t;
+
 // Structure that defines all the things we need for a task,
 // designed to be used as part of a linked list.
 typedef struct task_t {
     fgr_task_cb_t cb;
     void *cb_param;
-    fgr_task_state_cb_t state_cb;
-    void *state_cb_param;
     const char *name;
     TaskHandle_t handle;
     bool running;
     SemaphoreHandle_t running_semaphore;
     int32_t min_free_stack_bytes;
+    task_state_t state;
     SLIST_ENTRY(task_t) next;
 } task_t;
 
@@ -67,6 +73,8 @@ typedef struct {
     SemaphoreHandle_t lock;
     task_t *min_free_stack_next_task;
     struct task_list_t task_list;
+    fgr_task_state_cb_t global_task_state_cb;
+    void *global_task_state_cb_param;
 } context_t;
 
 /* ----------------------------------------------------------------
@@ -84,7 +92,8 @@ static context_t g_context = {0};
 static void task_base(void *param)
 {
     task_t *task = (task_t *) param;
-    fgr_task_state_cb_t state_cb = task->state_cb;
+    task_state_t task_state_stored = task->state;
+    task_state_t *task_state = &task->state;
 
     esp_task_wdt_add(NULL);
 
@@ -102,15 +111,18 @@ static void task_base(void *param)
         // If there is a task state callback,
         // pass it an initial "STARTED" indication,
         // or otherwise a "RUNNING" indication
-        if (task->state_cb) {
+        CONTEXT_LOCK(task_state->lock, "task state 1");
+        if (task_state->cb) {
             fgr_task_state_t state = FGR_TASK_STATE_RUNNING;
-            if (state_cb != task->state_cb) {
+            if ((task_state->cb != task_state_stored.cb) ||
+                (task_state->cb_param != task_state_stored.cb_param)) {
                 state = FGR_TASK_STATE_STARTED;
             }
-            task->state_cb(state, task->handle,
-                           task->state_cb_param);
+            task_state->cb(state, task->handle, task->name,
+                           task_state->cb_param);
         }
-        state_cb = task->state_cb;
+        task_state_stored = task->state;
+        CONTEXT_UNLOCK(task_state->lock, "task state 1");
 
         esp_task_wdt_reset();
         vTaskDelay(pdMS_TO_TICKS(FGR_UTIL_WATCHDOG_FEED_TIME_MS));
@@ -118,10 +130,13 @@ static void task_base(void *param)
 
     ESP_LOGI(TAG, "task \"%s\" exiting.", task->name);
 
-    if (task->state_cb) {
-        task->state_cb(FGR_TASK_STATE_STOPPED,
-                       task->handle, task->state_cb_param);
+    CONTEXT_LOCK(task_state->lock, "task state 2");
+    if (task_state->cb) {
+        task_state->cb(FGR_TASK_STATE_STOPPED,
+                       task->handle, task->name,
+                       task->cb_param);
     }
+    CONTEXT_UNLOCK(task_state->lock, "task state 2");
 
     CONTEXT_UNLOCK(task->running_semaphore, task->name);
 
@@ -138,9 +153,12 @@ static void task_destroy(task_t *task)
         task->running = false;
         if (task->running_semaphore) {
             // Take the running semaphore to know its stopped
-            CONTEXT_LOCK(task->running_semaphore, "task_destroy()");
-            CONTEXT_UNLOCK(task->running_semaphore, "task_destroy()");
+            CONTEXT_LOCK(task->running_semaphore, "task_destroy() 1");
+            CONTEXT_UNLOCK(task->running_semaphore, "task_destroy() 1");
             vSemaphoreDelete(task->running_semaphore);
+        }
+        if (task->state.lock) {
+            vSemaphoreDelete(task->state.lock);
         }
         // Remove the task from the list, if present
         task_t *iter;
@@ -210,11 +228,8 @@ void fgr_task_deinit()
  * -------------------------------------------------------------- */
 
 // Create a task.
-int32_t fgr_task_create(fgr_task_cb_t cb,
-                        void *cb_param,
-                        const char *name,
-                        size_t stack_size_bytes,
-                        int32_t priority,
+int32_t fgr_task_create(fgr_task_cb_t cb, void *cb_param, const char *name,
+                        size_t stack_size_bytes, int32_t priority,
                         void *handle)
 {
     int32_t err = -ESP_ERR_INVALID_ARG;
@@ -231,12 +246,18 @@ int32_t fgr_task_create(fgr_task_cb_t cb,
             task_t *task = (task_t *) malloc(sizeof(*task ));
             if (task) {
                 memset(task, 0, sizeof(*task));
-                task->cb = cb;
-                task->cb_param = cb_param;
-                task->name = name;
-                task->running_semaphore = xSemaphoreCreateMutex();
+                task_state_t *state = &task->state;
+                state->lock = xSemaphoreCreateMutex();
+                if (state->lock) {
+                    state->cb = g_context.global_task_state_cb;
+                    state->cb_param = g_context.global_task_state_cb_param;
+                    task->cb = cb;
+                    task->cb_param = cb_param;
+                    task->name = name;
+                    task->running_semaphore = xSemaphoreCreateMutex();
+                }
             }
-            if (task && task->running_semaphore) {
+            if (task && task->state.lock && task->running_semaphore) {
                 task->running = true;
                 if (xTaskCreate(task_base, name, stack_size_bytes,
                                 task, priority, &task->handle) == pdPASS) {
@@ -306,30 +327,29 @@ bool fgr_task_is_running(void *handle)
 }
 
 // Set a callback that will be called every task loop.
-int32_t fgr_task_state_cb(void *handle,
-                          fgr_task_state_cb_t cb,
+int32_t fgr_task_state_cb(fgr_task_state_cb_t cb,
                           void *cb_param)
 {
-    int32_t err = -ESP_ERR_INVALID_ARG;
+    int32_t err = -ESP_ERR_INVALID_STATE;
 
-    if (handle) {
-        err = -ESP_ERR_INVALID_STATE;
+    if (g_context.lock) {
 
-        if (g_context.lock) {
+        CONTEXT_LOCK(g_context.lock, "fgr_task_state_cb()");
 
-            CONTEXT_LOCK(g_context.lock, "fgr_state_cb()");
+        g_context.global_task_state_cb = cb;
+        g_context.global_task_state_cb_param = cb_param;
 
-            task_t *iter;
-            SLIST_FOREACH(iter, &g_context.task_list, next) {
-                if (iter->handle == handle) {
-                    iter->state_cb = cb;
-                    iter->state_cb_param = cb_param;
-                    break;
-                }
-            }
-
-            CONTEXT_UNLOCK(g_context.lock, "fgr_task_state_cb()");
+        task_t *iter;
+        SLIST_FOREACH(iter, &g_context.task_list, next) {
+            task_state_t *task_state = &iter->state;
+            CONTEXT_LOCK(task_state->lock, iter->name);
+            task_state->cb = g_context.global_task_state_cb;
+            task_state->cb_param = g_context.global_task_state_cb_param;
+            CONTEXT_UNLOCK(task_state->lock, iter->name);
         }
+        err = ESP_OK;
+
+        CONTEXT_UNLOCK(g_context.lock, "fgr_task_state_cb()");
     }
 
     return err;

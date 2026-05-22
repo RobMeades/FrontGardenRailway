@@ -64,14 +64,14 @@ extern "C" {
 # if 0
 // Lock a context.
 #  define CONTEXT_LOCK(semaphore, dbg)    {                                               \
-                                              printf(TAG "+SEM 0 %s\n", dbg);             \
+                                              printf(TAG "+SEM 0 %s\n", dbg ? dbg : "");  \
                                               xSemaphoreTake(semaphore, portMAX_DELAY);   \
-                                              printf(TAG "+SEM 1 %s\n", dbg)
+                                              printf(TAG "+SEM 1 %s\n", dbg ? dbg : "")
 
 // Unlock a context.
-#  define CONTEXT_UNLOCK(semaphore, dbg)      printf(TAG "-SEM 1 %s\n", dbg);             \
-                                              xSemaphoreGive(semaphore);                  \
-                                              printf(TAG "-SEM 0 %s\n", dbg);             \
+#  define CONTEXT_UNLOCK(semaphore, dbg)      printf(TAG "-SEM 1 %s\n", dbg ? dbg : "");    \
+                                              xSemaphoreGive(semaphore);                    \
+                                              printf(TAG "-SEM 0 %s\n", dbg ? dbg : "");    \
                                           }
 #else
 // Lock a context.

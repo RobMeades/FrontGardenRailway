@@ -47,8 +47,8 @@ extern "C" {
  * FUNCTIONS
  * -------------------------------------------------------------- */
 
-/** Initialise all libraries.  It is always safe to call this at any
- * time.  Note that there will be a delay of
+/** Initialise all libraries.  Should only be called ONCE at start
+ * of day.  Note that there will be a delay of
  * FGR_LIB_INITIALISATION_DELAY_SECONDS before acting.
  *
  * Note: this will also enable the task watchdog.
@@ -74,6 +74,15 @@ extern "C" {
  *                              fashion after the* send, so don't do much in
  *                              your callback unless you are* happy to delay
  *                              message transmission.
+ * @param cb                    a callback that will be called just before
+ *                              fgr_monitor calls abort() to cause a system
+ *                              restart; use this to do any absolutely
+ *                              necessary tidy-ups in your application, noting
+ *                              that the system may be unstable at the time,
+ *                              otherwise the monitor task wouldn't be calling
+ *                              abort().  You don't need to call fgr_lib_deinit()
+ *                              (fgr_monitor will do that), though there is no
+ *                              harm in doing so.  May be NULL.
  * @param cb_param              parameter that will be passed to state_cb()
  *                              and send_cb() when they are called; may be NULL.
  * @return                      ESP_OK on success, else a negative value
@@ -82,9 +91,9 @@ extern "C" {
  */
 int32_t fgr_lib_init(const char *ota_server_cert_pem,
                      fgr_msg_state_cb_t state_cb, fgr_msg_send_cb_t send_cb,
-                     void *cb_param);
+                     fgr_monitor_cb_t monitor_cb, void *cb_param);
 
-/** Deinitialise all libraries.  It is always safe to call this at any time.
+/** Deinitialise all libraries.  Should only be called ONCE at end of day.
  */
 void fgr_lib_deinit();
 
