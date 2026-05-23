@@ -27,7 +27,6 @@
 #include <inttypes.h>
 #include "freertos/FreeRTOS.h"
 #include "esp_system.h"
-#include "esp_task_wdt.h"
 #include "esp_log.h"
 #include "driver/uart.h"
 

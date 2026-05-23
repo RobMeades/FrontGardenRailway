@@ -23,13 +23,11 @@ CONFIG_NVS_ENCRYPTION=n
 CONFIG_ESP_INT_WDT=y
 # Enable the Task WDT to catch stuck tasks (default anyway, but just in case)
 CONFIG_ESP_TASK_WDT=y
-# 10 second watchog time: long enough to connect to WiFi and do an OTA update
-CONFIG_ESP_TASK_WDT_TIMEOUT_S=10
+# 15 second watchog time, though fgr_monitor will come 5 seconds before this:
+# long enough to connect to WiFi and do an OTA update
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=15
 # Make the Task WDT cause a panic (and thus a reset) on timeout
 CONFIG_ESP_TASK_WDT_PANIC=y
-
-# Enable panic handler to print backtrace to serial console (default anyway, but just in case)
-CONFIG_ESP_SYSTEM_PANIC_PRINT_BACKTRACE=y
 
 # Enable core dumps (needs coredump region of size at least 64 kbytes in partitions.csv)
 CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y

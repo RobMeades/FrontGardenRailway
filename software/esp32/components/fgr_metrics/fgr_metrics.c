@@ -529,9 +529,11 @@ static void update_heap_min_free(fgr_metrics_storage_t *metrics_list)
  * -------------------------------------------------------------- */
 
 // Metrics task.
-static void task_metrics_cb(void *param)
+static void task_metrics_cb(void *handle, void *param)
 {
     context_t *context = (context_t *) param;
+
+    (void) handle;
 
     CONTEXT_LOCK(context->lock, "task_metrics_cb()");
 

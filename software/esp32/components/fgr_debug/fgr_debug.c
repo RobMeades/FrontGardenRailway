@@ -28,7 +28,6 @@
 #include "freertos/task.h"
 #include "freertos/queue.h"
 #include "esp_system.h"
-#include "esp_task_wdt.h"
 #include "esp_log.h"
 #include "errno.h"
 #include "ctype.h"
@@ -42,6 +41,7 @@
 #include "mbedtls/base64.h"
 
 #include "fgr_util.h"
+#include "fgr_monitor.h"
 #include "fgr_task.h"
 #include "fgr_nvs.h"
 #include "fgr_msg.h"
@@ -235,7 +235,7 @@ typedef struct {
 typedef struct {
     int32_t magic;
     backtrace_t backtrace;
-    char stack_overflow_task_name[FGR_DEBUG_TASK_NAME_MAX_LENGTH];
+    char stack_overflow_task_name[FGR_UTIL_TASK_NAME_MAX_LENGTH];
 } retained_ram_t;
 
 /* ----------------------------------------------------------------
@@ -626,13 +626,15 @@ static void update_led(context_t *context)
 }
 
 // LED task callback
-static void task_led_cb(void *param)
+static void task_led_cb(void *handle, void *param)
 {
     context_t *context = (context_t *) param;
     breathe_state_t *breathe_state = &(context->breathe_state);
     flash_state_t *flash_state = &(context->flash_state);
     static uint32_t last_update_ms = 0;
     led_cmd_t cmd;
+
+    (void) handle;
 
     uint32_t now_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
 
@@ -1178,7 +1180,7 @@ int32_t fgr_debug_stack_overflow_log(const char *tag, const char *prefix,
                                      esp_log_level_t level)
 {
     int32_t err = ESP_OK;
-    char buffer[FGR_DEBUG_TASK_NAME_MAX_LENGTH];
+    char buffer[FGR_UTIL_TASK_NAME_MAX_LENGTH];
 
     int32_t length = fgr_debug_stack_overflow_get(buffer);
     if (length > 0) {
@@ -1268,8 +1270,8 @@ int32_t fgr_debug_core_dump_get(const char *tag, esp_log_level_t level)
  * PUBLIC FUNCTIONS: MISC
  * -------------------------------------------------------------- */
 
-// A message receive callback.
-bool fgr_debug_msg_receive_cb(fgr_msg_t *msg, void *param)
+// A message receive handler callback.
+bool fgr_debug_msg_receive_handler_cb(fgr_msg_t *msg, void *param)
 {
     bool handled = false;
     uint32_t length = 0;
@@ -1305,11 +1307,11 @@ bool fgr_debug_msg_receive_cb(fgr_msg_t *msg, void *param)
                 // representing the bool of LED
                 // on/off and another representing
                 // the bool of LED breathe on/off
-                CONTEXT_LOCK(g_context.lock, "fgr_debug_msg_receive_cb()");
+                CONTEXT_LOCK(g_context.lock, "fgr_debug_msg_receive_handler_cb()");
                 contents[0] = !g_context.led_masked_off;
                 contents[1] = g_context.breathe_state.enabled;
                 length = 2;
-                CONTEXT_UNLOCK(g_context.lock, "fgr_debug_msg_receive_cb()");
+                CONTEXT_UNLOCK(g_context.lock, "fgr_debug_msg_receive_handler_cb()");
                 msg_error = FGR_ERROR_NONE;
             break;
             default:

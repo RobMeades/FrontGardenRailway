@@ -62,7 +62,7 @@ extern "C" {
  * TYPES
  * -------------------------------------------------------------- */
 
-/** Function to call when a message is received.
+/** Function to call to handle a received message.
  *
  * @param msg    a pointer to the message: this should be handled/
  *               copied/whatever before the callback returns.
@@ -70,7 +70,7 @@ extern "C" {
  * @return       true if the message is handled, false if it
  *               can be passed to subsequent handlers.
  */
-typedef bool (*fgr_msg_rx_cb_t)(fgr_msg_t *msg, void *param);
+typedef bool (*fgr_msg_receive_handler_cb_t)(fgr_msg_t *msg, void *param);
 
 /** Function to call to obtain the state of a node.
  *
@@ -81,7 +81,7 @@ typedef fgr_state_t (*fgr_msg_state_cb_t)(void *param);
 
 /** Function to call to obtain an RSSI reading.
  *
- * @param param  cb_param as passed to fgr_msg_rssi_cb().
+ * @param param  cb_param as passed to fgr_msg_rssi_cb_set().
  * @return       the RSSI reading in dBm.
  */
 typedef int8_t (*fgr_msg_rssi_cb_t)(void *param);
@@ -99,9 +99,15 @@ typedef void (*fgr_msg_connection_state_cb_t) (bool upNotDOwn, void *param);
 
 /** Function to call to when a message is sent.
  *
- * @param param  cb_param as passed to fgr_msg_send_cb().
+ * @param param  cb_param as passed to fgr_msg_send_cb_set().
  */
 typedef void (*fgr_msg_send_cb_t)(void *param);
+
+/** Function to call to when a message is received.
+ *
+ * @param param  cb_param as passed to fgr_msg_receive_cb_set().
+ */
+typedef void (*fgr_msg_receive_cb_t)(void *param);
 
 /** Function to populate a buffer with what will be
  * the contents of an FGR_REQ_CNF_PING response to
@@ -179,7 +185,7 @@ void fgr_msg_deinit();
  *                  when it is called; may be NULL.
  * @return          ESP_OK on success, else a negative value from esp_err_t.
  */
-int32_t fgr_msg_rssi_cb(fgr_msg_rssi_cb_t cb, void *cb_param);
+int32_t fgr_msg_rssi_cb_set(fgr_msg_rssi_cb_t cb, void *cb_param);
 
 /* ----------------------------------------------------------------
  * FUNCTIONS: SENDING
@@ -311,7 +317,7 @@ void fgr_msg_send_queue_deinit();
  * @return          ESP_OK on success, else a negative value
  *                  from esp_err_t.
  */
-int32_t fgr_msg_send_cb(fgr_msg_send_cb_t cb, void *cb_param);
+int32_t fgr_msg_send_cb_set(fgr_msg_send_cb_t cb, void *cb_param);
 
 /** This library will automatically confirm a FGR_REQ_CNF_PING
  * message: with this function you may set a callback that
@@ -347,6 +353,24 @@ int32_t fgr_msg_send_ping_body_cb(fgr_msg_send_ping_body_cb_t cb,
  * @return ESP_OK on success, else a negative value from esp_err_t.
  */
 int32_t fgr_msg_receive_start();
+
+/** Set a callback to be called whenever a message is
+ * received.  Note that this does not pass on the message to
+ * be handled, for that see fgr_msg_receive_handler_add(),
+ * it is only useful as a kind of "the link is alive" prompt,
+ * for instance to pass to fgr_monitor_msg_receive_cb().
+ *
+ * IMPORTANT: do not call into the msg API from the callback
+ * as that will cause a deadlock.
+ *
+ * @param cb        the callback; use NULL to cancel a previous
+ *                  callback.
+ * @param cb_param  parameter that will be passed to cb()
+ *                  when it is called; may be NULL.
+ * @return          ESP_OK on success, else a negative value
+ *                  from esp_err_t.
+ */
+int32_t fgr_msg_receive_cb_set(fgr_msg_receive_cb_t cb, void *cb_param);
 
 /** Add a message receive handler: when a message of the given
  * type has been decoded the handler will be called;  If the
@@ -389,7 +413,7 @@ int32_t fgr_msg_receive_start();
  *                  from esp_err_t.
  */
 int32_t fgr_msg_receive_handler_add(uint16_t msg_type,
-                                    fgr_msg_rx_cb_t cb,
+                                    fgr_msg_receive_handler_cb_t cb,
                                     void *cb_param);
 
 /** Remove a message receive handler that was added with
@@ -401,7 +425,7 @@ int32_t fgr_msg_receive_handler_add(uint16_t msg_type,
  * @param cb  address of the handler that was added with
  *            fgr_msg_receive_handler_add().
  */
-void fgr_msg_receive_handler_remove_by_cb(fgr_msg_rx_cb_t cb);
+void fgr_msg_receive_handler_remove_by_cb(fgr_msg_receive_handler_cb_t cb);
 
 /** Remove a message receive handler that was added with
  * fgr_msg_receive_handler_add().  ALL message handlers with

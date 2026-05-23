@@ -182,12 +182,6 @@ extern "C" {
 #  define FGR_DEBUG_BACKTRACE_NUMBER_LENGTH 11
 #endif
 
-#ifndef FGR_DEBUG_TASK_NAME_MAX_LENGTH
-// The maximum length of a task name (for stack overflows) including
-// room for a null terminator.
-#  define FGR_DEBUG_TASK_NAME_MAX_LENGTH (16 + 1)
-#endif
-
 // The length of buffer required to encode the maximum length
 // backtrace, including room for a null terminator, enough space
 // for FGR_DEBUG_BACKTRACE_BUFFER_NUMBER_LENGTH characters N times
@@ -334,7 +328,7 @@ void fgr_debug_led_breathe_set(fgr_debug_colour_t colour);
  *
  *
  * See also fgr_debug_panic_str_get() ,fgr_debug_panic_str_get()
- * and fgr_debug_panic_log(.)
+ * and fgr_debug_panic_log().
  *
  * @param backtrace  a pointer to storage for
  *                   FGR_DEBUG_BACKTRACE_DEPTH_MAX uint32_t values
@@ -457,12 +451,12 @@ int32_t fgr_debug_core_dump_get(const char *tag, esp_log_level_t level);
  * FUNCTIONS: MISC
  * -------------------------------------------------------------- */
 
-/** A message receive callback that will handle
+/** A message receive handler callback that will handle
  * the FGR_REQ_CNF_DEBUG_* messages: add this to your
  * application's message receive chain (before
  * your own handlers so that it is below them) with:
  *
- * fgr_msg_receive_handler_add(0, fgr_debug_msg_receive_cb, NULL);
+ * fgr_msg_receive_handler_add(0, fgr_debug_msg_receive_handler_cb, NULL);
  *
  * ...and this code will deal with them for you.
  *
@@ -475,7 +469,7 @@ int32_t fgr_debug_core_dump_get(const char *tag, esp_log_level_t level);
  * @return       true if the message is handled, false if it
  *               can be passed to subsequent handlers.
  */
-bool fgr_debug_msg_receive_cb(fgr_msg_t *msg, void *param);
+bool fgr_debug_msg_receive_handler_cb(fgr_msg_t *msg, void *param);
 
 /** Print out our MAC address if possible.
  */

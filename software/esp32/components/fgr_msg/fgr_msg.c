@@ -29,12 +29,12 @@
 #include "freertos/task.h"
 #include "freertos/queue.h"
 #include "esp_system.h"
-#include "esp_task_wdt.h"
 #include "esp_log.h"
 #include "arpa/inet.h"
 #include "sys/queue.h"
 
 #include "fgr_util.h"
+#include "fgr_monitor.h"
 #include "fgr_task.h"
 #include "fgr_debug.h"
 #include "fgr_metrics.h"
@@ -88,15 +88,15 @@ typedef struct {
 
 // Structure to store a message receive callback and its parameter
 // as part of a linked list
-typedef struct msg_rx_cb_t {
-    fgr_msg_rx_cb_t cb;
+typedef struct msg_rx_handler_cb_t {
+    fgr_msg_receive_handler_cb_t cb;
     void *cb_param;
     uint16_t msg_type;
-    SLIST_ENTRY(msg_rx_cb_t) next;
-} msg_rx_cb_t;
+    SLIST_ENTRY(msg_rx_handler_cb_t) next;
+} msg_rx_handler_cb_t;
 
 // Message receive callback list head.
-SLIST_HEAD(msg_rx_cb_list_t, msg_rx_cb_t);
+SLIST_HEAD(msg_rx_handler_cb_list_t, msg_rx_handler_cb_t);
 
 // Context for message send queue.
 typedef struct {
@@ -118,10 +118,12 @@ typedef struct {
     void *rssi_cb_param;
     fgr_msg_send_cb_t send_cb;
     void *send_cb_param;
+    fgr_msg_receive_cb_t receive_cb;
+    void *receive_cb_param;
     fgr_msg_send_ping_body_cb_t send_ping_body_cb;
     void *send_ping_body_cb_param;
     void *context_rx;
-    struct msg_rx_cb_list_t msg_rx_cb_list;
+    struct msg_rx_handler_cb_list_t msg_rx_handler_cb_list;
     context_decoder_t context_decoder;
 } context_t;
 
@@ -386,10 +388,12 @@ static int32_t send_msg(uint16_t type, uint8_t error_state,
  * -------------------------------------------------------------- */
 
 // Send messages that were put on the send queue.
-static void task_send_queue_cb(void *param)
+static void task_send_queue_cb(void *handle, void *param)
 {
     context_send_t *context = (context_send_t *) param;
     msg_send_t msg;
+
+    (void) handle;
 
     if (xQueueReceive(context->queue_send, &msg, pdMS_TO_TICKS(100)) == pdPASS) {
         if (msg.type == FGR_MSG_TYPE_CNF) {
@@ -517,10 +521,14 @@ static void receive_cb(void *buffer, size_t length, void *param)
                      buffer_str, msg->header.req.type, msg->header.req.reference,
                      msg->body.length);
 
-            // Got a complete message, pass it to all who want it
-            struct msg_rx_cb_t *iter;
+            // Got a complete message, ping whoever wanted to know we're connected
+            if (context->receive_cb) {
+                context->receive_cb(context->receive_cb_param);
+            }
+            // Then pass it to all who want it
+            struct msg_rx_handler_cb_t *iter;
             bool handled = false;
-            SLIST_FOREACH(iter, &context->msg_rx_cb_list, next) {
+            SLIST_FOREACH(iter, &context->msg_rx_handler_cb_list, next) {
                 if ((iter->msg_type == 0) ||
                     (iter->msg_type == msg->header.req.type)) {
                     handled = iter->cb(msg, iter->cb_param);
@@ -531,7 +539,9 @@ static void receive_cb(void *buffer, size_t length, void *param)
                 }
             }
             if (!handled) {
-                if (MSG_MASK(msg->header.req.type) == FGR_REQ_CNF_PING) {
+                if (MSG_MASK(msg->header.req.type) == FGR_IND_RSP_HEARTBEAT) {
+                    // Just absorb these
+                } else if (MSG_MASK(msg->header.req.type) == FGR_REQ_CNF_PING) {
                     // If a ping request has not been handled, handle
                     // it automatically
                     receive_handler_ping_locked(context,
@@ -577,6 +587,8 @@ static void clean_up()
         g_context.rssi_cb_param = NULL;
         g_context.send_cb = NULL;
         g_context.send_cb_param = NULL;
+        g_context.receive_cb = NULL;
+        g_context.receive_cb_param = NULL;
 
         // In case we were in the middle of a decode
         decoder_free(&g_context.context_decoder);
@@ -602,7 +614,7 @@ int32_t fgr_msg_init(const char *server_ip, uint16_t port,
             // Create mutex
             err = -ESP_ERR_NO_MEM;
             g_context.lock = xSemaphoreCreateMutex();
-            SLIST_INIT(&g_context.msg_rx_cb_list);
+            SLIST_INIT(&g_context.msg_rx_handler_cb_list);
         }
 
         if (g_context.lock) {
@@ -618,8 +630,8 @@ int32_t fgr_msg_init(const char *server_ip, uint16_t port,
 
                 // Create connection to server
                 err = fgr_socket_channel_start(server_ip, port,
-                                            &g_context.sock,
-                                            &g_context.context_sock);
+                                               &g_context.sock,
+                                               &g_context.context_sock);
                 if (err == ESP_OK) {
 
                     fgr_metrics_event_bool_set(FGR_METRIC_EVENT_BOOL_CONTROLLER_CONNECTION,
@@ -632,11 +644,11 @@ int32_t fgr_msg_init(const char *server_ip, uint16_t port,
 
                     // Maintain the connection
                     err = fgr_socket_channel_maintain(&g_context.context_sock,
-                                                    heartbeat_seconds,
-                                                    socket_heartbeat_cb,
-                                                    socket_reconnect_cb,
-                                                    socket_down_cb,
-                                                    &g_context);
+                                                      heartbeat_seconds,
+                                                      socket_heartbeat_cb,
+                                                      socket_reconnect_cb,
+                                                      socket_down_cb,
+                                                      &g_context);
                     if (err != ESP_OK) {
                         fgr_socket_channel_stop(&g_context.context_sock);
                         g_context.sock = -1;
@@ -666,7 +678,7 @@ void fgr_msg_deinit()
 }
 
 // Set a callback that will return an RSSI reading.
-int32_t fgr_msg_rssi_cb(fgr_msg_rssi_cb_t cb, void *cb_param)
+int32_t fgr_msg_rssi_cb_set(fgr_msg_rssi_cb_t cb, void *cb_param)
 {
     int32_t err = -ESP_ERR_INVALID_STATE;
 
@@ -878,7 +890,6 @@ void fgr_msg_send_queue_deinit()
             while (xQueueReceive(g_context_send.queue_send, &msg, 0) == pdTRUE) {
                 free(msg.body_contents);
                 vTaskDelay(pdMS_TO_TICKS(FGR_UTIL_WATCHDOG_FEED_TIME_MS));
-                esp_task_wdt_reset();
             }
             vQueueDelete(g_context_send.queue_send);
             g_context_send.queue_send = NULL;
@@ -889,7 +900,7 @@ void fgr_msg_send_queue_deinit()
 }
 
 // Set a callback to be called whenever a message is sent.
-int32_t fgr_msg_send_cb(fgr_msg_send_cb_t cb, void *cb_param)
+int32_t fgr_msg_send_cb_set(fgr_msg_send_cb_t cb, void *cb_param)
 {
     int32_t err = -ESP_ERR_INVALID_STATE;
 
@@ -948,9 +959,26 @@ int32_t fgr_msg_receive_start()
     return err;
 }
 
+// Set a callback for whenever a message is received.
+int32_t fgr_msg_receive_cb_set(fgr_msg_receive_cb_t cb, void *cb_param)
+{
+    int32_t err = -ESP_ERR_INVALID_STATE;
+
+    if (g_context.lock) {
+
+        CONTEXT_LOCK(g_context.lock, "fgr_msg_receive_cb_set()");
+        g_context.receive_cb = cb;
+        g_context.receive_cb_param = cb_param;
+        err = ESP_OK;
+        CONTEXT_UNLOCK(g_context.lock, "fgr_msg_receive_cb_set()");
+    }
+
+    return err;
+}
+
 // Add a message receive handler.
 int32_t fgr_msg_receive_handler_add(uint16_t msg_type,
-                                    fgr_msg_rx_cb_t cb,
+                                    fgr_msg_receive_handler_cb_t cb,
                                     void *cb_param)
 {
     int32_t err = -ESP_ERR_INVALID_STATE;
@@ -962,14 +990,14 @@ int32_t fgr_msg_receive_handler_add(uint16_t msg_type,
              ((msg_type >> 12) == FGR_MSG_TYPE_REQ) ||
              ((msg_type >> 12) == FGR_MSG_TYPE_IND))) {
             err = -ESP_ERR_NO_MEM;
-            msg_rx_cb_t *msg_rx_cb = (msg_rx_cb_t *) malloc(sizeof(*msg_rx_cb));
+            msg_rx_handler_cb_t *msg_rx_cb = (msg_rx_handler_cb_t *) malloc(sizeof(*msg_rx_cb));
             if (msg_rx_cb) {
                 msg_rx_cb->msg_type = msg_type;
                 msg_rx_cb->cb = cb;
                 msg_rx_cb->cb_param = cb_param;
 
                 CONTEXT_LOCK(g_context.lock, "fgr_msg_receive_handler_add()");
-                SLIST_INSERT_HEAD(&g_context.msg_rx_cb_list, msg_rx_cb, next);
+                SLIST_INSERT_HEAD(&g_context.msg_rx_handler_cb_list, msg_rx_cb, next);
                 CONTEXT_UNLOCK(g_context.lock, "fgr_msg_receive_handler_add()");
 
                 err = ESP_OK;
@@ -981,18 +1009,18 @@ int32_t fgr_msg_receive_handler_add(uint16_t msg_type,
 }
 
 // Remove a message receive handler.
-void fgr_msg_receive_handler_remove_by_cb(fgr_msg_rx_cb_t cb)
+void fgr_msg_receive_handler_remove_by_cb(fgr_msg_receive_handler_cb_t cb)
 {
     if (g_context.lock && cb) {
 
         CONTEXT_LOCK(g_context.lock, "fgr_msg_receive_handler_remove_by_cb()");
-        msg_rx_cb_t *iter;
-        msg_rx_cb_t *prev = NULL;
-        SLIST_FOREACH(iter, &g_context.msg_rx_cb_list, next) {
+        msg_rx_handler_cb_t *iter;
+        msg_rx_handler_cb_t *prev = NULL;
+        SLIST_FOREACH(iter, &g_context.msg_rx_handler_cb_list, next) {
             if (iter->cb == cb) {
                 if (prev == NULL) {
                     // Removing the first element
-                    SLIST_REMOVE_HEAD(&g_context.msg_rx_cb_list, next);
+                    SLIST_REMOVE_HEAD(&g_context.msg_rx_handler_cb_list, next);
                 } else {
                     // Removing a middle element
                     SLIST_REMOVE_AFTER(prev, next);
@@ -1015,13 +1043,13 @@ void fgr_msg_receive_handler_remove_by_type(uint16_t msg_type)
     if (g_context.lock) {
 
         CONTEXT_LOCK(g_context.lock, "fgr_msg_receive_handler_remove_by_type()");
-        msg_rx_cb_t *iter;
-        msg_rx_cb_t *prev = NULL;
-        SLIST_FOREACH(iter, &g_context.msg_rx_cb_list, next) {
+        msg_rx_handler_cb_t *iter;
+        msg_rx_handler_cb_t *prev = NULL;
+        SLIST_FOREACH(iter, &g_context.msg_rx_handler_cb_list, next) {
             if (iter->msg_type == msg_type) {
                 if (prev == NULL) {
                     // Removing the first element
-                    SLIST_REMOVE_HEAD(&g_context.msg_rx_cb_list, next);
+                    SLIST_REMOVE_HEAD(&g_context.msg_rx_handler_cb_list, next);
                 } else {
                     // Removing a middle element
                     SLIST_REMOVE_AFTER(prev, next);
@@ -1045,9 +1073,9 @@ void fgr_msg_receive_stop()
 
         CONTEXT_LOCK(g_context.lock, "fgr_msg_receive_stop()");
         fgr_socket_receive_stop(&g_context.context_rx);
-        while (!SLIST_EMPTY(&g_context.msg_rx_cb_list)) {
-            msg_rx_cb_t *p = SLIST_FIRST(&g_context.msg_rx_cb_list);
-            SLIST_REMOVE_HEAD(&g_context.msg_rx_cb_list, next);
+        while (!SLIST_EMPTY(&g_context.msg_rx_handler_cb_list)) {
+            msg_rx_handler_cb_t *p = SLIST_FIRST(&g_context.msg_rx_handler_cb_list);
+            SLIST_REMOVE_HEAD(&g_context.msg_rx_handler_cb_list, next);
             free(p);
         }
         CONTEXT_UNLOCK(g_context.lock, "fgr_msg_receive_stop()");

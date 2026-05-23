@@ -33,7 +33,8 @@ extern "C" {
  * TYPES
  * -------------------------------------------------------------- */
 
-/** The possible task states.
+/** The possible task states.  If you ever add a new state here,
+ * don't forget to update the logic over in fgr_monitor.c.
  */
 typedef enum {
     FGR_TASK_STATE_STARTED,
@@ -43,16 +44,19 @@ typedef enum {
 
 /** A task.
  *
+ * @param handle the task's handle; this may be needed if the
+ *               task is going to be busy for a while and
+ *               hence needs to call fgr_monitor_task_wdt_feed().
  * @param param  cb_param as passed to fgr_task_create().
  */
-typedef void (*fgr_task_cb_t)(void *param);
+typedef void (*fgr_task_cb_t)(void *handle, void *param);
 
 /** Callback function to provide a tasks's state.
  *
  * @param state  the task state.
  * @param handle the handle of the task.
  * @param name   the task name, may be NULL.
- * @param param  cb_param as passed to fgr_task_state_cb().
+ * @param param  cb_param as passed to fgr_task_state_cb_set().
  */
 typedef void (*fgr_task_state_cb_t)(fgr_task_state_t state,
                                     void *handle,
@@ -143,8 +147,8 @@ bool fgr_task_is_running(void *handle);
  * @return          ESP_OK on success, else a negative value
  *                  from esp_err_t.
  */
-int32_t fgr_task_state_cb(fgr_task_state_cb_t cb,
-                          void *cb_param);
+int32_t fgr_task_state_cb_set(fgr_task_state_cb_t cb,
+                              void *cb_param);
 
 /** Get the stack high watermark, i.e. the smallest
  * amount of stack ever left over time.

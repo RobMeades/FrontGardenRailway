@@ -84,7 +84,7 @@ int32_t fgr_lib_init(const char *ota_server_cert_pem,
 #if defined(FGR_LIB_INITIALISATION_DELAY_SECONDS) && (FGR_LIB_INITIALISATION_DELAY_SECONDS > 0)
         ESP_LOGI(TAG, "Pausing for %d second(s).", FGR_LIB_INITIALISATION_DELAY_SECONDS);
         vTaskDelay(pdMS_TO_TICKS(FGR_LIB_INITIALISATION_DELAY_SECONDS * 1000));
-        esp_task_wdt_reset();
+        fgr_monitor_task_wdt_feed(NULL);
 #endif
 
         // Initialise tasking
@@ -122,9 +122,9 @@ int32_t fgr_lib_init(const char *ota_server_cert_pem,
         // Initialize networking
         if (err == ESP_OK) {
             err = fgr_network_init(CONFIG_FGR_NETWORK_WIFI_SSID,
-                                CONFIG_FGR_NETWORK_WIFI_PASSWORD,
-                                WIFI_AUTH_OPEN,
-                                CONFIG_FGR_NETWORK_WIFI_REDUCED_TX_POWER);
+                                   CONFIG_FGR_NETWORK_WIFI_PASSWORD,
+                                   WIFI_AUTH_OPEN,
+                                   CONFIG_FGR_NETWORK_WIFI_REDUCED_TX_POWER);
         }
 
         // Establish absolute time
@@ -137,14 +137,14 @@ int32_t fgr_lib_init(const char *ota_server_cert_pem,
         // Check for an OTA update, which may restart the system
         if (err == ESP_OK) {
             err = fgr_ota_update(CONFIG_FGR_OTA_FIRMWARE_UPGRADE_URL,
-                                ota_server_cert_pem,
-                                CONFIG_FGR_OTA_RECEIVE_TIMEOUT_MS);
+                                 ota_server_cert_pem,
+                                 CONFIG_FGR_OTA_RECEIVE_TIMEOUT_MS);
         }
 
         // Forward logging to the server
         if (err == ESP_OK) {
             err = fgr_log_init(CONFIG_FGR_NETWORK_CONTROLLER_IP_ADDRESS,
-                            CONFIG_FGR_LOG_PORT, FGR_LOG_LEVEL_INFO);
+                               CONFIG_FGR_LOG_PORT, FGR_LOG_LEVEL_INFO);
         }
 
         // Now that we have a connection to a log server,
@@ -155,6 +155,7 @@ int32_t fgr_lib_init(const char *ota_server_cert_pem,
         // when writing to database, so if you change them you will need to
         // change that script also.
         if (err == ESP_OK) {
+            fgr_monitor_abort_reason_log("ABORT", NULL, ESP_LOG_WARN);
             fgr_debug_panic_log("BACKTRACE", NULL, ESP_LOG_WARN);
             fgr_debug_stack_overflow_log("STACK_OVERFLOW", NULL, ESP_LOG_WARN);
             fgr_debug_core_dump_get("CORE_DUMP", ESP_LOG_INFO);
@@ -163,26 +164,30 @@ int32_t fgr_lib_init(const char *ota_server_cert_pem,
         // Initialise messaging
         if (err == ESP_OK) {
             err = fgr_msg_init(CONFIG_FGR_NETWORK_CONTROLLER_IP_ADDRESS,
-                            CONFIG_FGR_MSG_PORT,
-                            CONFIG_FGR_MSG_HEARTBEAT_SECONDS,
-                            state_cb, cb_param);
+                               CONFIG_FGR_MSG_PORT,
+                               CONFIG_FGR_MSG_HEARTBEAT_SECONDS,
+                               state_cb, cb_param);
+            if (err == ESP_OK) {
+                // Let monitor know when a message is received (any message)
+                err = fgr_msg_receive_cb_set(fgr_monitor_msg_receive_cb, NULL);
+            }
             if (err == ESP_OK) {
                 // Allow msg access to RSSI (so that it is included in heartbeats)
-                err = fgr_msg_rssi_cb(fgr_metrics_rssi_get, NULL);
+                err = fgr_msg_rssi_cb_set(fgr_metrics_rssi_get, NULL);
             }
             if (err == ESP_OK) {
                 // Add the logging received message handler
-                err = fgr_msg_receive_handler_add(0, fgr_log_msg_receive_cb, NULL);
+                err = fgr_msg_receive_handler_add(0, fgr_log_msg_receive_handler_cb, NULL);
             }
             if (err == ESP_OK) {
                 // Add the debug received message handler
-                err = fgr_msg_receive_handler_add(0, fgr_debug_msg_receive_cb, NULL);
+                err = fgr_msg_receive_handler_add(0, fgr_debug_msg_receive_handler_cb, NULL);
             }
         }
 
         // For debug purposes, hook-in a message send callback
         if (err == ESP_OK) {
-            err = fgr_msg_send_cb(send_cb, cb_param);
+            err = fgr_msg_send_cb_set(send_cb, cb_param);
         }
 
         // Create a message send queue

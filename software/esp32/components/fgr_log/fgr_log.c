@@ -29,12 +29,12 @@
 #include "freertos/task.h"
 #include "freertos/queue.h"
 #include "esp_system.h"
-#include "esp_task_wdt.h"
 #include "esp_log.h"
 #include "arpa/inet.h"
 #include "errno.h"
 
 #include "fgr_util.h"
+#include "fgr_monitor.h"
 #include "fgr_task.h"
 #include "fgr_metrics.h"
 #include "fgr_socket.h"
@@ -202,7 +202,6 @@ static void clean_up()
             while (xQueueReceive(g_context.queue_handle, &msg, 0) == pdTRUE) {
                 free(msg.body);
                 vTaskDelay(pdMS_TO_TICKS(FGR_UTIL_WATCHDOG_FEED_TIME_MS));
-                esp_task_wdt_reset();
             }
             vQueueDelete(g_context.queue_handle);
             g_context.queue_handle = NULL;
@@ -393,6 +392,7 @@ static void log_replay_marker(const char *str, context_t *context)
 // Replay buffered messages from when we were disconnected.
 // IMPORTANT: context SHOULD NOT be locked before this is called.
 static void log_buffer_replay(context_t *context,
+                              void *handle,
                               char *marker_buffer, // Passed in just to save stack
                               size_t marker_buffer_length)
 {
@@ -454,8 +454,8 @@ static void log_buffer_replay(context_t *context,
                 sent++;
 
                 if ((sent & 31) == 0) {
-                    esp_task_wdt_reset();
-                    vTaskDelay(1);
+                    fgr_monitor_task_wdt_feed(handle);
+                    vTaskDelay(pdMS_TO_TICKS(FGR_UTIL_WATCHDOG_FEED_TIME_MS));
                 }
             }
 
@@ -496,7 +496,7 @@ static void log_buffer_replay(context_t *context,
  * -------------------------------------------------------------- */
 
 // Log task callback.
-static void task_log_cb(void *param)
+static void task_log_cb(void *handle, void *param)
 {
     context_t *context = (context_t *) param;
     queue_msg_t queue_msg;
@@ -513,7 +513,7 @@ static void task_log_cb(void *param)
         if (msg_type == (FGR_MSG_TYPE_NULL << 12)) {
             // This is a replay request - release lock and handle it
             xSemaphoreGive(context->lock);
-            log_buffer_replay(context, marker_buffer, sizeof(marker_buffer));
+            log_buffer_replay(context, handle, marker_buffer, sizeof(marker_buffer));
             xSemaphoreTake(context->lock, portMAX_DELAY);
         } else {
             if (context->connected) {
@@ -863,8 +863,8 @@ int32_t fgr_log_on()
     return err;
 }
 
-// A message receive callback.
-bool fgr_log_msg_receive_cb(fgr_msg_t *msg, void *param)
+// A message receive handler callback.
+bool fgr_log_msg_receive_handler_cb(fgr_msg_t *msg, void *param)
 {
     bool handled = false;
     uint32_t length = 0;
@@ -907,11 +907,11 @@ bool fgr_log_msg_receive_cb(fgr_msg_t *msg, void *param)
                 // representing the bool of log
                 // on/off and another representing
                 // the log level
-                CONTEXT_LOCK(g_context.lock, "fgr_log_msg_receive_cb()");
+                CONTEXT_LOCK(g_context.lock, "fgr_log_msg_receive_handler_cb()");
                 contents[0] = g_context.on_not_off;
                 contents[1] = g_context.level_min;
                 length = 2;
-                CONTEXT_UNLOCK(g_context.lock, "fgr_log_msg_receive_cb()");
+                CONTEXT_UNLOCK(g_context.lock, "fgr_log_msg_receive_handler_cb()");
                 msg_error = FGR_ERROR_NONE;
             break;
             default:

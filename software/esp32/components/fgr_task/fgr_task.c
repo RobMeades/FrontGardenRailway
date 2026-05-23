@@ -106,7 +106,7 @@ static void task_base(void *param)
         task->min_free_stack_bytes = uxTaskGetStackHighWaterMark(NULL);
 
         // Do the thang
-        task->cb(task->cb_param);
+        task->cb(task->handle, task->cb_param);
 
         // If there is a task state callback,
         // pass it an initial "STARTED" indication,
@@ -327,14 +327,14 @@ bool fgr_task_is_running(void *handle)
 }
 
 // Set a callback that will be called every task loop.
-int32_t fgr_task_state_cb(fgr_task_state_cb_t cb,
-                          void *cb_param)
+int32_t fgr_task_state_cb_set(fgr_task_state_cb_t cb,
+                              void *cb_param)
 {
     int32_t err = -ESP_ERR_INVALID_STATE;
 
     if (g_context.lock) {
 
-        CONTEXT_LOCK(g_context.lock, "fgr_task_state_cb()");
+        CONTEXT_LOCK(g_context.lock, "fgr_task_state_cb_set()");
 
         g_context.global_task_state_cb = cb;
         g_context.global_task_state_cb_param = cb_param;
@@ -349,7 +349,7 @@ int32_t fgr_task_state_cb(fgr_task_state_cb_t cb,
         }
         err = ESP_OK;
 
-        CONTEXT_UNLOCK(g_context.lock, "fgr_task_state_cb()");
+        CONTEXT_UNLOCK(g_context.lock, "fgr_task_state_cb_set()");
     }
 
     return err;

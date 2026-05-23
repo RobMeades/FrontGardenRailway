@@ -29,12 +29,12 @@
 #include "freertos/queue.h"
 #include "esp_event.h"
 #include "esp_log.h"
-#include "esp_task_wdt.h"
 #include "esp_timer.h"
 #include "errno.h"
 #include "lwip/sockets.h"
 
 #include "fgr_util.h"
+#include "fgr_monitor.h"
 #include "fgr_task.h"
 #include "fgr_debug.h"
 #include "fgr_socket.h"
@@ -118,7 +118,7 @@ typedef struct {
 // This is _extremely_ complex because the socket is non-blocking
 // and because the reconnect process can take a while, causing the
 // task watchdog to go off.
-static void task_maintain_cb(void *param)
+static void task_maintain_cb(void *handle, void *param)
 {
     context_channel_t *context_channel = (context_channel_t *) param;
     void *context_connect = NULL;
@@ -178,7 +178,7 @@ static void task_maintain_cb(void *param)
                             err = fgr_socket_connect_is_complete(timeout_ms, &context_connect);
                             elapsed_ms += timeout_ms;
                             vTaskDelay(pdMS_TO_TICKS(FGR_UTIL_WATCHDOG_FEED_TIME_MS));
-                            esp_task_wdt_reset();
+                            fgr_monitor_task_wdt_feed(handle);
                         }
 
                         CONTEXT_LOCK(context_channel->lock, "task_maintain_cb() 2");
@@ -249,7 +249,7 @@ static void task_maintain_cb(void *param)
 }
 
 // Callback task to receive data from a server.
-static void task_rx_cb(void *param)
+static void task_rx_cb(void *handle, void *param)
 {
     context_rx_t *context = (context_rx_t *) param;
     uint8_t buffer[FGR_SOCKET_RX_BUFFER_LENGTH];
@@ -306,7 +306,7 @@ static void task_rx_cb(void *param)
         }
     }
 
-    esp_task_wdt_reset();
+    fgr_monitor_task_wdt_feed(handle);
 
     if (connected) {
         awaiting_reconnect = false;

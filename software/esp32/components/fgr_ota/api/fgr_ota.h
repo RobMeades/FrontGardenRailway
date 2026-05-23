@@ -57,7 +57,7 @@ int32_t fgr_ota_init();
  * before this function.
  *
  * Note: since this may run for a little while it internally calls
- * esp_task_wdt_reset().
+ * fgr_monitor_task_wdt_feed().
  *
  * @param update_file_url   the URL of the binary file, e.g.
  *                          https://10.10.3.1:8070/stepper.bin.

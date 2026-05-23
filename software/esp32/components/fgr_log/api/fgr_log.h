@@ -104,12 +104,12 @@ int32_t fgr_log_off();
  */
 int32_t fgr_log_on();
 
-/** A message receive callback that will handle
+/** A message receive handler callback that will handle
  * the FGR_REQ_CNF_LOG_* messages: add this to your
  * application's message receive chain (before
  * your own handlers so that it is below them) with:
  *
- * fgr_msg_receive_handler_add(0, fgr_log_msg_receive_cb, NULL);
+ * fgr_msg_receive_handler_add(0, fgr_log_msg_receive_handler_cb, NULL);
  *
  * ...and this code will deal with them for you.
  *
@@ -122,7 +122,7 @@ int32_t fgr_log_on();
  * @return       true if the message is handled, false if it
  *               can be passed to subsequent handlers.
  */
-bool fgr_log_msg_receive_cb(fgr_msg_t *msg, void *param);
+bool fgr_log_msg_receive_handler_cb(fgr_msg_t *msg, void *param);
 
 #ifdef __cplusplus
 }

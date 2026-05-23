@@ -32,9 +32,9 @@
 #include "esp_wifi_types.h"
 #include "esp_phy_init.h"
 #include "lwip/netdb.h"
-#include "esp_task_wdt.h"
 
 #include "fgr_metrics.h"
+#include "fgr_monitor.h"
 #include "fgr_network.h"
 
 /* ----------------------------------------------------------------
@@ -264,24 +264,10 @@ int32_t fgr_network_init(const char *ssid, const char *password,
 
             // Wait to connect and obtain IP address (with timeout)
             if (err == ESP_OK) {
-                // Set the watchdog timer to max (60 seconds) while we do this
-                bool watchdog_running = false;
-                esp_task_wdt_config_t wdt_cfg = {
-                    .timeout_ms = 60 * 1000,
-#if defined CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0
-                    .idle_core_mask = 1 << CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0,
-#else
-                    .idle_core_mask = 0,
-#endif
-#if defined CONFIG_ESP_TASK_WDT_PANIC
-                    .trigger_panic = true
-#else
-                    .trigger_panic = false
-#endif
-                };
-                if (esp_task_wdt_status(NULL) == ESP_OK) {
-                    watchdog_running = true;
-                    esp_task_wdt_reconfigure(&wdt_cfg);
+                // Set the watchdog timer to max while we do this
+                int32_t watchdog_seconds = fgr_monitor_task_wdt_timeout_get();
+                if (watchdog_seconds > 0) {
+                    fgr_monitor_task_wdt_timeout_set(FGR_MONITOR_WDT_TASK_TIMEOUT_SECONDS_MAX);
                 }
                 ESP_LOGI(TAG, "Waiting %d second(s) to connect and be assigned IP address.",
                         FGR_NETWORK_IP_ADDRESS_ASSIGNMENT_WAIT_SECONDS);
@@ -292,10 +278,9 @@ int32_t fgr_network_init(const char *ssid, const char *password,
                     ESP_LOGE(TAG, "Failed to obtain IP address within timeout.");
                     err = ESP_ERR_TIMEOUT;
                 }
-                if (watchdog_running) {
+                if (watchdog_seconds > 0) {
                     // Put the watchdog timer back
-                    wdt_cfg.timeout_ms = CONFIG_ESP_TASK_WDT_TIMEOUT_S * 1000;
-                    esp_task_wdt_reconfigure(&wdt_cfg);
+                    fgr_monitor_task_wdt_timeout_set(watchdog_seconds);
                 }
             }
 

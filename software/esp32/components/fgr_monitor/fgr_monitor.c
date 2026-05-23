@@ -34,6 +34,7 @@
 #include "fgr_util.h"
 #include "fgr_task.h"
 #include "fgr_monitor.h"
+#include "fgr_lib.h"
 
 /* ----------------------------------------------------------------
  * COMPILE-TIME MACROS
@@ -46,9 +47,19 @@
 #  define FGR_MONITOR_TASK_STACK_SIZE (1024 * 4)
 #endif
 
+// The bit to put before the strings of g_abort_reason_name[].
+#define ABORT_REASON_NAME_PREFIX "FGR_MONITOR_ABORT_REASON_"
+
 /* ----------------------------------------------------------------
  * TYPES
  * -------------------------------------------------------------- */
+
+// Storage in retained RAM.
+typedef struct {
+    int32_t magic;
+    char task_name[FGR_UTIL_TASK_NAME_MAX_LENGTH];
+    fgr_monitor_abort_reason_t abort_reason;
+} retained_ram_t;
 
 // Structure that defines all the things we need to monitor a task,
 // designed to be used as part of a linked list.
@@ -65,6 +76,9 @@ SLIST_HEAD(task_list_t, task_t);
 // Context for the monitor task.
 typedef struct {
     SemaphoreHandle_t lock;
+    int32_t timeout_seconds;
+    int64_t last_msg_receive_us;
+    int64_t heap_below_min_start_us;
     struct task_list_t task_list;
 } context_task_t;
 
@@ -83,12 +97,113 @@ typedef struct {
  * VARIABLES
  * -------------------------------------------------------------- */
 
+// The names of the abort reasons: must have the same number of
+// entries as fgr_monitor_abort_reason_t.
+static const char *g_abort_reason_name[] = {
+    "NONE",
+    "LOW_MONITOR_TASK_STACK",
+    "LOW_HEAP",
+    "FRAGMENTED_HEAP",
+    "TASK_WDT",
+    "CONTROLLER_WDT"};
+
+// Storage for abort reason in retained RAM
+RTC_NOINIT_ATTR retained_ram_t g_monitor_retained_ram;
+
 // Context.
 static context_t g_context = {0};
 
 /* ----------------------------------------------------------------
  * STATIC FUNCTIONS
  * -------------------------------------------------------------- */
+
+// Clean up.
+static void clean_up(context_t *context)
+{
+    if (context->lock) {
+
+#if FGR_MONITOR_WDT_TASK_TIMEOUT_SECONDS > 0
+        fgr_task_state_cb_set(NULL, NULL);
+#endif
+
+        CONTEXT_LOCK(context->lock, "clean_up() monitor");
+
+         // Flag should stop task running
+        context->running = false;
+        if (context->running_semaphore) {
+            // Take the running semaphore to know its stopped
+            CONTEXT_LOCK(context->running_semaphore, "clean_up() monitor task");
+            CONTEXT_UNLOCK(context->running_semaphore, "clean_up() monitor task");
+            vSemaphoreDelete(context->running_semaphore);
+        }
+
+        context_task_t *context_task = &context->context_task;
+        if (context_task->lock) {
+
+            CONTEXT_LOCK(context_task->lock, "clean_up() monitor task");
+
+            while (!SLIST_EMPTY(&context_task->task_list)) {
+                task_t *p = SLIST_FIRST(&context_task->task_list);
+                SLIST_REMOVE_HEAD(&context_task->task_list, next);
+                free(p);
+            }
+
+            CONTEXT_UNLOCK(context_task->lock, "clean_up() monitor task");
+            vSemaphoreDelete(context_task->lock);
+        }
+
+        context->cb = NULL;
+        context->cb_param = NULL;
+
+        CONTEXT_UNLOCK(context->lock, "clean_up() monitor");
+        // The semaphore will be re-used
+    }
+}
+
+// Get the end of an abort reason name: when you print
+// it, prefix it with ABORT_REASON_NAME_PREFIX.
+static const char *abort_reason_name(int32_t reason)
+{
+    const char *reason_name = "USER";
+    int32_t reason_name_index = -(reason + 1);
+    if ((reason_name_index >= 0) &&
+        (reason_name_index < FGR_UTIL_ARRAY_LENGTH(g_abort_reason_name))) {
+        reason_name = g_abort_reason_name[reason_name_index];
+    }
+
+    return reason_name;
+}
+
+// Tidy up and call abort.
+static void do_abort(int8_t reason, const char *task_name,
+                     context_t *context)
+{
+    const char *reason_name = abort_reason_name(reason);
+    ESP_LOGE(TAG, "%s%s (%d).", ABORT_REASON_NAME_PREFIX,
+             reason_name, reason);
+
+    if (context->lock) {
+
+        CONTEXT_LOCK(context->lock, "do_abort()");
+        // Call the user callback, if there is one
+        if (context->cb) {
+            context->cb(context->cb_param);
+        }
+        CONTEXT_UNLOCK(context->lock, "do_abort()");
+    }
+
+    fgr_lib_deinit();
+    clean_up(context);
+    g_monitor_retained_ram.abort_reason = reason;
+    if (task_name) {
+        strlcpy(g_monitor_retained_ram.task_name, task_name,
+                sizeof(g_monitor_retained_ram.task_name));
+    } else {
+        memset(g_monitor_retained_ram.task_name, 0,
+              sizeof(g_monitor_retained_ram.task_name));
+    }
+    abort();
+}
 
 // Callback to monitor task state.
 static void task_state_cb(fgr_task_state_t state, void *handle,
@@ -101,20 +216,36 @@ static void task_state_cb(fgr_task_state_t state, void *handle,
         CONTEXT_LOCK(context_task->lock, "task_state_cb()");
 
         task_t *task = NULL;
+        task_t *task_prev = NULL;
         bool found = false;
         SLIST_FOREACH(task, &context_task->task_list, next) {
             if (task->handle == handle) {
                 found = true;
                 break;
             }
+            task_prev = task;
         }
         if (!found) {
-            // Add a new entry
-            task = (task_t *) malloc(sizeof(*task));
-            if (task) {
-                task->handle = handle;
-                task->name = name;
-                SLIST_INSERT_HEAD(&context_task->task_list, task, next);
+            if (state != FGR_TASK_STATE_STOPPED) {
+                // Add a new entry
+                task = (task_t *) malloc(sizeof(*task));
+                if (task) {
+                    task->handle = handle;
+                    task->name = name;
+                    SLIST_INSERT_HEAD(&context_task->task_list, task, next);
+                }
+            }
+        } else {
+            if (state == FGR_TASK_STATE_STOPPED) {
+                // Remove the entry
+                if (task_prev == NULL) {
+                    // Removing the first element
+                    SLIST_REMOVE_HEAD(&context_task->task_list, next);
+                } else {
+                    // Removing a middle element
+                    SLIST_REMOVE_AFTER(task_prev, next);
+                }
+                task = NULL;
             }
         }
         if (task){
@@ -139,17 +270,52 @@ static void task_monitor(void *param)
 
         CONTEXT_LOCK(context_task->lock, "task_monitor()");
 
-        // TODO: monitor heap
+        fgr_monitor_abort_reason_t reason = FGR_MONITOR_ABORT_REASON_NONE;
+        const char *task_name = NULL;
 
-        // TODO: monitor contact with server
+        // First check this task's stack
+        if (uxTaskGetStackHighWaterMark(NULL) < FGR_MONITOR_TASK_STACK_SIZE_MIN) {
+            reason = FGR_MONITOR_ABORT_REASON_LOW_TASK_STACK;
+            task_name = TAG;
+        }
 
-        // Check all of the task watchdog times
-        task_t *iter = NULL;
-        SLIST_FOREACH(iter, &context_task->task_list, next) {
-            if (iter->last_called_us - esp_timer_get_time() > (FGR_MONITOR_WDT_TIMEOUT_SECONDS * 1000000)) {
-                // TODO
-                break;
+        // Monitor heap
+        if (reason == FGR_MONITOR_ABORT_REASON_NONE) {
+            if (heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) >= FGR_MONITOR_HEAP_BLOCK_MIN) {
+                context_task->heap_below_min_start_us = 0;
+            } else {
+                if (context_task->heap_below_min_start_us == 0) {
+                    context_task->heap_below_min_start_us = esp_timer_get_time();
+                } else if (context_task->heap_below_min_start_us - esp_timer_get_time() > FGR_MONITOR_HEAP_MIN_DURATION_SECONDS * 1000000) {
+                    reason = FGR_MONITOR_ABORT_REASON_FRAGMENTED_HEAP;
+                }
             }
+        }
+        if ((reason == FGR_MONITOR_ABORT_REASON_NONE) &&
+            (heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT) < FGR_MONITOR_HEAP_MIN)) {
+            reason = FGR_MONITOR_ABORT_REASON_LOW_HEAP;
+        }
+
+        // Monitor communications with the controller
+        if ((reason == FGR_MONITOR_ABORT_REASON_NONE) &&
+            (context_task->last_msg_receive_us - esp_timer_get_time() > FGR_MONITOR_WDT_CONTROLLER_TIMEOUT_SECONDS * 1000000)) {
+            reason = FGR_MONITOR_ABORT_REASON_CONTROLLER_WDT;
+        }
+
+        if (reason == FGR_MONITOR_ABORT_REASON_NONE) {
+            // Check all of the task last_called_us times
+            task_t *iter = NULL;
+            SLIST_FOREACH(iter, &context_task->task_list, next) {
+                if (iter->last_called_us - esp_timer_get_time() > (((int64_t) context_task->timeout_seconds) * 1000000)) {
+                    task_name = iter->name;
+                    reason = FGR_MONITOR_ABORT_REASON_TASK_WDT;
+                    break;
+                }
+            }
+        }
+
+        if (reason != FGR_MONITOR_ABORT_REASON_NONE) {
+            do_abort(reason, task_name, context);
         }
 
         CONTEXT_UNLOCK(context_task->lock, "task_monitor()");
@@ -164,44 +330,26 @@ static void task_monitor(void *param)
     vTaskDelete(NULL);
 }
 
-// Clean up.
-static void clean_up()
+// Set the ESP-IDF watchdog timeout.
+static void espidf_wdt_set(int32_t timeout_seconds)
 {
-    if (g_context.lock) {
+#if defined (CONFIG_ESP_TASK_WDT_TIMEOUT_S)
+    esp_task_wdt_config_t wdt_cfg = {
+        .timeout_ms = timeout_seconds * 1000,
+#  if defined CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0
+        .idle_core_mask = 1 << CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0,
+#  else
+        .idle_core_mask = 0,
+#  endif
+#  if defined CONFIG_ESP_TASK_WDT_PANIC
+        .trigger_panic = true
+#  else
+        .trigger_panic = false
+#  endif
+    };
 
-#if FGR_MONITOR_WDT_TIMEOUT_SECONDS > 0
-        fgr_task_state_cb(NULL, NULL);
+    esp_task_wdt_reconfigure(&wdt_cfg);
 #endif
-
-        CONTEXT_LOCK(g_context.lock, "clean_up() monitor");
-
-         // Flag should stop task running
-        g_context.running = false;
-        if (g_context.running_semaphore) {
-            // Take the running semaphore to know its stopped
-            CONTEXT_LOCK(g_context.running_semaphore, "clean_up() monitor task");
-            CONTEXT_UNLOCK(g_context.running_semaphore, "clean_up() monitor task");
-            vSemaphoreDelete(g_context.running_semaphore);
-        }
-
-        context_task_t *context_task = &g_context.context_task;
-        if (context_task->lock) {
-
-            CONTEXT_LOCK(context_task->lock, "clean_up() monitor task");
-
-            while (!SLIST_EMPTY(&context_task->task_list)) {
-                task_t *p = SLIST_FIRST(&context_task->task_list);
-                SLIST_REMOVE_HEAD(&context_task->task_list, next);
-                free(p);
-            }
-
-            CONTEXT_UNLOCK(context_task->lock, "clean_up() monitor task");
-            vSemaphoreDelete(context_task->lock);
-        }
-
-        CONTEXT_UNLOCK(g_context.lock, "clean_up() monitor");
-        // The semaphore will be re-used
-    }
 }
 
 /* ----------------------------------------------------------------
@@ -227,6 +375,14 @@ int32_t fgr_monitor_init(fgr_monitor_cb_t cb, void *cb_param)
 
         g_context.cb = cb;
         g_context.cb_param = cb_param;
+        context_task->timeout_seconds = FGR_MONITOR_WDT_TASK_TIMEOUT_SECONDS;
+
+        // Set up retained storage if required
+        if (g_monitor_retained_ram.magic != FGR_UTIL_RETAINED_RAM_MAGIC_MARKER) {
+            memset(&g_monitor_retained_ram, 0, sizeof(g_monitor_retained_ram));
+            g_monitor_retained_ram.abort_reason = FGR_MONITOR_ABORT_REASON_NONE;
+            g_monitor_retained_ram.magic = FGR_UTIL_RETAINED_RAM_MAGIC_MARKER;
+        }
 
         // Note: we don't use fgr_task_create() here since
         // the monitoring task needs to live on beyond
@@ -235,19 +391,17 @@ int32_t fgr_monitor_init(fgr_monitor_cb_t cb, void *cb_param)
         context_task->lock = xSemaphoreCreateMutex();
         if (g_context.running_semaphore && context_task->lock) {
             g_context.running = true;
-            if (xTaskCreate(task_monitor, "monitor", FGR_MONITOR_TASK_STACK_SIZE,
+            if (xTaskCreate(task_monitor, TAG, FGR_MONITOR_TASK_STACK_SIZE,
                             &g_context, 3, &g_context.handle) == pdPASS) {
                 err = ESP_OK;
             } else {
                 g_context.running = false;
                 g_context.handle = NULL;    // Just in case
-                g_context.cb = NULL;
-                g_context.cb_param = NULL;
             }
         }
 
-#if FGR_MONITOR_WDT_TIMEOUT_SECONDS > 0
-        err = fgr_task_state_cb(task_state_cb, context_task);
+#if FGR_MONITOR_WDT_TASK_TIMEOUT_SECONDS > 0
+        err = fgr_task_state_cb_set(task_state_cb, context_task);
 #else
         err = ESP_OK;
 #endif
@@ -255,7 +409,150 @@ int32_t fgr_monitor_init(fgr_monitor_cb_t cb, void *cb_param)
     }
 
     if (err != ESP_OK) {
-        clean_up();
+        clean_up(&g_context);
+    }
+
+    return err;
+}
+
+// Feed the monitor task watchdog.
+void fgr_monitor_task_wdt_feed(void *handle)
+{
+    context_task_t *context_task = &g_context.context_task;
+
+    if (esp_task_wdt_status(NULL) == ESP_OK) {
+        // Feed the HW watchdog
+        esp_task_wdt_reset();
+    }
+
+    if (handle && context_task->lock) {
+
+        CONTEXT_LOCK(context_task->lock, "fgr_monitor_task_wdt_feed()");
+
+        task_t *task = NULL;
+        SLIST_FOREACH(task, &context_task->task_list, next) {
+            if (task->handle == handle) {
+                task->last_called_us = esp_timer_get_time();
+                break;
+            }
+        }
+
+        CONTEXT_UNLOCK(context_task->lock, "fgr_monitor_task_wdt_feed()");
+    }
+}
+
+// Get the monitor task watchdog timeout.
+int32_t fgr_monitor_task_wdt_timeout_get()
+{
+    int32_t timeout_seconds = -ESP_ERR_INVALID_STATE;
+    context_task_t *context_task = &g_context.context_task;
+
+    if (context_task->lock) {
+
+        CONTEXT_LOCK(context_task->lock, "fgr_monitor_task_wdt_timeout_get()");
+        timeout_seconds = context_task->timeout_seconds;
+        CONTEXT_UNLOCK(context_task->lock, "fgr_monitor_task_wdt_timeout_get()");
+    }
+
+    return timeout_seconds;
+}
+
+// Set the current monitor task watchdog timeout.
+int32_t fgr_monitor_task_wdt_timeout_set(int32_t timeout_seconds)
+{
+    int32_t timeout_seconds_returned = -ESP_ERR_INVALID_STATE;
+    context_task_t *context_task = &g_context.context_task;
+
+    if (context_task->lock) {
+
+        CONTEXT_LOCK(context_task->lock, "fgr_monitor_task_wdt_timeout_set()");
+        if (timeout_seconds > FGR_MONITOR_WDT_TASK_TIMEOUT_SECONDS_MAX) {
+            timeout_seconds = FGR_MONITOR_WDT_TASK_TIMEOUT_SECONDS_MAX;
+        }
+        context_task->timeout_seconds = timeout_seconds;
+        espidf_wdt_set(context_task->timeout_seconds + FGR_MONITOR_WDT_TASK_TIMEOUT_SECONDS_ADVANCE);
+        timeout_seconds_returned = context_task->timeout_seconds;
+        CONTEXT_UNLOCK(context_task->lock, "fgr_monitor_task_wdt_timeout_set()");
+    }
+
+    return timeout_seconds_returned;
+}
+
+// Message receive callback.
+void fgr_monitor_msg_receive_cb(void *unused)
+{
+    context_task_t *context_task = &g_context.context_task;
+
+    (void) unused;
+
+    if (context_task->lock) {
+
+        CONTEXT_LOCK(context_task->lock, "fgr_monitor_msg_receive_cb()");
+        context_task->last_msg_receive_us = esp_timer_get_time();
+        CONTEXT_UNLOCK(context_task->lock, "fgr_monitor_msg_receive_cb()");
+    }
+}
+
+// Cause an abort.
+void fgr_monitor_abort(uint8_t reason)
+{
+    do_abort((int8_t) (reason & 0x7f), NULL, &g_context);
+}
+
+// Obtain the reason for a monitor abort.
+int32_t fgr_monitor_abort_reason_get()
+{
+    int32_t reason = FGR_MONITOR_ABORT_REASON_NONE;
+
+    if (g_monitor_retained_ram.magic == FGR_UTIL_RETAINED_RAM_MAGIC_MARKER) {
+        reason = g_monitor_retained_ram.abort_reason;
+        g_monitor_retained_ram.abort_reason = FGR_MONITOR_ABORT_REASON_NONE;
+    }
+
+    return reason;
+}
+
+// Function to log a monitor abort.
+int32_t fgr_monitor_abort_reason_log(const char *tag, const char *prefix,
+                                     esp_log_level_t level)
+{
+    int32_t err = ESP_OK;
+    int32_t reason = fgr_monitor_abort_reason_get();
+    if (reason != FGR_MONITOR_ABORT_REASON_NONE) {
+        if (level > ESP_LOG_NONE) {
+            if (!tag) {
+                tag = TAG;
+            }
+            if (!prefix) {
+                prefix = "";
+            }
+            const char *reason_name_prefix = ABORT_REASON_NAME_PREFIX;
+            const char *reason_name = abort_reason_name(reason);
+            switch (level) {
+                case ESP_LOG_ERROR:
+                    ESP_LOGE(tag, "%s%s%s (%d)", prefix, reason_name_prefix,
+                             reason_name, (int) reason);
+                break;
+                case ESP_LOG_WARN:
+                    ESP_LOGW(tag, "%s%s%s (%d)", prefix, reason_name_prefix,
+                             reason_name, (int) reason);
+                break;
+                case ESP_LOG_INFO:
+                    ESP_LOGI(tag, "%s%s%s (%d)", prefix, reason_name_prefix,
+                             reason_name, (int) reason);
+                break;
+                case ESP_LOG_DEBUG:
+                    ESP_LOGD(tag, "%s%s%s (%d)", prefix, reason_name_prefix,
+                             reason_name, (int) reason);
+                break;
+                case ESP_LOG_VERBOSE:
+                    ESP_LOGD(tag, "%s%S%s (%d)", prefix, reason_name_prefix,
+                             reason_name, (int) reason);
+                default:
+                break;
+            }
+        }
+        err = 1;
     }
 
     return err;

@@ -48,7 +48,7 @@
 
 // The message heartbeat to use during testing
 #ifndef FGR_MSG_HEARTBEAT_SECONDS
-# define FGR_MSG_HEARTBEAT_SECONDS 25
+#  define FGR_MSG_HEARTBEAT_SECONDS 25
 #endif
 
 /* ----------------------------------------------------------------
@@ -147,8 +147,8 @@ static bool msg_receive_cb(fgr_msg_t *msg, void *param)
 
             if (handled) {
                 fgr_msg_send_queue_cnf(MSG_MASK(msg->header.req.type), msg_error,
-                                    msg->header.req.reference,
-                                    contents, length);
+                                       msg->header.req.reference,
+                                       contents, length);
             }
         } else {
             // RESPONSE messages

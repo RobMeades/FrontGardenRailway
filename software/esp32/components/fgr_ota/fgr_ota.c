@@ -36,9 +36,9 @@
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "errno.h"
-#include "esp_task_wdt.h"
 
 #include "fgr_metrics.h"
+#include "fgr_monitor.h"
 #include "fgr_nvs.h"
 #include "fgr_ota.h"
 
@@ -288,7 +288,7 @@ int32_t fgr_ota_update(const char *update_file_url,
         update_partition = esp_ota_get_next_update_partition(NULL);
         assert(update_partition != NULL);
         ESP_LOGI(TAG, "Writing to partition subtype %d at offset 0x%"PRIx32".",
-                update_partition->subtype, update_partition->address);
+                 update_partition->subtype, update_partition->address);
 
         bool image_header_was_checked = false;
         size_t header_accumulated = 0;
@@ -352,10 +352,8 @@ int32_t fgr_ota_update(const char *update_file_url,
                     }
                     binary_file_length += data_read;
                 }
-                if (esp_task_wdt_status(NULL) == ESP_OK) {
-                    // Feed the watchdog
-                    esp_task_wdt_reset();
-                }
+                // Feed the watchdog
+                fgr_monitor_task_wdt_feed(NULL);
             } else if (data_read == 0) {
                 // Handle zero read - this could be temporary or permanent
                 zero_read_count++;

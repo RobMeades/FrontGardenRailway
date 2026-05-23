@@ -34,6 +34,7 @@ extern "C" {
  * COMPILE-TIME MACROS
  * -------------------------------------------------------------- */
 
+// Get the number of elements in an array.
 #define FGR_UTIL_ARRAY_LENGTH(array) (sizeof(array) / sizeof(array[0]))
 
 #ifndef FGR_UTIL_WATCHDOG_FEED_TIME_MS
@@ -87,6 +88,12 @@ extern "C" {
 #ifndef FGR_UTIL_RETAINED_RAM_MAGIC_MARKER
 // Marker to store in an int32_t indicating that a retained RAM area is populated.
 #  define FGR_UTIL_RETAINED_RAM_MAGIC_MARKER 0xdeadface
+#endif
+
+#ifndef FGR_UTIL_TASK_NAME_MAX_LENGTH
+// The maximum length of a task name, used when stack overflows or task
+// watchdog timeouts occur.  Includes room for a null terminator.
+#  define FGR_UTIL_TASK_NAME_MAX_LENGTH (16 + 1)
 #endif
 
 /* ----------------------------------------------------------------

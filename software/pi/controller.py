@@ -256,6 +256,8 @@ class NodeHandler:
         if ind_type == fgr.FGRIndRsp.FGR_IND_RSP_HEARTBEAT:
             self.node.heartbeat_count += 1
             self.node.last_heartbeat = time.time()
+            # Send response
+            self.send_response(ind_type, msg.reference, b"")
             # Extract RSSI from message contents (if present)
             if len(msg.contents) >= 1:
                 rssi = msg.contents[0]
