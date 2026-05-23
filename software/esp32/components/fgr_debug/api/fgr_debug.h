@@ -391,7 +391,7 @@ int32_t fgr_debug_panic_log(const char *tag, const char *prefix,
  * from a stack overflow.
  *
  * @param buffer a pointer to storage for up to
- *               FGR_DEBUG_TASK_NAME_MAX_LENGTH characters that will
+ *               FGR_UTIL_TASK_NAME_MAX_LENGTH characters that will
  *               be populated with the task name; may be NULL,
  *               in which case the task name is retained and you
  *               might use the return value to size your storage

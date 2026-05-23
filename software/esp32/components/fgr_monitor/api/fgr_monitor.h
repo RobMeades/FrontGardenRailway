@@ -99,17 +99,17 @@ extern "C" {
 
 /** The abort reasons; negative so as not to overlap with any
  * user reason passed into fgr_monitor_abort().  If you change
- * this enum you must also change the list of names in the .c file.
+ * this enum you must also update g_abort_reason_name[] in the
+ * implementation.
  */
 typedef enum {
     FGR_MONITOR_ABORT_REASON_USER_LAST = -1,
     FGR_MONITOR_ABORT_REASON_NONE = FGR_MONITOR_ABORT_REASON_USER_LAST,
-    FGR_MONITOR_ABORT_REASON_LOW_TASK_STACK = -2,
+    FGR_MONITOR_ABORT_REASON_TASK_LOW_STACK = -2,
     FGR_MONITOR_ABORT_REASON_LOW_HEAP = -3,
     FGR_MONITOR_ABORT_REASON_FRAGMENTED_HEAP = -4,
     FGR_MONITOR_ABORT_REASON_TASK_WDT = -5,
-    FGR_MONITOR_ABORT_REASON_CONTROLLER_WDT = -6,
-    FGR_MONITOR_ABORT_REASON_LAST = FGR_MONITOR_ABORT_REASON_CONTROLLER_WDT
+    FGR_MONITOR_ABORT_REASON_CONTROLLER_WDT = -6
 } fgr_monitor_abort_reason_t;
 
 /** A callback to the main application that will be called just
@@ -202,11 +202,14 @@ void fgr_monitor_msg_receive_cb(void *unused);
  * then call abort(), which will write a crash-dump to flash
  * and restart the system.
  *
- * @param reason your abort reason, must be a positive number,
- *               i.e. less than
- *               ((uint8_t) FGR_MONITOR_ABORT_REASON_USER_LAST).
+ * @param reason     your abort reason, must be a positive number,
+ *                   i.e. greater than FGR_MONITOR_ABORT_REASON_USER_LAST.
+ * @param task_name  a task name to go with the abort reason;
+ *                   up to FGR_UTIL_TASK_NAME_MAX_LENGTH - 1
+ *                   in length with a null terminator after that;
+ *                   may be NULL if there is no associated task name.
  */
-void fgr_monitor_abort(uint8_t reason);
+void fgr_monitor_abort(uint8_t reason, const char *task_name);
 
 /** Function to obtain the reason for a monitor abort.  You might
  * call this function at boot to determine whether the (re)boot
@@ -215,11 +218,19 @@ void fgr_monitor_abort(uint8_t reason);
  *
  * See also fgr_monitor_reason_log().
  *
- * @return  the monitor abort reason, which may be one from
- *          fgr_monitor_abort_reason_t or may be your own
- *          abort reason if you called fgr_monitor_abort().
+ * @param task_name a pointer to storage for up to
+ *                  FGR_UTIL_TASK_NAME_MAX_LENGTH characters
+ *                  (that includes room for a null terminator)
+ *                  which will, if the abort reason is for instance
+ *                  FGR_MONITOR_ABORT_REASON_TASK_LOW_STACK or
+ *                  FGR_MONITOR_ABORT_REASON_TASK_WDT, be
+ *                  populated with the associated task name; may
+ *                  be NULL.
+ * @return          the monitor abort reason, which may be one from
+ *                  fgr_monitor_abort_reason_t or may be your own
+ *                  abort reason if you called fgr_monitor_abort().
  */
-int32_t fgr_monitor_abort_reason_get();
+int32_t fgr_monitor_abort_reason_get(char *task_name);
 
 /** Like fgr_monitor_abort_reason_get() but instead logs the
  * abort reason in an ESP_LOGx() call.  The abort reason is

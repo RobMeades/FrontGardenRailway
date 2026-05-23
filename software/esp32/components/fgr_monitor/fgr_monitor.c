@@ -178,9 +178,15 @@ static const char *abort_reason_name(int32_t reason)
 static void do_abort(int8_t reason, const char *task_name,
                      context_t *context)
 {
+
+    char buffer[FGR_UTIL_TASK_NAME_MAX_LENGTH + 10] = {0};
     const char *reason_name = abort_reason_name(reason);
-    ESP_LOGE(TAG, "%s%s (%d).", ABORT_REASON_NAME_PREFIX,
-             reason_name, reason);
+
+    if (task_name && (strlen(task_name) > 0)) {
+            snprintf(buffer, sizeof(buffer), " in task %s", task_name);
+    }
+    ESP_LOGE(TAG, "%s%s (%d)%s.", ABORT_REASON_NAME_PREFIX,
+             reason_name, reason, buffer);
 
     if (context->lock) {
 
@@ -200,7 +206,7 @@ static void do_abort(int8_t reason, const char *task_name,
                 sizeof(g_monitor_retained_ram.task_name));
     } else {
         memset(g_monitor_retained_ram.task_name, 0,
-              sizeof(g_monitor_retained_ram.task_name));
+               sizeof(g_monitor_retained_ram.task_name));
     }
     abort();
 }
@@ -275,7 +281,7 @@ static void task_monitor(void *param)
 
         // First check this task's stack
         if (uxTaskGetStackHighWaterMark(NULL) < FGR_MONITOR_TASK_STACK_SIZE_MIN) {
-            reason = FGR_MONITOR_ABORT_REASON_LOW_TASK_STACK;
+            reason = FGR_MONITOR_ABORT_REASON_TASK_LOW_STACK;
             task_name = TAG;
         }
 
@@ -494,18 +500,22 @@ void fgr_monitor_msg_receive_cb(void *unused)
 }
 
 // Cause an abort.
-void fgr_monitor_abort(uint8_t reason)
+void fgr_monitor_abort(uint8_t reason, const char *task_name)
 {
-    do_abort((int8_t) (reason & 0x7f), NULL, &g_context);
+    do_abort((int8_t) (reason & 0x7f), task_name, &g_context);
 }
 
 // Obtain the reason for a monitor abort.
-int32_t fgr_monitor_abort_reason_get()
+int32_t fgr_monitor_abort_reason_get(char *task_name)
 {
     int32_t reason = FGR_MONITOR_ABORT_REASON_NONE;
 
     if (g_monitor_retained_ram.magic == FGR_UTIL_RETAINED_RAM_MAGIC_MARKER) {
         reason = g_monitor_retained_ram.abort_reason;
+        if (task_name) {
+            strlcpy(task_name, g_monitor_retained_ram.task_name,
+                    FGR_UTIL_TASK_NAME_MAX_LENGTH);
+        }
         g_monitor_retained_ram.abort_reason = FGR_MONITOR_ABORT_REASON_NONE;
     }
 
@@ -517,7 +527,10 @@ int32_t fgr_monitor_abort_reason_log(const char *tag, const char *prefix,
                                      esp_log_level_t level)
 {
     int32_t err = ESP_OK;
-    int32_t reason = fgr_monitor_abort_reason_get();
+    char task_name[FGR_UTIL_TASK_NAME_MAX_LENGTH] = {0};
+    char buffer[FGR_UTIL_TASK_NAME_MAX_LENGTH + 10] = {0};
+
+    int32_t reason = fgr_monitor_abort_reason_get(task_name);
     if (reason != FGR_MONITOR_ABORT_REASON_NONE) {
         if (level > ESP_LOG_NONE) {
             if (!tag) {
@@ -526,28 +539,31 @@ int32_t fgr_monitor_abort_reason_log(const char *tag, const char *prefix,
             if (!prefix) {
                 prefix = "";
             }
+            if (strlen(task_name) > 0) {
+                snprintf(buffer, sizeof(buffer), " in task %s", task_name);
+            }
             const char *reason_name_prefix = ABORT_REASON_NAME_PREFIX;
             const char *reason_name = abort_reason_name(reason);
             switch (level) {
                 case ESP_LOG_ERROR:
-                    ESP_LOGE(tag, "%s%s%s (%d)", prefix, reason_name_prefix,
-                             reason_name, (int) reason);
+                    ESP_LOGE(tag, "%s%s%s (%d)%s", prefix, reason_name_prefix,
+                             reason_name, reason, buffer);
                 break;
                 case ESP_LOG_WARN:
-                    ESP_LOGW(tag, "%s%s%s (%d)", prefix, reason_name_prefix,
-                             reason_name, (int) reason);
+                    ESP_LOGW(tag, "%s%s%s (%d)%s", prefix, reason_name_prefix,
+                             reason_name, reason, buffer);
                 break;
                 case ESP_LOG_INFO:
-                    ESP_LOGI(tag, "%s%s%s (%d)", prefix, reason_name_prefix,
-                             reason_name, (int) reason);
+                    ESP_LOGI(tag, "%s%s%s (%d)%s", prefix, reason_name_prefix,
+                             reason_name, reason, buffer);
                 break;
                 case ESP_LOG_DEBUG:
-                    ESP_LOGD(tag, "%s%s%s (%d)", prefix, reason_name_prefix,
-                             reason_name, (int) reason);
+                    ESP_LOGD(tag, "%s%s%s (%d)%s", prefix, reason_name_prefix,
+                             reason_name, reason, buffer);
                 break;
                 case ESP_LOG_VERBOSE:
-                    ESP_LOGD(tag, "%s%S%s (%d)", prefix, reason_name_prefix,
-                             reason_name, (int) reason);
+                    ESP_LOGD(tag, "%s%S%s (%d)%s", prefix, reason_name_prefix,
+                             reason_name, (int) reason, buffer);
                 default:
                 break;
             }
