@@ -143,9 +143,9 @@ int32_t fgr_network_init(const char *ssid, const char *password,
         // password, the authentication mode is not "open",
         // also if ssid and password are within length
         if ((((password == NULL) || (strlen(password) == 0)) ||
-             (auth_mode != WIFI_AUTH_OPEN)) &&
-            ((ssid != NULL) && (strlen(ssid) < sizeof(wifi_config.sta.ssid))) &&
-            ((password == NULL) || (strlen(password) < sizeof(wifi_config.sta.password))))  {
+                (auth_mode != WIFI_AUTH_OPEN)) &&
+                ((ssid != NULL) && (strlen(ssid) < sizeof(wifi_config.sta.ssid))) &&
+                ((password == NULL) || (strlen(password) < sizeof(wifi_config.sta.password))))  {
 
             // Initialize network interface
             err = esp_netif_init();
@@ -325,8 +325,8 @@ size_t fgr_network_hostname_from_url(const char *url, char *buffer, size_t lengt
     if (hostname_start && length > 0) {
         hostname_start += 2;
         for (char *p = hostname_start;
-             (*p != 0) && (*p != '/') && (*p != ':');
-             p++) {
+                (*p != 0) && (*p != '/') && (*p != ':');
+                p++) {
             if (buffer_used < length - 1) {
                 buffer[buffer_used] = *p;
                 buffer_used++;

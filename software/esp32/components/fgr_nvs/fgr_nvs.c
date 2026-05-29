@@ -70,8 +70,8 @@ int32_t fgr_nvs_init()
         // Initialize NVS
         err = nvs_flash_init();
         if (err == ESP_ERR_NVS_NO_FREE_PAGES ||
-            err == ESP_ERR_NVS_NEW_VERSION_FOUND ||
-            err == ESP_ERR_NVS_NOT_ENOUGH_SPACE) {
+                err == ESP_ERR_NVS_NEW_VERSION_FOUND ||
+                err == ESP_ERR_NVS_NOT_ENOUGH_SPACE) {
             // OTA app partition table has a smaller NVS partition size than the non-OTA
             // partition table. This size mismatch may cause NVS initialization to fail.
             // If this happens, we erase NVS partition and initialize NVS again.

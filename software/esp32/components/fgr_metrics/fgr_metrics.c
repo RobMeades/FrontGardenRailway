@@ -291,7 +291,7 @@ static void metric_set_time(fgr_metrics_storage_t *metrics_list,
         }
         time->seconds = time_since_power_on;
         if ((metric < FGR_UTIL_ARRAY_LENGTH(g_metric_reset_at_boot)) &&
-            g_metric_reset_at_boot[metric]) {
+                g_metric_reset_at_boot[metric]) {
             time->since_boot_not_power_cycle = true;
             time->seconds = fgr_time_since_boot();
         }
@@ -470,7 +470,7 @@ static void update_stack_min_free_insert_sorted(struct fgr_metrics_stack_min_fre
 
         // Find position where new_entry should go (smaller values come first)
         while (current != NULL &&
-               current->task.min_free_bytes < new_entry->task.min_free_bytes) {
+                current->task.min_free_bytes < new_entry->task.min_free_bytes) {
             prev = current;
             current = SLIST_NEXT(current, next);
         }
@@ -617,8 +617,8 @@ static cJSON *encode_json_event_inner(const fgr_metrics_event_t *event)
         if (event->count > 0) {
             const char *t = event->time.since_boot_not_power_cycle ? "tb" : "tp";
             if (!json ||
-                !cJSON_AddNumberToObject(json, t, (double) event->time.seconds) ||
-                !cJSON_AddNumberToObject(json, "n", (double) event->count)) {
+                    !cJSON_AddNumberToObject(json, t, (double) event->time.seconds) ||
+                    !cJSON_AddNumberToObject(json, "n", (double) event->count)) {
                 cJSON_Delete(json);
                 json = NULL;
             } else {
@@ -720,7 +720,7 @@ static int32_t encode_json_stack_min_free_lowest(const fgr_metrics_stack_min_fre
                 err = ESP_OK;
                 const fgr_metrics_stack_min_free_bytes_t *task = stack_min_free_lowest->task;
                 for (size_t x = 0; (x < FGR_UTIL_ARRAY_LENGTH(stack_min_free_lowest->task)) &&
-                     (x < count) && (err == ESP_OK); x++) {
+                        (x < count) && (err == ESP_OK); x++) {
                     err = -ESP_ERR_NO_MEM;
                     cJSON *json_task = cJSON_CreateObject();
                     if (json_task) {
@@ -857,7 +857,7 @@ int32_t fgr_metrics_init(fgr_metrics_report_cb_t cb,
                 // our context
                 storage_t storage = {0};
                 if ((FGR_RRAM_GET(storage) == ESP_OK) &&
-                    (storage.structure_version == FGR_METRICS_STRUCTURE_VERSION)) {
+                        (storage.structure_version == FGR_METRICS_STRUCTURE_VERSION)) {
                     // Zero any that should only run from boot
                     for (size_t x = 0; x < FGR_UTIL_ARRAY_LENGTH(g_metric_reset_at_boot); x++) {
                         if (g_metric_reset_at_boot[x]) {

@@ -115,7 +115,7 @@ static void task_base(void *param)
         if (task_state->cb) {
             fgr_task_state_t state = FGR_TASK_STATE_RUNNING;
             if ((task_state->cb != task_state_stored.cb) ||
-                (task_state->cb_param != task_state_stored.cb_param)) {
+                    (task_state->cb_param != task_state_stored.cb_param)) {
                 state = FGR_TASK_STATE_STARTED;
             }
             task_state->cb(state, task->handle, task->name,

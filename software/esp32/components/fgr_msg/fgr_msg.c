@@ -535,7 +535,7 @@ static void receive_cb(void *buffer, size_t length, void *param)
             bool handled = false;
             SLIST_FOREACH(iter, &context->msg_rx_handler_cb_list, next) {
                 if ((iter->msg_type == 0) ||
-                    (iter->msg_type == msg->header.req.type)) {
+                        (iter->msg_type == msg->header.req.type)) {
                     handled = iter->cb(msg, iter->cb_param);
                     if (handled) {
                         // Stop if the callback returns true
@@ -991,9 +991,9 @@ int32_t fgr_msg_receive_handler_add(uint16_t msg_type,
     if (g_context.lock) {
         err = -ESP_ERR_INVALID_ARG;
         if (cb &&
-            ((msg_type == 0) ||
-             ((msg_type >> 12) == FGR_MSG_TYPE_REQ) ||
-             ((msg_type >> 12) == FGR_MSG_TYPE_IND))) {
+                ((msg_type == 0) ||
+                 ((msg_type >> 12) == FGR_MSG_TYPE_REQ) ||
+                 ((msg_type >> 12) == FGR_MSG_TYPE_IND))) {
             err = -ESP_ERR_NO_MEM;
             msg_rx_handler_cb_t *msg_rx_cb = (msg_rx_handler_cb_t *) malloc(sizeof(*msg_rx_cb));
             if (msg_rx_cb) {
@@ -1198,7 +1198,7 @@ void fgr_msg_print_summary(const char *prefix_str, fgr_log_level_t level,
 
     fgr_msg_name(msg_type, buffer_msg_name, sizeof(buffer_msg_name));
     if (((msg_type >> 12) == FGR_MSG_TYPE_REQ) ||
-        ((msg_type >> 12) == FGR_MSG_TYPE_RSP)) {
+            ((msg_type >> 12) == FGR_MSG_TYPE_RSP)) {
         if (prefix_str == NULL) {
             prefix_str = "Received";
         }

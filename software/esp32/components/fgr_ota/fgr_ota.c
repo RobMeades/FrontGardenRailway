@@ -153,7 +153,7 @@ static int32_t parse_firmware_header(const char *buffer, size_t buffer_len,
     const esp_partition_t *last_invalid_app = esp_ota_get_last_invalid_partition();
     esp_app_desc_t invalid_app_info;
     if (last_invalid_app != NULL &&
-        esp_ota_get_partition_description(last_invalid_app, &invalid_app_info) == ESP_OK) {
+            esp_ota_get_partition_description(last_invalid_app, &invalid_app_info) == ESP_OK) {
         ESP_LOGI(TAG, "Last invalid firmware version: %s.", invalid_app_info.version);
     }
 

@@ -558,7 +558,7 @@ static void update_breathe_intensity(breathe_state_t *breathe_state)
         // Map step_counter to sine table index
         // We want a full sine wave over the period
         uint32_t index = (breathe_state->step_counter * FGR_UTIL_ARRAY_LENGTH(
-                              g_sine_table)) / breathe_state->period_steps;
+                          g_sine_table)) / breathe_state->period_steps;
         index &= FGR_UTIL_ARRAY_LENGTH(g_sine_table) - 1;  // Ensure within bounds
         breathe_state->intensity = g_sine_table[index];
 
@@ -990,7 +990,7 @@ void fgr_debug_led_breathe_set(fgr_debug_colour_t colour)
         CONTEXT_LOCK(g_context.lock, "fgr_debug_set_breathe()");
 
         if (g_context.queue_handle && !g_context.led_masked_off &&
-            g_context.breathe_state.enabled) {
+                g_context.breathe_state.enabled) {
             led_cmd_t cmd = {
                 .mode = FGR_LED_MODE_BREATHE,
                 .colour = colour,

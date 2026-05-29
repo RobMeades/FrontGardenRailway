@@ -168,7 +168,7 @@ static const char *abort_reason_name(int32_t reason)
     const char *reason_name = "USER";
     int32_t reason_name_index = -(reason + 1);
     if ((reason_name_index >= 0) &&
-        (reason_name_index < FGR_UTIL_ARRAY_LENGTH(g_abort_reason_name))) {
+            (reason_name_index < FGR_UTIL_ARRAY_LENGTH(g_abort_reason_name))) {
         reason_name = g_abort_reason_name[reason_name_index];
     }
 
@@ -302,14 +302,14 @@ static void task_monitor(void *param)
             }
         }
         if ((reason == FGR_MONITOR_ABORT_REASON_NONE) &&
-            (heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT) < FGR_MONITOR_HEAP_MIN)) {
+                (heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT) < FGR_MONITOR_HEAP_MIN)) {
             reason = FGR_MONITOR_ABORT_REASON_LOW_HEAP;
         }
 
         // Monitor communications with the controller
         if ((reason == FGR_MONITOR_ABORT_REASON_NONE) &&
-            (context_task->last_msg_receive_us - esp_timer_get_time() >
-             FGR_MONITOR_WDT_CONTROLLER_TIMEOUT_SECONDS * 1000000)) {
+                (context_task->last_msg_receive_us - esp_timer_get_time() >
+                 FGR_MONITOR_WDT_CONTROLLER_TIMEOUT_SECONDS * 1000000)) {
             reason = FGR_MONITOR_ABORT_REASON_CONTROLLER_WDT;
         }
 
