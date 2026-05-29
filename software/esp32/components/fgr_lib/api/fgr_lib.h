@@ -90,8 +90,8 @@ extern "C" {
 
  */
 int32_t fgr_lib_init(const char *ota_server_cert_pem,
-                     fgr_msg_state_cb_t state_cb, fgr_msg_send_cb_t send_cb,
-                     fgr_monitor_cb_t monitor_cb, void *cb_param);
+fgr_msg_state_cb_t state_cb, fgr_msg_send_cb_t send_cb,
+fgr_monitor_cb_t monitor_cb, void *cb_param);
 
 /** Deinitialise all libraries.  Should only be called ONCE at end of day.
  */

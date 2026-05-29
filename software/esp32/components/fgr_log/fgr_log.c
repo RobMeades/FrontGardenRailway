@@ -96,7 +96,6 @@ typedef struct {
     fgr_msg_body_t *body;
 } queue_msg_t;
 
-
 // Buffer for logs when disconnected.
 typedef struct {
     fgr_msg_header_log_t **headers;  // Array of header pointers
@@ -140,7 +139,8 @@ static context_t g_context = {
 static const esp_log_level_t g_fgr_to_esp_log_level[] = {ESP_LOG_DEBUG,  // FGR_LOG_LEVEL_DEBUG (0)
                                                          ESP_LOG_INFO,   // FGR_LOG_LEVEL_INFO (1)
                                                          ESP_LOG_WARN,   // FGR_LOG_LEVEL_WARN (2)
-                                                         ESP_LOG_ERROR}; // FGR_LOG_LEVEL_ERROR (3)
+                                                         ESP_LOG_ERROR
+                                                        }; // FGR_LOG_LEVEL_ERROR (3)
 
 // Table to convert an esp_log_level_t (the index) into an fgr_log_level_t.
 static const fgr_log_level_t g_esp_to_fgr_log_level[] = {FGR_LOG_LEVEL_ERROR,  // ESP_LOG_NONE (0)
@@ -148,7 +148,8 @@ static const fgr_log_level_t g_esp_to_fgr_log_level[] = {FGR_LOG_LEVEL_ERROR,  /
                                                          FGR_LOG_LEVEL_WARN,   // ESP_LOG_WARN (2)
                                                          FGR_LOG_LEVEL_INFO,   // ESP_LOG_INFO (3)
                                                          FGR_LOG_LEVEL_DEBUG,  // ESP_LOG_DEBUG (4)
-                                                         FGR_LOG_LEVEL_DEBUG}; // ESP_LOG_VERBOSE (5)
+                                                         FGR_LOG_LEVEL_DEBUG
+                                                        }; // ESP_LOG_VERBOSE (5)
 
 /* ----------------------------------------------------------------
  * STATIC FUNCTIONS: MISC
@@ -377,7 +378,7 @@ static void log_replay_marker(const char *str, context_t *context)
 {
     fgr_msg_t *marker_msg = (fgr_msg_t *) malloc(sizeof(*marker_msg));
 
-    if (marker_msg){
+    if (marker_msg) {
         marker_msg->header.log.type = htons(((uint16_t) FGR_MSG_TYPE_LOG) << 12);
         marker_msg->header.log.level = FGR_LOG_LEVEL_INFO;
         marker_msg->body.length = htonl(strlen(str));
@@ -385,7 +386,7 @@ static void log_replay_marker(const char *str, context_t *context)
 
         fgr_socket_send_no_log(context->sock, &marker_msg,
                                sizeof(marker_msg->header) + sizeof(marker_msg->body.length) + strlen(str), 0);
-       free(marker_msg);
+        free(marker_msg);
     }
 }
 
@@ -526,13 +527,13 @@ static void task_log_cb(void *handle, void *param)
                 } else {
                     fgr_socket_channel_failed(&context->context_sock);
                     log_buffer_add(&context->buffer, &queue_msg.header,
-                                    queue_msg.body, queue_msg.body_length);
+                                   queue_msg.body, queue_msg.body_length);
                     context->connected = false;
                 }
             } else {
                 // Disconnected: buffer instead of dropping
                 log_buffer_add(&context->buffer, &queue_msg.header,
-                                queue_msg.body, queue_msg.body_length);
+                               queue_msg.body, queue_msg.body_length);
             }
 
             free(queue_msg.body);
@@ -540,8 +541,8 @@ static void task_log_cb(void *handle, void *param)
             if (context->connected && (context->queue_full_count > 0)) {
                 // Send a marker message with the count of queue full events
                 snprintf(marker_buffer, sizeof(marker_buffer),
-                        "### Lost %d log message(s) due to queue full ###",
-                        context->queue_full_count);
+                         "### Lost %d log message(s) due to queue full ###",
+                         context->queue_full_count);
                 context->queue_full_count = 0;
                 log_replay_marker(marker_buffer, context);
             }
@@ -778,7 +779,7 @@ int32_t fgr_log_init(const char *server_ip, uint16_t port,
                 // Set vprintf handler
                 esp_log_set_vprintf(tcp_log_vprintf);
                 ESP_LOGI(TAG, "Logs will be forwarded to %s:%d, log level %d.",
-                        server_ip, port, g_context.level_min);
+                         server_ip, port, g_context.level_min);
 
             }
         }
@@ -889,19 +890,19 @@ bool fgr_log_msg_receive_handler_cb(fgr_msg_t *msg, void *param)
                         msg_error = FGR_ERROR_NONE;
                     }
                 }
-            break;
+                break;
             case FGR_REQ_CNF_LOG_START:
                 msg_error = FGR_ERROR_GENERIC;
-               if (fgr_log_on() == ESP_OK) {
+                if (fgr_log_on() == ESP_OK) {
                     msg_error = FGR_ERROR_NONE;
                 }
-            break;
+                break;
             case FGR_REQ_CNF_LOG_STOP:
                 msg_error = FGR_ERROR_GENERIC;
                 if (fgr_log_off() == ESP_OK) {
                     msg_error = FGR_ERROR_NONE;
                 }
-            break;
+                break;
             case FGR_REQ_CNF_LOG_STATUS:
                 // Contents should be one uint8_t
                 // representing the bool of log
@@ -913,10 +914,10 @@ bool fgr_log_msg_receive_handler_cb(fgr_msg_t *msg, void *param)
                 length = 2;
                 CONTEXT_UNLOCK(g_context.lock, "fgr_log_msg_receive_handler_cb()");
                 msg_error = FGR_ERROR_NONE;
-            break;
+                break;
             default:
                 handled = false;
-            break;
+                break;
         }
 
         if (handled) {
@@ -935,4 +936,3 @@ bool fgr_log_msg_receive_handler_cb(fgr_msg_t *msg, void *param)
 }
 
 // End of file
-

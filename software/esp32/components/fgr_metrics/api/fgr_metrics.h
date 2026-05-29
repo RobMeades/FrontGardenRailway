@@ -17,9 +17,9 @@
 #ifndef _FGR_METRICS_H_
 #define _FGR_METRICS_H_
 
- /** @file
-  * @brief Metrics API for a node of the front garden railway.
-  */
+/** @file
+ * @brief Metrics API for a node of the front garden railway.
+ */
 
 #ifdef __cplusplus
 extern "C" {
@@ -45,7 +45,7 @@ extern "C" {
  */
 typedef struct {
     bool since_boot_not_power_cycle;  // If true, seconds is since boot,
-                                      // else it is since power cycle.
+    // else it is since power cycle.
     time_t seconds;                   // The time in seconds.
 } fgr_metrics_time_t;
 
@@ -54,12 +54,12 @@ typedef struct {
 typedef struct {
     uint32_t count;          // Count of occurrences of the event.
     fgr_metrics_time_t time; // The time that the event count was
-                             // last incremented.
+    // last incremented.
     int32_t amount;          // An amount associated with the event,
-                             // e.g. for a transmit event this might
-                             // be the number of bytes transmitted;
-                             // may be unused.  This will be ADDED
-                             // to the stored amount on each event.
+    // e.g. for a transmit event this might
+    // be the number of bytes transmitted;
+    // may be unused.  This will be ADDED
+    // to the stored amount on each event.
 } fgr_metrics_event_t;
 
 /** Structure to track a Boolean event type metric.
@@ -123,18 +123,28 @@ typedef union {
     fgr_metrics_event_t local_reboot;
     fgr_metrics_event_t panic;
     fgr_metrics_event_t power_bad;
-    fgr_metrics_event_bool_t wifi_connection;         // Event true: connection successful, event false: connection failure, amount unused
+    fgr_metrics_event_bool_t
+    wifi_connection;         // Event true: connection successful, event false: connection failure, amount unused
     fgr_metrics_event_t ip_connection;
     int32_t wifi_rssi_dbm;
-    fgr_metrics_event_bool_t ota_connection;          // Event true: connection successful, event false: connection failure, amount unused
-    fgr_metrics_event_bool_t ota_nvs_write;           // Event true: updated version in NVS, event false: failed to update version in NVS, amount unused
-    fgr_metrics_event_bool_t log_server_connection;   // Event true: connection successful, event false: connection failure, amount unused
-    fgr_metrics_event_bool_t controller_connection;   // Event true: connection successful, event false: connection failure, amount unused
-    fgr_metrics_event_bool_t controller_socket_tx;    // Event true: TX successful, event false: TX successful, amount: the number of bytes that [would have been] transmitted
-    fgr_metrics_event_t controller_socket_rx;         // Event RX successful, amount: the number of bytes received
-    fgr_metrics_event_bool_t ping_tx;                 // Event true: ping TX successful, event false: ping TX failure, amount: the number of bytes that [would have been] transmitted
-    fgr_metrics_event_bool_t ping_rx;                 // Event true: ping RX successful, event false: ping RX failure, amount: the number of bytes received
-    fgr_metrics_event_bool_t nvs_write;               // Event true: NVS write successful, event false: NVS write failure, amount: the number of bytes that [would have been] written
+    fgr_metrics_event_bool_t
+    ota_connection;          // Event true: connection successful, event false: connection failure, amount unused
+    fgr_metrics_event_bool_t
+    ota_nvs_write;           // Event true: updated version in NVS, event false: failed to update version in NVS, amount unused
+    fgr_metrics_event_bool_t
+    log_server_connection;   // Event true: connection successful, event false: connection failure, amount unused
+    fgr_metrics_event_bool_t
+    controller_connection;   // Event true: connection successful, event false: connection failure, amount unused
+    fgr_metrics_event_bool_t
+    controller_socket_tx;    // Event true: TX successful, event false: TX successful, amount: the number of bytes that [would have been] transmitted
+    fgr_metrics_event_t
+    controller_socket_rx;         // Event RX successful, amount: the number of bytes received
+    fgr_metrics_event_bool_t
+    ping_tx;                 // Event true: ping TX successful, event false: ping TX failure, amount: the number of bytes that [would have been] transmitted
+    fgr_metrics_event_bool_t
+    ping_rx;                 // Event true: ping RX successful, event false: ping RX failure, amount: the number of bytes received
+    fgr_metrics_event_bool_t
+    nvs_write;               // Event true: NVS write successful, event false: NVS write failure, amount: the number of bytes that [would have been] written
     fgr_metrics_stack_min_free_lowest_t stack_min_free_lowest;
     int32_t heap_min_free_bytes;
 } fgr_metrics_union_t;

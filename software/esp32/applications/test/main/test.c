@@ -43,8 +43,8 @@
  * COMPILE-TIME MACROS
  * -------------------------------------------------------------- */
 
- // Logging prefix
- #define TAG "test"
+// Logging prefix
+#define TAG "test"
 
 // The message heartbeat to use during testing
 #ifndef FGR_MSG_HEARTBEAT_SECONDS
@@ -124,25 +124,25 @@ static bool msg_receive_cb(fgr_msg_t *msg, void *param)
                     // No configuration, just confirm
                     state_set(context, FGR_STATE_STARTED);
                     msg_error = FGR_ERROR_NONE;
-                break;
+                    break;
                 case FGR_REQ_CNF_START:
                     state_set(context, FGR_STATE_STARTED);
                     msg_error = FGR_ERROR_NONE;
-                break;
+                    break;
                 case FGR_REQ_CNF_STOP:
                     state_set(context, FGR_STATE_STOPPED);
                     msg_error = FGR_ERROR_NONE;
-                break;
+                    break;
                 case FGR_REQ_CNF_REBOOT:
                     // Just reset the running flag and we will exit
                     context->running = false;
                     state_set(context, FGR_STATE_STOPPED);
                     msg_error = FGR_ERROR_NONE;
-                break;
+                    break;
                 default:
                     //
                     handled = false;
-                break;
+                    break;
             }
 
             if (handled) {
@@ -160,14 +160,14 @@ static bool msg_receive_cb(fgr_msg_t *msg, void *param)
                     // that we have
                     state_set(context, FGR_STATE_STARTED);
                     fgr_msg_send_queue_ind(FGR_IND_RSP_START, contents, length);
-                break;
+                    break;
                 case FGR_IND_RSP_START:
                 case FGR_IND_RSP_STOP:
                     // Ignore
-                break;
+                    break;
                 default:
                     handled = false;
-                break;
+                    break;
             }
         }
 
@@ -253,7 +253,7 @@ static void deinit(context_t *context)
 static void do_node(context_t *context)
 {
     // Main loop
-    while(context->running) {
+    while (context->running) {
 
         // Do something here
 

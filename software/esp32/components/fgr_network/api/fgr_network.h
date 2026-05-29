@@ -66,8 +66,8 @@ extern "C" {
  *                  esp_err_t.
  */
 int32_t fgr_network_init(const char *ssid, const char *password,
-                         wifi_auth_mode_t auth_mode,
-                         bool reduced_tx_power);
+wifi_auth_mode_t auth_mode,
+bool reduced_tx_power);
 
 /** Deinitialise networking.  This function should be called ONCE
  * at end of day.

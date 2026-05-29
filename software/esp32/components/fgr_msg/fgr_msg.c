@@ -139,21 +139,25 @@ static const char *g_msg_req_cnf_str_list[] = {"NULL", "CFG", "START", "STOP",
                                                "LOG_LEVEL", "LOG_START", "LOG_STOP",
                                                "LOG_STATUS", "DEBUG_LED_OFF", "DEBUG_LED_ON",
                                                "DEBUG_LED_BREATHE_OFF", "DEBUG_LED_BREATHE_ON",
-                                               "DEBUG_LED_STATUS", "REBOOT", "PING"};
+                                               "DEBUG_LED_STATUS", "REBOOT", "PING"
+                                              };
 
 // List of known message IND/RSP names, in order.
 static const char *g_msg_ind_rsp_str_list[] = {"NULL", "NEEDS_CFG", "START", "STOP",
-                                               "HEARTBEAT"};
+                                               "HEARTBEAT"
+                                              };
 
 // List of known message error codes, in order.
 static const char *g_msg_error_str_list[] = {"NONE", "GENERIC", "INVALID_REQUEST",
                                              "UNHANDLED_REQUEST", "MSG_TOO_LONG",
                                              "ABORTED", "BUSY", "TIMEOUT",
-                                             "OUT_OF_RESOURCES", "HARDWARE"};
+                                             "OUT_OF_RESOURCES", "HARDWARE"
+                                            };
 // List of known message states, in order.
 static const char *g_msg_state_str_list[] = {"NOT_POPULATED", "NEEDS_CFG", "STARTED",
                                              "STOPPED", "BUSY", "GENERIC_FAILED",
-                                             "HARDWARE_FAILURE"};
+                                             "HARDWARE_FAILURE"
+                                            };
 
 // Send queue context.
 static context_send_t g_context_send = {0};
@@ -329,7 +333,7 @@ static int32_t send_msg_locked(context_t *context,
     uint32_t header_and_length[(sizeof(*_header) + sizeof(*_length)) / sizeof(uint32_t)] = {0};
 
     // Assemble all of the bits
-    _header = (fgr_msg_header_t *) &(header_and_length[0]);
+    _header = (fgr_msg_header_t *) & (header_and_length[0]);
     _length = &(header_and_length[sizeof(*_header) / sizeof(uint32_t)]);
     // We can just fill in the CNF bit of the union, the
     // IND part follows the same pattern
@@ -342,7 +346,8 @@ static int32_t send_msg_locked(context_t *context,
 
     // Send header and length
     int32_t total_bytes = sizeof(header_and_length);
-    int32_t err = fgr_socket_send(context->sock, &header_and_length, sizeof(header_and_length), FGR_SOCKET_TX_RETRY_COUNT);
+    int32_t err = fgr_socket_send(context->sock, &header_and_length, sizeof(header_and_length),
+                                  FGR_SOCKET_TX_RETRY_COUNT);
     if ((err == ESP_OK) && (buffer != NULL)) {
         // Send contents
         total_bytes += length;
@@ -635,7 +640,7 @@ int32_t fgr_msg_init(const char *server_ip, uint16_t port,
                 if (err == ESP_OK) {
 
                     fgr_metrics_event_bool_set(FGR_METRIC_EVENT_BOOL_CONTROLLER_CONNECTION,
-                                            true, 0);
+                                               true, 0);
 
                     xSemaphoreGive(g_context.lock);
                     // Do initial extra socket configuration
@@ -1206,12 +1211,12 @@ void fgr_msg_print_summary(const char *prefix_str, fgr_log_level_t level,
         if ((msg_type >> 12) == FGR_MSG_TYPE_CNF) {
             fgr_msg_error_name(error_state, buffer_error_state, sizeof(buffer_error_state));
             snprintf(buffer, sizeof(buffer), "%s %s [0x%04x], error %s [%d], reference %d,"
-                     " length %lu.", prefix_str, buffer_msg_name, msg_type,
+                                             " length %lu.", prefix_str, buffer_msg_name, msg_type,
                      buffer_error_state, error_state, reference, length);
         } else if ((msg_type >> 12) == FGR_MSG_TYPE_IND) {
             fgr_msg_state_name(error_state, buffer_error_state, sizeof(buffer_error_state));
             snprintf(buffer, sizeof(buffer), "%s %s [0x%04x], state %s [%d], reference %d,"
-                     " length %lu.", prefix_str, buffer_msg_name, msg_type,
+                                             " length %lu.", prefix_str, buffer_msg_name, msg_type,
                      buffer_error_state, error_state, reference, length);
         } else {
             snprintf(buffer, sizeof(buffer), "Unknown message type (0x%04x).", msg_type);
@@ -1221,19 +1226,18 @@ void fgr_msg_print_summary(const char *prefix_str, fgr_log_level_t level,
     switch (level) {
         case FGR_LOG_LEVEL_DEBUG:
             ESP_LOGD(TAG, "%s", buffer);
-        break;
+            break;
         case FGR_LOG_LEVEL_WARN:
             ESP_LOGW(TAG, "%s", buffer);
-        break;
+            break;
         case FGR_LOG_LEVEL_ERROR:
             ESP_LOGE(TAG, "%s", buffer);
-        break;
+            break;
         case FGR_LOG_LEVEL_INFO:
         default:
             ESP_LOGI(TAG, "%s", buffer);
-        break;
+            break;
     }
 }
 
 // End of file
-

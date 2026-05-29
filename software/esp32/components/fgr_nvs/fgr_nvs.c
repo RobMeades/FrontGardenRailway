@@ -39,8 +39,8 @@
  * COMPILE-TIME MACROS
  * -------------------------------------------------------------- */
 
- // Logging prefix
- #define TAG "nvs"
+// Logging prefix
+#define TAG "nvs"
 
 /* ----------------------------------------------------------------
  * TYPES
@@ -93,7 +93,7 @@ int32_t fgr_nvs_init()
     }
 
     // Returns ESP_OK or negative error code from esp_err_t
-    return (int32_t) -err;
+    return (int32_t) - err;
 }
 
 // Retrieve a uint32_t value from NVS.
@@ -114,7 +114,7 @@ int32_t fgr_nvs_get(const char *name, uint32_t *value)
                          *value, name);
             } else {
                 ESP_LOGW(TAG, "Unable to read \"%s\" from NVS:"
-                         " 0x%04x (\"%s\")!", name,
+                              " 0x%04x (\"%s\")!", name,
                          err, esp_err_to_name(err));
             }
             nvs_close(nvs_handle);
@@ -125,7 +125,7 @@ int32_t fgr_nvs_get(const char *name, uint32_t *value)
     }
 
     // Returns ESP_OK or negative error code from esp_err_t
-    return (int32_t) -err;
+    return (int32_t) - err;
 }
 
 // Store a uint32_t value in NVS.
@@ -142,18 +142,18 @@ int32_t fgr_nvs_set(const char *name, uint32_t value)
                 err = nvs_commit(nvs_handle);
                 if (err == ESP_OK)  {
                     ESP_LOGD(TAG, "Value %d commited to storage for \"%s\""
-                             ", waiting %d ms for it to complete.",
+                                  ", waiting %d ms for it to complete.",
                              value, name, FGR_NVS_COMMIT_GUARD_MS);
                     vTaskDelay(pdMS_TO_TICKS(FGR_NVS_COMMIT_GUARD_MS));
                 } else {
                     ESP_LOGW(TAG, "Unable to commit changes to NVS:"
-                             " 0x%04x (\"%s\")!", err, esp_err_to_name(err));
+                                  " 0x%04x (\"%s\")!", err, esp_err_to_name(err));
                 }
                 fgr_metrics_event_bool_set(FGR_METRIC_EVENT_BOOL_NVS_WRITE,
                                            err == ESP_OK, sizeof(value));
             } else {
                 ESP_LOGW(TAG, "Unable to store \"%s\" to NVS:"
-                         " 0x%04x (\"%s\")!", name,
+                              " 0x%04x (\"%s\")!", name,
                          err, esp_err_to_name(err));
             }
             nvs_close(nvs_handle);
@@ -164,8 +164,7 @@ int32_t fgr_nvs_set(const char *name, uint32_t value)
     }
 
     // Returns ESP_OK or negative error code from esp_err_t
-    return (int32_t) -err;
+    return (int32_t) - err;
 }
 
 // End of file
-

@@ -17,9 +17,9 @@
 #ifndef _FGR_MONITOR_H_
 #define _FGR_MONITOR_H_
 
- /** @file
-  * @brief Monitoring API for a node of the front garden railway.
-  */
+/** @file
+ * @brief Monitoring API for a node of the front garden railway.
+ */
 
 #ifdef __cplusplus
 extern "C" {

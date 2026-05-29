@@ -33,6 +33,7 @@
 
 #include "fgr_util.h"
 #include "fgr_task.h"
+#include "fgr_rram.h"
 #include "fgr_monitor.h"
 #include "fgr_lib.h"
 
@@ -40,8 +41,8 @@
  * COMPILE-TIME MACROS
  * -------------------------------------------------------------- */
 
- // Logging prefix
- #define TAG "monitor"
+// Logging prefix
+#define TAG "monitor"
 
 #ifndef FGR_MONITOR_TASK_STACK_SIZE
 #  define FGR_MONITOR_TASK_STACK_SIZE (1024 * 4)
@@ -56,7 +57,6 @@
 
 // Storage in retained RAM.
 typedef struct {
-    int32_t magic;
     char task_name[FGR_UTIL_TASK_NAME_MAX_LENGTH];
     fgr_monitor_abort_reason_t abort_reason;
 } retained_ram_t;
@@ -105,10 +105,11 @@ static const char *g_abort_reason_name[] = {
     "LOW_HEAP",
     "FRAGMENTED_HEAP",
     "TASK_WDT",
-    "CONTROLLER_WDT"};
+    "CONTROLLER_WDT"
+};
 
 // Storage for abort reason in retained RAM
-RTC_NOINIT_ATTR retained_ram_t g_monitor_retained_ram;
+FGR_RRAM_DEFINE(retained_ram_t, retained_ram);
 
 // Context.
 static context_t g_context = {0};
@@ -128,7 +129,7 @@ static void clean_up(context_t *context)
 
         CONTEXT_LOCK(context->lock, "clean_up() monitor");
 
-         // Flag should stop task running
+        // Flag should stop task running
         context->running = false;
         if (context->running_semaphore) {
             // Take the running semaphore to know its stopped
@@ -183,7 +184,7 @@ static void do_abort(int8_t reason, const char *task_name,
     const char *reason_name = abort_reason_name(reason);
 
     if (task_name && (strlen(task_name) > 0)) {
-            snprintf(buffer, sizeof(buffer), " in task %s", task_name);
+        snprintf(buffer, sizeof(buffer), " in task %s", task_name);
     }
     ESP_LOGE(TAG, "%s%s (%d)%s.", ABORT_REASON_NAME_PREFIX,
              reason_name, reason, buffer);
@@ -200,14 +201,16 @@ static void do_abort(int8_t reason, const char *task_name,
 
     fgr_lib_deinit();
     clean_up(context);
-    g_monitor_retained_ram.abort_reason = reason;
+    retained_ram_t retained_ram = {0};
+    retained_ram.abort_reason = reason;
     if (task_name) {
-        strlcpy(g_monitor_retained_ram.task_name, task_name,
-                sizeof(g_monitor_retained_ram.task_name));
+        strlcpy(retained_ram.task_name, task_name,
+                sizeof(retained_ram.task_name));
     } else {
-        memset(g_monitor_retained_ram.task_name, 0,
-               sizeof(g_monitor_retained_ram.task_name));
+        memset(retained_ram.task_name, 0,
+               sizeof(retained_ram.task_name));
     }
+    FGR_RRAM_SET(retained_ram);
     abort();
 }
 
@@ -254,7 +257,7 @@ static void task_state_cb(fgr_task_state_t state, void *handle,
                 task = NULL;
             }
         }
-        if (task){
+        if (task) {
             task->last_called_us = esp_timer_get_time();
         }
 
@@ -292,7 +295,8 @@ static void task_monitor(void *param)
             } else {
                 if (context_task->heap_below_min_start_us == 0) {
                     context_task->heap_below_min_start_us = esp_timer_get_time();
-                } else if (context_task->heap_below_min_start_us - esp_timer_get_time() > FGR_MONITOR_HEAP_MIN_DURATION_SECONDS * 1000000) {
+                } else if (context_task->heap_below_min_start_us - esp_timer_get_time() >
+                           FGR_MONITOR_HEAP_MIN_DURATION_SECONDS * 1000000) {
                     reason = FGR_MONITOR_ABORT_REASON_FRAGMENTED_HEAP;
                 }
             }
@@ -304,7 +308,8 @@ static void task_monitor(void *param)
 
         // Monitor communications with the controller
         if ((reason == FGR_MONITOR_ABORT_REASON_NONE) &&
-            (context_task->last_msg_receive_us - esp_timer_get_time() > FGR_MONITOR_WDT_CONTROLLER_TIMEOUT_SECONDS * 1000000)) {
+            (context_task->last_msg_receive_us - esp_timer_get_time() >
+             FGR_MONITOR_WDT_CONTROLLER_TIMEOUT_SECONDS * 1000000)) {
             reason = FGR_MONITOR_ABORT_REASON_CONTROLLER_WDT;
         }
 
@@ -312,7 +317,8 @@ static void task_monitor(void *param)
             // Check all of the task last_called_us times
             task_t *iter = NULL;
             SLIST_FOREACH(iter, &context_task->task_list, next) {
-                if (iter->last_called_us - esp_timer_get_time() > (((int64_t) context_task->timeout_seconds) * 1000000)) {
+                if (iter->last_called_us - esp_timer_get_time() > (((int64_t) context_task->timeout_seconds) *
+                                                                   1000000)) {
                     task_name = iter->name;
                     reason = FGR_MONITOR_ABORT_REASON_TASK_WDT;
                     break;
@@ -384,10 +390,10 @@ int32_t fgr_monitor_init(fgr_monitor_cb_t cb, void *cb_param)
         context_task->timeout_seconds = FGR_MONITOR_WDT_TASK_TIMEOUT_SECONDS;
 
         // Set up retained storage if required
-        if (g_monitor_retained_ram.magic != FGR_UTIL_RETAINED_RAM_MAGIC_MARKER) {
-            memset(&g_monitor_retained_ram, 0, sizeof(g_monitor_retained_ram));
-            g_monitor_retained_ram.abort_reason = FGR_MONITOR_ABORT_REASON_NONE;
-            g_monitor_retained_ram.magic = FGR_UTIL_RETAINED_RAM_MAGIC_MARKER;
+        retained_ram_t retained_ram;
+        if (FGR_RRAM_GET(retained_ram) != ESP_OK) {
+            retained_ram.abort_reason = FGR_MONITOR_ABORT_REASON_NONE;
+            FGR_RRAM_SET(retained_ram);
         }
 
         // Note: we don't use fgr_task_create() here since
@@ -509,14 +515,16 @@ void fgr_monitor_abort(uint8_t reason, const char *task_name)
 int32_t fgr_monitor_abort_reason_get(char *task_name)
 {
     int32_t reason = FGR_MONITOR_ABORT_REASON_NONE;
+    retained_ram_t retained_ram = {0};
 
-    if (g_monitor_retained_ram.magic == FGR_UTIL_RETAINED_RAM_MAGIC_MARKER) {
-        reason = g_monitor_retained_ram.abort_reason;
+    if (FGR_RRAM_GET(retained_ram) == ESP_OK) {
+        reason = retained_ram.abort_reason;
         if (task_name) {
-            strlcpy(task_name, g_monitor_retained_ram.task_name,
+            strlcpy(task_name, retained_ram.task_name,
                     FGR_UTIL_TASK_NAME_MAX_LENGTH);
         }
-        g_monitor_retained_ram.abort_reason = FGR_MONITOR_ABORT_REASON_NONE;
+        retained_ram.abort_reason = FGR_MONITOR_ABORT_REASON_NONE;
+        FGR_RRAM_SET(retained_ram);
     }
 
     return reason;
@@ -548,24 +556,24 @@ int32_t fgr_monitor_abort_reason_log(const char *tag, const char *prefix,
                 case ESP_LOG_ERROR:
                     ESP_LOGE(tag, "%s%s%s (%d)%s", prefix, reason_name_prefix,
                              reason_name, reason, buffer);
-                break;
+                    break;
                 case ESP_LOG_WARN:
                     ESP_LOGW(tag, "%s%s%s (%d)%s", prefix, reason_name_prefix,
                              reason_name, reason, buffer);
-                break;
+                    break;
                 case ESP_LOG_INFO:
                     ESP_LOGI(tag, "%s%s%s (%d)%s", prefix, reason_name_prefix,
                              reason_name, reason, buffer);
-                break;
+                    break;
                 case ESP_LOG_DEBUG:
                     ESP_LOGD(tag, "%s%s%s (%d)%s", prefix, reason_name_prefix,
                              reason_name, reason, buffer);
-                break;
+                    break;
                 case ESP_LOG_VERBOSE:
                     ESP_LOGD(tag, "%s%S%s (%d)%s", prefix, reason_name_prefix,
                              reason_name, (int) reason, buffer);
                 default:
-                break;
+                    break;
             }
         }
         err = 1;
@@ -575,4 +583,3 @@ int32_t fgr_monitor_abort_reason_log(const char *tag, const char *prefix,
 }
 
 // End of file
-

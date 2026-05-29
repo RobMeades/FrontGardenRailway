@@ -46,10 +46,10 @@
  * COMPILE-TIME MACROS
  * -------------------------------------------------------------- */
 
- // Logging prefix
- #define TAG "ota"
+// Logging prefix
+#define TAG "ota"
 
- // OTA buffer
+// OTA buffer
 #define OTA_BUFFER_SIZE 1024
 
 // Downloaded file header buffer
@@ -139,8 +139,9 @@ static int32_t parse_firmware_header(const char *buffer, size_t buffer_len,
            &buffer[sizeof(esp_image_header_t) + sizeof(esp_image_segment_header_t)],
            sizeof(esp_app_desc_t));
 
-
-    ESP_LOGI(TAG, "sizeof(esp_image_header_t): %d, sizeof(esp_image_segment_header_t) %d, sizeof(esp_app_desc_t) %d", sizeof(esp_image_header_t),
+    ESP_LOGI(TAG,
+             "sizeof(esp_image_header_t): %d, sizeof(esp_image_segment_header_t) %d, sizeof(esp_app_desc_t) %d",
+             sizeof(esp_image_header_t),
              sizeof(esp_image_segment_header_t), sizeof(esp_app_desc_t));
     ESP_LOGI(TAG, "New firmware version: %s.", new_app_info.version);
 
@@ -149,7 +150,7 @@ static int32_t parse_firmware_header(const char *buffer, size_t buffer_len,
         ESP_LOGI(TAG, "Running firmware version: %s.", running_app_info.version);
     }
 
-    const esp_partition_t* last_invalid_app = esp_ota_get_last_invalid_partition();
+    const esp_partition_t *last_invalid_app = esp_ota_get_last_invalid_partition();
     esp_app_desc_t invalid_app_info;
     if (last_invalid_app != NULL &&
         esp_ota_get_partition_description(last_invalid_app, &invalid_app_info) == ESP_OK) {
@@ -252,9 +253,11 @@ int32_t fgr_ota_update(const char *update_file_url,
     const esp_partition_t *running = esp_ota_get_running_partition();
 
     if (configured != running) {
-        ESP_LOGW(TAG, "Configured OTA boot partition at offset 0x%08"PRIx32", but running from offset 0x%08"PRIx32".",
+        ESP_LOGW(TAG,
+                 "Configured OTA boot partition at offset 0x%08"PRIx32", but running from offset 0x%08"PRIx32".",
                  configured->address, running->address);
-        ESP_LOGW(TAG, "(This can happen if either the OTA boot data or preferred boot image become corrupted somehow.)");
+        ESP_LOGW(TAG,
+                 "(This can happen if either the OTA boot data or preferred boot image become corrupted somehow.)");
     }
     ESP_LOGI(TAG, "Running partition type %d subtype %d (offset 0x%08"PRIx32").",
              running->type, running->subtype, running->address);
@@ -313,7 +316,8 @@ int32_t fgr_ota_update(const char *update_file_url,
                     if (header_accumulated + data_read <= OTA_FILE_HEADER_BUFFER_SIZE) {
                         memcpy(g_header_buffer + header_accumulated, g_ota_write_data, data_read);
                         header_accumulated += data_read;
-                        ESP_LOGI(TAG, "Accumulated %d/%d bytes for header.", header_accumulated, OTA_FILE_HEADER_BUFFER_SIZE);
+                        ESP_LOGI(TAG, "Accumulated %d/%d bytes for header.", header_accumulated,
+                                 OTA_FILE_HEADER_BUFFER_SIZE);
                     } else {
                         ESP_LOGE(TAG, "Header buffer overflow!");
                         err = ESP_ERR_NO_MEM;
@@ -383,16 +387,13 @@ int32_t fgr_ota_update(const char *update_file_url,
                     if (errno == ECONNRESET || errno == ENOTCONN) {
                         ESP_LOGE(TAG, "Connection closed, errno = %d.", errno);
                         err = ESP_ERR_NOT_FINISHED;
-                    }
-                    else if (esp_http_client_is_complete_data_received(client) == true) {
+                    } else if (esp_http_client_is_complete_data_received(client) == true) {
                         ESP_LOGI(TAG, "Connection closed - transfer complete.");
                         transfer_complete = true;
-                    }
-                    else if (zero_read_count >= max_zero_reads) {
+                    } else if (zero_read_count >= max_zero_reads) {
                         ESP_LOGE(TAG, "Too many zero reads (%d) after header, connection may be dead.", zero_read_count);
                         err = ESP_ERR_INVALID_RESPONSE;
-                    }
-                    else {
+                    } else {
                         // Small delay to avoid busy-looping when no data available
                         ESP_LOGI(TAG, "Temporary zero read, waiting for more data...");
                         vTaskDelay(pdMS_TO_TICKS(50));
@@ -423,6 +424,8 @@ int32_t fgr_ota_update(const char *update_file_url,
                 if (err == ESP_OK) {
                     ESP_LOGI(TAG, "Prepare to restart system!");
                     fgr_metrics_event_set(FGR_METRIC_EVENT_LOCAL_REBOOT, 0);
+                    // Reset the stack min free metric as it means nothing after reprogramming
+                    fgr_metrics_reset(FGR_METRIC_SIMPLE_HEAP_MIN_FREE);
                     esp_restart();
                 }
             } else {
@@ -447,8 +450,7 @@ int32_t fgr_ota_update(const char *update_file_url,
     }
 
     // Returns ESP_OK or negative error code from esp_err_t
-    return (int32_t) -err;
+    return (int32_t) - err;
 }
 
 // End of file
-

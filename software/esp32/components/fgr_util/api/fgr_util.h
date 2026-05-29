@@ -17,9 +17,9 @@
 #ifndef _FGR_UTIL_H_
 #define _FGR_UTIL_H_
 
- /** @file
-  * @brief Utilites API for a node of the front garden railway.
-  */
+/** @file
+ * @brief Utilites API for a node of the front garden railway.
+ */
 
 #ifdef __cplusplus
 extern "C" {
@@ -84,12 +84,6 @@ extern "C" {
                                           }
 #endif
 
-
-#ifndef FGR_UTIL_RETAINED_RAM_MAGIC_MARKER
-// Marker to store in an int32_t indicating that a retained RAM area is populated.
-#  define FGR_UTIL_RETAINED_RAM_MAGIC_MARKER 0xdeadface
-#endif
-
 #ifndef FGR_UTIL_TASK_NAME_MAX_LENGTH
 // The maximum length of a task name, used when stack overflows or task
 // watchdog timeouts occur.  Includes room for a null terminator.
@@ -121,8 +115,8 @@ extern "C" {
  * @return       true if the parameter passes the check, else false.
  */
 static inline bool fgr_util_is_valid_ptr_to_ptr(void **pptr, const char *tag,
-                                                const char *name,
-                                                const char *file, int32_t line)
+const char *name,
+const char *file, int32_t line)
 {
     if (pptr == NULL) {
         ESP_LOGE(tag, "Invalid %s: context is NULL", name);
@@ -138,7 +132,8 @@ static inline bool fgr_util_is_valid_ptr_to_ptr(void **pptr, const char *tag,
     if (*pptr != NULL) {
         uint32_t val = (uint32_t)(*pptr);
         if (val < 0x3f000000 || val > 0x3fffffff) {
-            ESP_LOGE(tag, "%s:%d: ATTENTION ATTENTION Invalid %s: *context=%p (not a valid pointer) ATTENTION ATTENTION",
+            ESP_LOGE(tag,
+                     "%s:%d: ATTENTION ATTENTION Invalid %s: *context=%p (not a valid pointer) ATTENTION ATTENTION",
                      file, line, name, *pptr);
             // Print backtrace to see who called this
             esp_backtrace_print(100);

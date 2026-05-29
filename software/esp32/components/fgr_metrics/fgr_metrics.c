@@ -36,6 +36,7 @@
 #include "fgr_util.h"
 #include "fgr_task.h"
 #include "fgr_time.h"
+#include "fgr_rram.h"
 #include "fgr_network.h"
 #include "fgr_metrics.h"
 
@@ -60,7 +61,7 @@
 
 #ifndef FGR_METRICS_STRUCTURE_VERSION
 // Metrics structure version: increment this if any of the items
-// going into fgr_metrics_retained_ram_t change so that the
+// going into metrics_retained_ram_t change so that the
 // data in retained RAM can be reset.
 #  define FGR_METRICS_STRUCTURE_VERSION 1
 #endif
@@ -71,18 +72,17 @@
 
 // The categories of metric; matches the members of fgr_metrics_storage_t.
 typedef enum {
-    FGR_METRIC_TYPE_SIMPLE,
-    FGR_METRIC_TYPE_EVENT,
-    FGR_METRIC_TYPE_EVENT_BOOL,
-    FGR_METRIC_TYPE_STACK_MIN_FREE
-} fgr_metrics_type_t;
+    METRIC_TYPE_SIMPLE,
+    METRIC_TYPE_EVENT,
+    METRIC_TYPE_EVENT_BOOL,
+    METRIC_TYPE_STACK_MIN_FREE
+} metric_type_t;
 
 // Storage for metrics in retained RAM.
 typedef struct {
-    int32_t magic;
     int32_t structure_version;
     fgr_metrics_storage_t metrics_list[FGR_METRIC_COUNT];
-} fgr_metrics_retained_ram_t;
+} storage_t;
 
 // An RSSI buffer.
 typedef struct {
@@ -95,7 +95,7 @@ typedef struct {
 typedef struct {
     SemaphoreHandle_t lock;
     TaskHandle_t task_handle;
-    fgr_metrics_storage_t *metrics_list;
+    storage_t storage;
     int64_t last_update_us;
     int64_t last_rssi_measurement_us;
     buffer_rssi_t buffer_rssi;
@@ -135,7 +135,8 @@ static const char *g_metric_name[] = {
     "EVENT_PING_RX",
     "EVENT_BOOL_NVS_WRITE",
     "EVENT_STACK_MIN_FREE_LOWEST",
-    "SIMPLE_HEAP_MIN_FREE"};
+    "SIMPLE_HEAP_MIN_FREE"
+};
 
 // The JSON names of all the metrics: must have the same number of
 // entries as fgr_metrics_t.
@@ -161,24 +162,24 @@ static const char *g_metric_json_name[] = {
 
 // The type of all of the metrics; must have the same number of
 // entries as fgr_metrics_t.
-static const fgr_metrics_type_t g_metric_type[] = {
-    FGR_METRIC_TYPE_EVENT,          // FGR_METRIC_EVENT_LOCAL_REBOOT
-    FGR_METRIC_TYPE_EVENT,          // FGR_METRIC_EVENT_PANIC
-    FGR_METRIC_TYPE_EVENT,          // FGR_METRIC_EVENT_POWER_BAD
-    FGR_METRIC_TYPE_EVENT_BOOL,     // FGR_METRIC_EVENT_BOOL_WIFI_CONNECTION
-    FGR_METRIC_TYPE_EVENT,          // FGR_METRIC_EVENT_IP_CONNECTION
-    FGR_METRIC_TYPE_SIMPLE,         // FGR_METRIC_SIMPLE_WIFI_RSSI_DBM
-    FGR_METRIC_TYPE_EVENT_BOOL,     // FGR_METRIC_EVENT_BOOL_OTA_CONNECTION
-    FGR_METRIC_TYPE_EVENT_BOOL,     // FGR_METRIC_EVENT_BOOL_OTA_NVS_WRITE
-    FGR_METRIC_TYPE_EVENT_BOOL,     // FGR_METRIC_EVENT_BOOL_LOG_SERVER_CONNECTION
-    FGR_METRIC_TYPE_EVENT_BOOL,     // FGR_METRIC_EVENT_BOOL_CONTROLLER_CONNECTION
-    FGR_METRIC_TYPE_EVENT_BOOL,     // FGR_METRIC_EVENT_BOOL_CONTROLLER_SOCKET_TX
-    FGR_METRIC_TYPE_EVENT,          // FGR_METRIC_EVENT_CONTROLLER_SOCKET_RX
-    FGR_METRIC_TYPE_EVENT_BOOL,     // FGR_METRIC_EVENT_BOOL_PING_TX
-    FGR_METRIC_TYPE_EVENT,          // FGR_METRIC_EVENT_PING_RX
-    FGR_METRIC_TYPE_EVENT_BOOL,     // FGR_METRIC_EVENT_BOOL_NVS_WRITE
-    FGR_METRIC_TYPE_STACK_MIN_FREE, // FGR_METRIC_STACK_MIN_FREE_LOWEST
-    FGR_METRIC_TYPE_SIMPLE          // FGR_METRIC_SIMPLE_HEAP_MIN_FREE
+static const metric_type_t g_metric_type[] = {
+    METRIC_TYPE_EVENT,          // FGR_METRIC_EVENT_LOCAL_REBOOT
+    METRIC_TYPE_EVENT,          // FGR_METRIC_EVENT_PANIC
+    METRIC_TYPE_EVENT,          // FGR_METRIC_EVENT_POWER_BAD
+    METRIC_TYPE_EVENT_BOOL,     // FGR_METRIC_EVENT_BOOL_WIFI_CONNECTION
+    METRIC_TYPE_EVENT,          // FGR_METRIC_EVENT_IP_CONNECTION
+    METRIC_TYPE_SIMPLE,         // FGR_METRIC_SIMPLE_WIFI_RSSI_DBM
+    METRIC_TYPE_EVENT_BOOL,     // FGR_METRIC_EVENT_BOOL_OTA_CONNECTION
+    METRIC_TYPE_EVENT_BOOL,     // FGR_METRIC_EVENT_BOOL_OTA_NVS_WRITE
+    METRIC_TYPE_EVENT_BOOL,     // FGR_METRIC_EVENT_BOOL_LOG_SERVER_CONNECTION
+    METRIC_TYPE_EVENT_BOOL,     // FGR_METRIC_EVENT_BOOL_CONTROLLER_CONNECTION
+    METRIC_TYPE_EVENT_BOOL,     // FGR_METRIC_EVENT_BOOL_CONTROLLER_SOCKET_TX
+    METRIC_TYPE_EVENT,          // FGR_METRIC_EVENT_CONTROLLER_SOCKET_RX
+    METRIC_TYPE_EVENT_BOOL,     // FGR_METRIC_EVENT_BOOL_PING_TX
+    METRIC_TYPE_EVENT,          // FGR_METRIC_EVENT_PING_RX
+    METRIC_TYPE_EVENT_BOOL,     // FGR_METRIC_EVENT_BOOL_NVS_WRITE
+    METRIC_TYPE_STACK_MIN_FREE, // FGR_METRIC_STACK_MIN_FREE_LOWEST
+    METRIC_TYPE_SIMPLE          // FGR_METRIC_SIMPLE_HEAP_MIN_FREE
 };
 
 // A sparsly populated array indicating, for an fgr_metrics_event_t
@@ -209,14 +210,16 @@ static const bool g_metric_reset_at_boot[] = {
 const esp_reset_reason_t g_reset_reason_panic[] = {ESP_RST_PANIC,
                                                    ESP_RST_INT_WDT,
                                                    ESP_RST_TASK_WDT,
-                                                   ESP_RST_WDT};
+                                                   ESP_RST_WDT
+                                                  };
 
 // The reset reasons that are bad power related.
 const esp_reset_reason_t g_reset_reason_bad_power[] = {ESP_RST_BROWNOUT,
-                                                       ESP_RST_PWR_GLITCH};
+                                                       ESP_RST_PWR_GLITCH
+                                                      };
 
-// Storage for the metrics in retained RAM
-RTC_NOINIT_ATTR fgr_metrics_retained_ram_t g_metrics_retained_ram;
+// Storage for the metrics in retained RAM.
+FGR_RRAM_DEFINE(storage_t, storage);
 
 // Context.
 static context_t g_context = {0};
@@ -226,7 +229,7 @@ static context_t g_context = {0};
  * -------------------------------------------------------------- */
 
 // Return true if the metric is known and is of the given type.
-static bool is_good(fgr_metrics_t metric, fgr_metrics_type_t type)
+static bool is_good(fgr_metrics_t metric, metric_type_t type)
 {
     return (metric < FGR_UTIL_ARRAY_LENGTH(g_metric_type)) && (type == g_metric_type[metric]);
 }
@@ -235,15 +238,28 @@ static bool is_good(fgr_metrics_t metric, fgr_metrics_type_t type)
  * STATIC FUNCTIONS: GETTING AND SETTING METRICS
  * -------------------------------------------------------------- */
 
+// Set retained RAM; call this after modifying g_context.storage.
+static int32_t retained_ram_set()
+{
+    // Since the shadow RAM variable is part of our context our
+    // shadow variable name does not match that of the retained
+    // RAM variable, hence we can't use the FGR_RRAM macros here.
+    // Instead, call the function directly using the retained RAM
+    // variable name that we know FGR_RRAM_DEFINE() creates.
+    return fgr_rram_set(&g_storage_rr_container, &g_context.storage,
+                        sizeof(g_storage_rr_container));
+}
+
 // Set a simple metric.
 static int32_t metric_simple_set(fgr_metrics_storage_t *metrics_list,
                                  fgr_metrics_t metric, int32_t value)
 {
     int32_t err = -ESP_ERR_INVALID_ARG;
 
-    if (metrics_list && is_good(metric, FGR_METRIC_TYPE_SIMPLE)) {
-       (*(metrics_list + metric)).simple = value;
-        err = ESP_OK;
+    if (metrics_list && is_good(metric, METRIC_TYPE_SIMPLE)) {
+        (*(metrics_list + metric)).simple = value;
+        // This will likely have modified g_context.storage, so set it
+        err = retained_ram_set();
     }
 
     return err;
@@ -255,7 +271,7 @@ static int32_t metric_simple_get(fgr_metrics_storage_t *metrics_list,
 {
     int32_t err = -ESP_ERR_INVALID_ARG;
 
-    if (value && metrics_list && is_good(metric, FGR_METRIC_TYPE_SIMPLE)) {
+    if (value && metrics_list && is_good(metric, METRIC_TYPE_SIMPLE)) {
         *value = (*(metrics_list + metric)).simple;
         err = ESP_OK;
     }
@@ -288,12 +304,13 @@ static int32_t metric_event_set(fgr_metrics_storage_t *metrics_list,
 {
     int32_t err = -ESP_ERR_INVALID_ARG;
 
-    if (metrics_list && is_good(metric, FGR_METRIC_TYPE_EVENT)) {
+    if (metrics_list && is_good(metric, METRIC_TYPE_EVENT)) {
         fgr_metrics_event_t *event = &(*(metrics_list + metric)).event;
         event->count++;
         metric_set_time(metrics_list, metric, &event->time);
         event->amount = amount;
-        err = ESP_OK;
+        // This will likely have modified g_context.storage, so set it
+        err = retained_ram_set();
     }
 
     return err;
@@ -306,7 +323,7 @@ static int32_t metric_event_get(fgr_metrics_storage_t *metrics_list,
 {
     int32_t err = -ESP_ERR_INVALID_ARG;
 
-    if (value && metrics_list && is_good(metric, FGR_METRIC_TYPE_EVENT)) {
+    if (value && metrics_list && is_good(metric, METRIC_TYPE_EVENT)) {
         *value = (*(metrics_list + metric)).event;
         err = ESP_OK;
     }
@@ -321,7 +338,7 @@ static int32_t metric_event_bool_set(fgr_metrics_storage_t *metrics_list,
 {
     int32_t err = -ESP_ERR_INVALID_ARG;
 
-    if (metrics_list && is_good(metric, FGR_METRIC_TYPE_EVENT_BOOL)) {
+    if (metrics_list && is_good(metric, METRIC_TYPE_EVENT_BOOL)) {
         fgr_metrics_event_t *event = &((metrics_list + metric)->event_bool.event[0]);
         if (value) {
             event = &((metrics_list + metric)->event_bool.event[1]);
@@ -329,7 +346,8 @@ static int32_t metric_event_bool_set(fgr_metrics_storage_t *metrics_list,
         event->count++;
         metric_set_time(metrics_list, metric, &event->time);
         event->amount = amount;
-        err = ESP_OK;
+        // This will likely have modified g_context.storage, so set it
+        err = retained_ram_set();
     }
 
     return err;
@@ -342,7 +360,7 @@ static int32_t metric_event_bool_get(fgr_metrics_storage_t *metrics_list,
 {
     int32_t err = -ESP_ERR_INVALID_ARG;
 
-    if (value && metrics_list && is_good(metric, FGR_METRIC_TYPE_EVENT_BOOL)) {
+    if (value && metrics_list && is_good(metric, METRIC_TYPE_EVENT_BOOL)) {
         *value = (*(metrics_list + metric)).event_bool;
         err = ESP_OK;
     }
@@ -357,13 +375,15 @@ static void reset_reason_set(fgr_metrics_storage_t *metrics_list)
         esp_reset_reason_t reset_reason = esp_reset_reason();
         for (size_t x = 0; x < FGR_UTIL_ARRAY_LENGTH(g_reset_reason_panic); x++) {
             if (reset_reason == g_reset_reason_panic[x]) {
-                metric_event_set(g_context.metrics_list, FGR_METRIC_EVENT_PANIC, reset_reason);
+                metric_event_set(g_context.storage.metrics_list,
+                                 FGR_METRIC_EVENT_PANIC, reset_reason);
                 break;
             }
         }
         for (size_t x = 0; x < FGR_UTIL_ARRAY_LENGTH(g_reset_reason_bad_power); x++) {
             if (reset_reason == g_reset_reason_bad_power[x]) {
-                metric_event_set(g_context.metrics_list, FGR_METRIC_EVENT_POWER_BAD, reset_reason);
+                metric_event_set(g_context.storage.metrics_list,
+                                 FGR_METRIC_EVENT_POWER_BAD, reset_reason);
                 break;
             }
         }
@@ -376,18 +396,18 @@ int32_t metric_reset(fgr_metrics_storage_t *metrics_list,
 {
     int32_t err = -ESP_ERR_INVALID_ARG;
 
-    if (is_good(metric, FGR_METRIC_TYPE_SIMPLE)) {
+    if (is_good(metric, METRIC_TYPE_SIMPLE)) {
         err = metric_simple_set(metrics_list, metric, 0);
-    } else if (is_good(metric, FGR_METRIC_TYPE_EVENT)) {
+    } else if (is_good(metric, METRIC_TYPE_EVENT)) {
         memset(&(*(metrics_list + metric)).event, 0, sizeof(fgr_metrics_event_t));
-        err = ESP_OK;
-    } else if (is_good(metric, FGR_METRIC_TYPE_EVENT_BOOL)) {
+        err = retained_ram_set();
+    } else if (is_good(metric, METRIC_TYPE_EVENT_BOOL)) {
         memset(&(*(metrics_list + metric)).event_bool, 0, sizeof(fgr_metrics_event_bool_t));
-        err = ESP_OK;
-    } else if (is_good(metric, FGR_METRIC_TYPE_STACK_MIN_FREE)) {
+        err = retained_ram_set();
+    } else if (is_good(metric, METRIC_TYPE_STACK_MIN_FREE)) {
         memset(&(*(metrics_list + FGR_METRIC_STACK_MIN_FREE_LOWEST)).stack_min_free_lowest, 0,
                sizeof(fgr_metrics_stack_min_free_lowest_t));
-        err = ESP_OK;
+        err = retained_ram_set();
     }
 
     return err;
@@ -438,7 +458,8 @@ static void update_rssi(buffer_rssi_t *buffer_rssi,
 
 // Insert stack_min_free values in ascending order (smallest first),
 // called by update_stack_min_free_lowest().
-static void update_stack_min_free_insert_sorted(struct fgr_metrics_stack_min_free_bytes_list_t *list,
+static void update_stack_min_free_insert_sorted(struct fgr_metrics_stack_min_free_bytes_list_t
+                                                *list,
                                                 fgr_metrics_stack_min_free_bytes_entry_t *new_entry)
 {
     if (SLIST_EMPTY(list)) {
@@ -449,7 +470,7 @@ static void update_stack_min_free_insert_sorted(struct fgr_metrics_stack_min_fre
 
         // Find position where new_entry should go (smaller values come first)
         while (current != NULL &&
-            current->task.min_free_bytes < new_entry->task.min_free_bytes) {
+               current->task.min_free_bytes < new_entry->task.min_free_bytes) {
             prev = current;
             current = SLIST_NEXT(current, next);
         }
@@ -472,7 +493,8 @@ static void update_stack_min_free_lowest(fgr_metrics_storage_t *metrics_list)
         SLIST_INIT(&list);
 
         // Get all of the minimum stack extents into a temporary linked list
-        fgr_metrics_stack_min_free_bytes_entry_t *entry = (fgr_metrics_stack_min_free_bytes_entry_t *) malloc(sizeof(*entry));
+        fgr_metrics_stack_min_free_bytes_entry_t *entry = (fgr_metrics_stack_min_free_bytes_entry_t *)
+                                                          malloc(sizeof(*entry));
         if (entry) {
             int32_t err = fgr_task_min_free_stack_start(&entry->task.name, &entry->task.min_free_bytes);
             if (err >= 0) {
@@ -497,7 +519,8 @@ static void update_stack_min_free_lowest(fgr_metrics_storage_t *metrics_list)
         fgr_metrics_stack_min_free_bytes_entry_t *iter;
         fgr_metrics_stack_min_free_bytes_t *task = storage->stack_min_free_lowest.task;
         SLIST_FOREACH(iter, &list, next) {
-            if (storage->stack_min_free_lowest.count < FGR_UTIL_ARRAY_LENGTH(storage->stack_min_free_lowest.task)) {
+            if (storage->stack_min_free_lowest.count < FGR_UTIL_ARRAY_LENGTH(
+                    storage->stack_min_free_lowest.task)) {
                 task->min_free_bytes = iter->task.min_free_bytes;
                 task->name = iter->task.name;
                 task++;
@@ -506,6 +529,8 @@ static void update_stack_min_free_lowest(fgr_metrics_storage_t *metrics_list)
                 break;
             }
         }
+        // This will likely have modified g_context.storage, so set it
+        retained_ram_set();
 
         // Free the temporary list
         while ((entry = SLIST_FIRST(&list)) != NULL) {
@@ -532,6 +557,7 @@ static void update_heap_min_free(fgr_metrics_storage_t *metrics_list)
 static void task_metrics_cb(void *handle, void *param)
 {
     context_t *context = (context_t *) param;
+    storage_t *storage = &context->storage;
 
     (void) handle;
 
@@ -539,20 +565,21 @@ static void task_metrics_cb(void *handle, void *param)
 
     int64_t time_us = esp_timer_get_time();
 
-    if (time_us - context->last_rssi_measurement_us > ((CONFIG_FGR_METRICS_RSSI_AVERAGE_TIME_SECONDS * 1000000) / RSSI_BUFFER_LENGTH)) {
+    if (time_us - context->last_rssi_measurement_us > ((CONFIG_FGR_METRICS_RSSI_AVERAGE_TIME_SECONDS *
+                                                        1000000) / RSSI_BUFFER_LENGTH)) {
         // Update the RSSI
-        update_rssi(&context->buffer_rssi, context->metrics_list, FGR_METRIC_SIMPLE_WIFI_RSSI_DBM);
+        update_rssi(&context->buffer_rssi, storage->metrics_list, FGR_METRIC_SIMPLE_WIFI_RSSI_DBM);
         context->last_rssi_measurement_us = time_us;
     }
 
     if (time_us - context->last_update_us > (CONFIG_FGR_METRICS_PERIOD_SECONDS * 1000000)) {
         // Update the timed metrics
 
-        update_stack_min_free_lowest(context->metrics_list);
-        update_heap_min_free(context->metrics_list);
+        update_stack_min_free_lowest(storage->metrics_list);
+        update_heap_min_free(storage->metrics_list);
         context->last_update_us = time_us;
         if (context->cb) {
-            context->cb(context->metrics_list, FGR_UTIL_ARRAY_LENGTH(g_metric_type), context->cb_param);
+            context->cb(storage->metrics_list, FGR_UTIL_ARRAY_LENGTH(g_metric_type), context->cb_param);
         }
     }
 
@@ -677,7 +704,8 @@ static int32_t encode_json_event_bool(const fgr_metrics_event_bool_t *event_bool
 }
 
 // JSON encode the stack min free metric.
-static int32_t encode_json_stack_min_free_lowest(const fgr_metrics_stack_min_free_lowest_t *stack_min_free_lowest,
+static int32_t encode_json_stack_min_free_lowest(const fgr_metrics_stack_min_free_lowest_t
+                                                 *stack_min_free_lowest,
                                                  const char *name, cJSON *json)
 {
     int32_t err = -ESP_ERR_INVALID_ARG;
@@ -692,7 +720,7 @@ static int32_t encode_json_stack_min_free_lowest(const fgr_metrics_stack_min_fre
                 err = ESP_OK;
                 const fgr_metrics_stack_min_free_bytes_t *task = stack_min_free_lowest->task;
                 for (size_t x = 0; (x < FGR_UTIL_ARRAY_LENGTH(stack_min_free_lowest->task)) &&
-                                   (x < count) && (err == ESP_OK); x++) {
+                     (x < count) && (err == ESP_OK); x++) {
                     err = -ESP_ERR_NO_MEM;
                     cJSON *json_task = cJSON_CreateObject();
                     if (json_task) {
@@ -726,16 +754,16 @@ static int32_t encode_json(fgr_metrics_storage_t *metrics_list,
 {
     int32_t err = -ESP_ERR_INVALID_ARG;
 
-    if (is_good(metric, FGR_METRIC_TYPE_SIMPLE)) {
+    if (is_good(metric, METRIC_TYPE_SIMPLE)) {
         err = encode_json_simple((metrics_list + metric)->simple,
                                  g_metric_json_name[metric], json);
-    } else if (is_good(metric, FGR_METRIC_TYPE_EVENT)) {
+    } else if (is_good(metric, METRIC_TYPE_EVENT)) {
         err = encode_json_event(&((metrics_list + metric)->event),
                                 g_metric_json_name[metric], json);
-    } else if (is_good(metric, FGR_METRIC_TYPE_EVENT_BOOL)) {
+    } else if (is_good(metric, METRIC_TYPE_EVENT_BOOL)) {
         err = encode_json_event_bool(&(metrics_list + metric)->event_bool,
                                      g_metric_json_name[metric], json);
-    } else if (is_good(metric, FGR_METRIC_TYPE_STACK_MIN_FREE)) {
+    } else if (is_good(metric, METRIC_TYPE_STACK_MIN_FREE)) {
         err = encode_json_stack_min_free_lowest(&(metrics_list + metric)->stack_min_free_lowest,
                                                 g_metric_json_name[metric], json);
     }
@@ -787,22 +815,26 @@ int32_t fgr_metrics_init(fgr_metrics_report_cb_t cb,
 
     // Do some checking
     if (FGR_UTIL_ARRAY_LENGTH(g_metric_type) != FGR_METRIC_COUNT) {
-        ESP_LOGE(TAG, "The number of entries in g_metric_type [%d] must match the number of entries in fgr_metrics_t [%d]!",
+        ESP_LOGE(TAG,
+                 "The number of entries in g_metric_type [%d] must match the number of entries in fgr_metrics_t [%d]!",
                  FGR_UTIL_ARRAY_LENGTH(g_metric_type), FGR_METRIC_COUNT);
         err = -ESP_ERR_INVALID_SIZE;
     }
     if (FGR_UTIL_ARRAY_LENGTH(g_metric_name) != FGR_METRIC_COUNT) {
-        ESP_LOGE(TAG, "The number of entries in g_metric_name [%d] must match the number of entries in fgr_metrics_t [%d]!",
+        ESP_LOGE(TAG,
+                 "The number of entries in g_metric_name [%d] must match the number of entries in fgr_metrics_t [%d]!",
                  FGR_UTIL_ARRAY_LENGTH(g_metric_name), FGR_METRIC_COUNT);
         err = -ESP_ERR_INVALID_SIZE;
     }
     if (FGR_UTIL_ARRAY_LENGTH(g_metric_json_name) != FGR_METRIC_COUNT) {
-        ESP_LOGE(TAG, "The number of entries in g_metric_json_name [%d] must match the number of entries in fgr_metrics_t [%d]!",
+        ESP_LOGE(TAG,
+                 "The number of entries in g_metric_json_name [%d] must match the number of entries in fgr_metrics_t [%d]!",
                  FGR_UTIL_ARRAY_LENGTH(g_metric_json_name), FGR_METRIC_COUNT);
         err = -ESP_ERR_INVALID_SIZE;
     }
     if (FGR_UTIL_ARRAY_LENGTH(g_metric_reset_at_boot) != FGR_METRIC_COUNT) {
-        ESP_LOGE(TAG, "The number of entries in g_metric_reset_at_boot [%d] must match the number of entries in fgr_metrics_t [%d]!",
+        ESP_LOGE(TAG,
+                 "The number of entries in g_metric_reset_at_boot [%d] must match the number of entries in fgr_metrics_t [%d]!",
                  FGR_UTIL_ARRAY_LENGTH(g_metric_reset_at_boot), FGR_METRIC_COUNT);
         err = -ESP_ERR_INVALID_SIZE;
     }
@@ -821,21 +853,27 @@ int32_t fgr_metrics_init(fgr_metrics_report_cb_t cb,
             CONTEXT_LOCK(g_context.lock, "fgr_metrics_init()");
 
             if (!g_context.task_handle) {
-                g_context.metrics_list = g_metrics_retained_ram.metrics_list;
-                if ((g_metrics_retained_ram.magic == FGR_UTIL_RETAINED_RAM_MAGIC_MARKER) &&
-                    (g_metrics_retained_ram.structure_version == FGR_METRICS_STRUCTURE_VERSION)) {
+                // Get the metrics stored in retained RAM into
+                // our context
+                storage_t storage = {0};
+                if ((FGR_RRAM_GET(storage) == ESP_OK) &&
+                    (storage.structure_version == FGR_METRICS_STRUCTURE_VERSION)) {
+                    // Zero any that should only run from boot
                     for (size_t x = 0; x < FGR_UTIL_ARRAY_LENGTH(g_metric_reset_at_boot); x++) {
                         if (g_metric_reset_at_boot[x]) {
-                            metric_reset(g_context.metrics_list, x);
+                            metric_reset(storage.metrics_list, x);
                         }
                     }
+                    // Copy from the shadow variable into our context
+                    g_context.storage = storage;
                 } else {
-                    memset(&g_metrics_retained_ram, 0, sizeof(g_metrics_retained_ram));
-                    g_metrics_retained_ram.magic = FGR_UTIL_RETAINED_RAM_MAGIC_MARKER;
-                    g_metrics_retained_ram.structure_version = FGR_METRICS_STRUCTURE_VERSION;
+                    // Nothing in retained RAM yet, or the wrong version:
+                    // set it up for next time
+                    storage.structure_version = FGR_METRICS_STRUCTURE_VERSION;
+                    FGR_RRAM_SET(storage);
                 }
 
-                reset_reason_set(g_context.metrics_list);
+                reset_reason_set(g_context.storage.metrics_list);
 
                 g_context.cb = cb;
                 g_context.cb_param = cb_param;
@@ -910,13 +948,13 @@ int32_t fgr_metrics_encode_json(fgr_metrics_t metric,
 {
     int32_t err = -ESP_ERR_INVALID_STATE;
 
-    if (g_context.lock && g_context.metrics_list && buffer && (length > 0)) {
+    if (g_context.lock && buffer && (length > 0)) {
 
         CONTEXT_LOCK(g_context.lock, "fgr_metrics_encode_json()");
         err = -ESP_ERR_NO_MEM;
         cJSON *json = cJSON_CreateObject();
         if (json) {
-            err =  encode_json(g_context.metrics_list, metric, json);
+            err =  encode_json(g_context.storage.metrics_list, metric, json);
             if (err == ESP_OK) {
                 err = -ESP_ERR_NO_MEM;
                 char *json_str = cJSON_PrintUnformatted(json);
@@ -941,10 +979,10 @@ int32_t fgr_metrics_encode_json_all(char *buffer, size_t length)
 {
     int32_t err = -ESP_ERR_INVALID_STATE;
 
-    if (g_context.lock && g_context.metrics_list && buffer && (length > 0)) {
+    if (g_context.lock && buffer && (length > 0)) {
 
         CONTEXT_LOCK(g_context.lock, "fgr_metrics_encode_json_all()");
-        err = encode_json_all(g_context.metrics_list, buffer, length);
+        err = encode_json_all(g_context.storage.metrics_list, buffer, length);
         CONTEXT_UNLOCK(g_context.lock, "fgr_metrics_encode_json_all()");
     }
 
@@ -956,10 +994,10 @@ int32_t fgr_metrics_reset(fgr_metrics_t metric)
 {
     int32_t err = -ESP_ERR_INVALID_STATE;
 
-    if (g_context.lock && g_context.metrics_list) {
+    if (g_context.lock) {
 
         CONTEXT_LOCK(g_context.lock, "fgr_metrics_reset()");
-        err = metric_reset(g_context.metrics_list, metric);
+        err = metric_reset(g_context.storage.metrics_list, metric);
         CONTEXT_UNLOCK(g_context.lock, "fgr_metrics_reset()");
     }
 
@@ -971,11 +1009,11 @@ int32_t fgr_metrics_reset_all()
 {
     int32_t err = -ESP_ERR_INVALID_STATE;
 
-    if (g_context.lock && g_context.metrics_list) {
+    if (g_context.lock) {
 
         CONTEXT_LOCK(g_context.lock, "fgr_metrics_reset_all()");
-        memset(g_context.metrics_list, 0, sizeof(*g_context.metrics_list) * FGR_METRIC_COUNT);
-        err = ESP_OK;
+        memset(g_context.storage.metrics_list, 0, sizeof(g_context.storage.metrics_list));
+        err = retained_ram_set();
         CONTEXT_UNLOCK(g_context.lock, "fgr_metrics_reset_all()");
     }
 
@@ -987,10 +1025,10 @@ int32_t fgr_metrics_simple_set(fgr_metrics_t metric, int32_t value)
 {
     int32_t err = -ESP_ERR_INVALID_STATE;
 
-    if (g_context.lock && g_context.metrics_list) {
+    if (g_context.lock) {
 
         CONTEXT_LOCK(g_context.lock, "fgr_metrics_simple_set()");
-        err = metric_simple_set(g_context.metrics_list, metric, value);
+        err = metric_simple_set(g_context.storage.metrics_list, metric, value);
         CONTEXT_UNLOCK(g_context.lock, "fgr_metrics_simple_set()");
     }
 
@@ -1002,14 +1040,14 @@ int32_t fgr_metrics_simple_add(fgr_metrics_t metric, int32_t value)
 {
     int32_t err = -ESP_ERR_INVALID_STATE;
 
-    if (g_context.lock && g_context.metrics_list) {
+    if (g_context.lock) {
 
         CONTEXT_LOCK(g_context.lock, "fgr_metrics_simple_add()");
         int32_t current_value = 0;
-        err = metric_simple_get(g_context.metrics_list, metric, &current_value);
+        err = metric_simple_get(g_context.storage.metrics_list, metric, &current_value);
         if (err == ESP_OK) {
             value += current_value;
-            err = metric_simple_set(g_context.metrics_list, metric, value);
+            err = metric_simple_set(g_context.storage.metrics_list, metric, value);
         }
         CONTEXT_UNLOCK(g_context.lock, "fgr_metrics_simple_add()");
     }
@@ -1022,11 +1060,11 @@ int32_t fgr_metrics_simple_get(fgr_metrics_t metric, int32_t *value)
 {
     int32_t err = -ESP_ERR_INVALID_STATE;
 
-    if (g_context.lock && g_context.metrics_list) {
+    if (g_context.lock) {
 
-        CONTEXT_LOCK(g_context.lock, "fgr_metrics_simple_set()");
-        err = metric_simple_get(g_context.metrics_list, metric, value);
-        CONTEXT_UNLOCK(g_context.lock, "fgr_metrics_simple_set()");
+        CONTEXT_LOCK(g_context.lock, "fgr_metrics_simple_get()");
+        err = metric_simple_get(g_context.storage.metrics_list, metric, value);
+        CONTEXT_UNLOCK(g_context.lock, "fgr_metrics_simple_get()");
     }
 
     return err;
@@ -1037,10 +1075,10 @@ int32_t fgr_metrics_event_set(fgr_metrics_t metric, int32_t amount)
 {
     int32_t err = -ESP_ERR_INVALID_STATE;
 
-    if (g_context.lock && g_context.metrics_list) {
+    if (g_context.lock) {
 
         CONTEXT_LOCK(g_context.lock, "fgr_metrics_event_set()");
-        err = metric_event_set(g_context.metrics_list, metric, amount);
+        err = metric_event_set(g_context.storage.metrics_list, metric, amount);
         CONTEXT_UNLOCK(g_context.lock, "fgr_metrics_event_set()");
     }
 
@@ -1052,16 +1090,16 @@ int32_t fgr_metrics_event_add(fgr_metrics_t metric, int32_t amount)
 {
     int32_t err = -ESP_ERR_INVALID_STATE;
 
-    if (g_context.lock && g_context.metrics_list) {
+    if (g_context.lock) {
 
-        CONTEXT_LOCK(g_context.lock, "fgr_metrics_event_set()");
+        CONTEXT_LOCK(g_context.lock, "fgr_metrics_event_add()");
         fgr_metrics_event_t event = {0};
-        err = metric_event_get(g_context.metrics_list, metric, &event);
+        err = metric_event_get(g_context.storage.metrics_list, metric, &event);
         if (err == ESP_OK) {
             amount += event.amount;
-            err = metric_event_set(g_context.metrics_list, metric, amount);
+            err = metric_event_set(g_context.storage.metrics_list, metric, amount);
         }
-        CONTEXT_UNLOCK(g_context.lock, "fgr_metrics_event_set()");
+        CONTEXT_UNLOCK(g_context.lock, "fgr_metrics_event_add()");
     }
 
     return err;
@@ -1073,11 +1111,11 @@ int32_t fgr_metrics_event_get(fgr_metrics_t metric,
 {
     int32_t err = -ESP_ERR_INVALID_STATE;
 
-    if (g_context.lock && g_context.metrics_list) {
+    if (g_context.lock) {
 
-        CONTEXT_LOCK(g_context.lock, "fgr_metrics_event_set()");
-        err = metric_event_get(g_context.metrics_list, metric, value);
-        CONTEXT_UNLOCK(g_context.lock, "fgr_metrics_event_set()");
+        CONTEXT_LOCK(g_context.lock, "fgr_metrics_event_get()");
+        err = metric_event_get(g_context.storage.metrics_list, metric, value);
+        CONTEXT_UNLOCK(g_context.lock, "fgr_metrics_event_get()");
     }
 
     return err;
@@ -1089,10 +1127,10 @@ int32_t fgr_metrics_event_bool_set(fgr_metrics_t metric, bool value,
 {
     int32_t err = -ESP_ERR_INVALID_STATE;
 
-    if (g_context.lock && g_context.metrics_list) {
+    if (g_context.lock) {
 
         CONTEXT_LOCK(g_context.lock, "fgr_metrics_event_bool_set()");
-        err = metric_event_bool_set(g_context.metrics_list, metric, value, amount);
+        err = metric_event_bool_set(g_context.storage.metrics_list, metric, value, amount);
         CONTEXT_UNLOCK(g_context.lock, "fgr_metrics_event_bool_set()");
     }
 
@@ -1105,14 +1143,14 @@ int32_t fgr_metrics_event_bool_add(fgr_metrics_t metric, bool value,
 {
     int32_t err = -ESP_ERR_INVALID_STATE;
 
-    if (g_context.lock && g_context.metrics_list) {
+    if (g_context.lock) {
 
         CONTEXT_LOCK(g_context.lock, "fgr_metrics_event_bool_add()");
         fgr_metrics_event_bool_t event_bool = {0};
-        err = metric_event_bool_get(g_context.metrics_list, metric, &event_bool);
+        err = metric_event_bool_get(g_context.storage.metrics_list, metric, &event_bool);
         if (err == ESP_OK) {
             amount += event_bool.event[value].amount;
-            err = metric_event_bool_set(g_context.metrics_list, metric,
+            err = metric_event_bool_set(g_context.storage.metrics_list, metric,
                                         value, amount);
         }
         CONTEXT_UNLOCK(g_context.lock, "fgr_metrics_event_bool_add()");
@@ -1127,10 +1165,10 @@ int32_t fgr_metrics_event_bool_get(fgr_metrics_t metric,
 {
     int32_t err = -ESP_ERR_INVALID_STATE;
 
-    if (g_context.lock && g_context.metrics_list) {
+    if (g_context.lock) {
 
         CONTEXT_LOCK(g_context.lock, "fgr_metrics_event_bool_get()");
-        err = metric_event_bool_get(g_context.metrics_list, metric, value);
+        err = metric_event_bool_get(g_context.storage.metrics_list, metric, value);
         CONTEXT_UNLOCK(g_context.lock, "fgr_metrics_event_bool_get()");
     }
 
@@ -1142,13 +1180,14 @@ int32_t fgr_metrics_stack_min_free_lowest_get(fgr_metrics_stack_min_free_lowest_
 {
     int32_t err = -ESP_ERR_INVALID_STATE;
 
-    if (g_context.lock && g_context.metrics_list) {
+    if (g_context.lock) {
 
         err = -ESP_ERR_INVALID_ARG;
 
         CONTEXT_LOCK(g_context.lock, "fgr_metrics_stack_min_free_lowest_get()");
         if (value) {
-            *value = (*(g_context.metrics_list + FGR_METRIC_STACK_MIN_FREE_LOWEST)).stack_min_free_lowest;
+            *value = (*(g_context.storage.metrics_list +
+                        FGR_METRIC_STACK_MIN_FREE_LOWEST)).stack_min_free_lowest;
             err = ESP_OK;
         }
         CONTEXT_UNLOCK(g_context.lock, "fgr_metrics_stack_min_free_lowest_get()");
@@ -1162,10 +1201,10 @@ int8_t fgr_metrics_rssi_get(void *unused)
 {
     int32_t rssi_dbm = 0;
 
-    if (g_context.lock && g_context.metrics_list) {
+    if (g_context.lock) {
 
         CONTEXT_LOCK(g_context.lock, "fgr_metrics_rssi_get()");
-        metric_simple_get(g_context.metrics_list,
+        metric_simple_get(g_context.storage.metrics_list,
                           FGR_METRIC_SIMPLE_WIFI_RSSI_DBM,
                           &rssi_dbm);
         CONTEXT_UNLOCK(g_context.lock, "fgr_metrics_rssi_get()");

@@ -17,9 +17,9 @@
 #ifndef _FGR_TASK_H_
 #define _FGR_TASK_H_
 
- /** @file
-  * @brief Tasking API for a node of the front garden railway.
-  */
+/** @file
+ * @brief Tasking API for a node of the front garden railway.
+ */
 
 #ifdef __cplusplus
 extern "C" {

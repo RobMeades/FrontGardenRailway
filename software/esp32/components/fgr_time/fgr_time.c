@@ -31,14 +31,15 @@
 #include "esp_sntp.h"
 
 #include "fgr_util.h"
+#include "fgr_rram.h"
 #include "fgr_time.h"
 
 /* ----------------------------------------------------------------
  * COMPILE-TIME MACROS
  * -------------------------------------------------------------- */
 
- // Logging prefix
- #define TAG "time"
+// Logging prefix
+#define TAG "time"
 
 /* ----------------------------------------------------------------
  * TYPES
@@ -46,7 +47,6 @@
 
 // Structure to store the power on time in retained RAM.
 typedef struct {
-    int32_t magic;
     time_t utc;
 } power_on_time_t;
 
@@ -55,7 +55,7 @@ typedef struct {
  * -------------------------------------------------------------- */
 
 // Storage for the power-on time in retained RAM.
-RTC_NOINIT_ATTR power_on_time_t g_power_on_time;
+FGR_RRAM_DEFINE(power_on_time_t, power_on_time);
 
 /* ----------------------------------------------------------------
  * STATIC FUNCTIONS
@@ -66,10 +66,11 @@ static void time_sync_cb(struct timeval *tv)
 {
     char buffer[64];
     struct tm local;
+    power_on_time_t power_on_time = {0};
 
-    if (g_power_on_time.magic != FGR_UTIL_RETAINED_RAM_MAGIC_MARKER) {
-        g_power_on_time.utc = tv->tv_sec - fgr_time_since_boot();
-        g_power_on_time.magic = FGR_UTIL_RETAINED_RAM_MAGIC_MARKER;
+    if (FGR_RRAM_GET(power_on_time) != ESP_OK) {
+        power_on_time.utc = tv->tv_sec - fgr_time_since_boot();
+        FGR_RRAM_SET(power_on_time);
     }
 
     localtime_r(&tv->tv_sec, &local);
@@ -123,9 +124,10 @@ time_t fgr_time_since_power_on()
 {
     time_t time = -ESP_ERR_NOT_FOUND;
     time_t utc = fgr_time_utc();
+    power_on_time_t power_on_time = {0};
 
-    if ((g_power_on_time.magic == FGR_UTIL_RETAINED_RAM_MAGIC_MARKER) && (utc >= 0)) {
-        time = utc - g_power_on_time.utc;
+    if ((FGR_RRAM_GET(power_on_time) == ESP_OK) && (utc >= 0)) {
+        time = utc - power_on_time.utc;
     }
 
     return time;
@@ -136,7 +138,11 @@ time_t fgr_time_utc()
 {
     time_t now = 0;
     time(&now);
-    return (g_power_on_time.magic == FGR_UTIL_RETAINED_RAM_MAGIC_MARKER) ? now : -ESP_ERR_NOT_FOUND;
+    power_on_time_t power_on_time = {0};
+    if (FGR_RRAM_GET(power_on_time) != ESP_OK) {
+        now = -ESP_ERR_NOT_FOUND;
+    }
+    return now;
 }
 
 // Get the local time.
@@ -155,4 +161,3 @@ time_t fgr_time_local()
 }
 
 // End of file
-

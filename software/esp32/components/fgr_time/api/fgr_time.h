@@ -86,8 +86,8 @@ extern "C" {
  *                                  from esp_err_t.
  */
 int32_t fgr_time_init(const char *ntp_server_ip_address,
-                      const char *timezone,
-                      size_t ntp_sync_interval_seconds);
+const char *timezone,
+size_t ntp_sync_interval_seconds);
 
 /** Deinitialise time.  This function should be called ONCE at end
  * and of day.

@@ -35,7 +35,6 @@
 #include "driver/gpio.h"
 #include "driver/spi_common.h"
 #include "driver/spi_master.h"
-#include "esp_attr.h"
 #include "esp_core_dump.h"
 #include "esp_partition.h"
 #include "mbedtls/base64.h"
@@ -44,6 +43,7 @@
 #include "fgr_monitor.h"
 #include "fgr_task.h"
 #include "fgr_nvs.h"
+#include "fgr_rram.h"
 #include "fgr_msg.h"
 #include "fgr_debug.h"
 
@@ -226,17 +226,16 @@ typedef struct {
     flash_state_t flash_state;
 } context_t;
 
+// Storage for a backtrace.
 typedef struct {
     uint8_t length;
     uint32_t address_list[FGR_DEBUG_BACKTRACE_DEPTH_MAX];
 } backtrace_t;
 
-// Storage in retained RAM.
+// Storage for an overflowing task name.
 typedef struct {
-    int32_t magic;
-    backtrace_t backtrace;
-    char stack_overflow_task_name[FGR_UTIL_TASK_NAME_MAX_LENGTH];
-} retained_ram_t;
+    char name[FGR_UTIL_TASK_NAME_MAX_LENGTH];
+} stack_overflow_task_t;
 
 /* ----------------------------------------------------------------
  * VARIABLES
@@ -255,23 +254,23 @@ static const uint8_t g_sine_table[] = {
     255, 255, 253, 250, 245, 240, 234, 226,
     218, 209, 199, 188, 177, 165, 153, 140,
     128, 115, 102,  90,  78,  67,  56,  46,
-     37,  29,  21,  15,  10,   5,   2,   0,
-      0,   0,   2,   5,  10,  15,  21,  29,
-     37,  46,  56,  67,  78,  90, 102, 115
+    37,  29,  21,  15,  10,   5,   2,   0,
+    0,   0,   2,   5,  10,  15,  21,  29,
+    37,  46,  56,  67,  78,  90, 102, 115
 };
 
 // Flash ease table: 0 to INTENSITY_SCALE_MAX and back to 0 over
 // 32 steps, using a sine-like ease curve for soft edges
 static const uint8_t g_flash_ease_table[] = {
-      0,   1,   4,   8,  13,  19,  26,  34,
-     42,  51,  61,  71,  82,  93, 104, 115,
+    0,   1,   4,   8,  13,  19,  26,  34,
+    42,  51,  61,  71,  82,  93, 104, 115,
     126, 137, 148, 159, 170, 180, 190, 199,
     208, 216, 224, 231, 237, 242, 246, 249,
     252, 254, 255, 255, 254, 252, 249, 246,
     242, 237, 231, 224, 216, 208, 199, 190,
     180, 170, 159, 148, 137, 126, 115, 104,
-     93,  82,  71,  61,  51,  42,  34,  26,
-     19,  13,   8,   4,   1,   0
+    93,  82,  71,  61,  51,  42,  34,  26,
+    19,  13,   8,   4,   1,   0
 };
 
 // Table of states to breathe colours
@@ -281,14 +280,17 @@ static const fgr_debug_colour_t g_state_to_breathe_colour[] = {FGR_DEBUG_LED_COL
                                                                FGR_DEBUG_LED_COLOUR_STOPPED,   // FGR_STATE_STOPPED (3)
                                                                FGR_DEBUG_LED_COLOUR_BAD,       // FGR_STATE_DISCONNECTED (4)
                                                                FGR_DEBUG_LED_COLOUR_BAD,       // FGR_STATE_GENERIC_FAILED (5)
-                                                               FGR_DEBUG_LED_COLOUR_BAD};      // FGR_STATE_HARDWARE_FAILURE (6)
-
+                                                               FGR_DEBUG_LED_COLOUR_BAD
+                                                              };      // FGR_STATE_HARDWARE_FAILURE (6)
 
 #  endif  // #if defined(CONFIG_FGR_DEBUG_LED_PIN) && (CONFIG_FGR_DEBUG_LED_PIN >= 0)
 #endif    // #  if defined(CONFIG_FGR_DEBUG_LED_SPI_NUM) && (CONFIG_FGR_DEBUG_LED_SPI_NUM > 1)
 
-// Storage for backtrace in retained RAM
-RTC_NOINIT_ATTR retained_ram_t g_debug_retained_ram;
+// Storage for backtrace address list in retained RAM.
+FGR_RRAM_DEFINE(backtrace_t, backtrace);
+
+// Storage for an overflowing stack's name in retained RAM.
+FGR_RRAM_DEFINE(stack_overflow_task_t, stack_overflow_task);
 
 /* ----------------------------------------------------------------
  * STATIC FUNCTIONS: WS2812 RELATED
@@ -555,7 +557,8 @@ static void update_breathe_intensity(breathe_state_t *breathe_state)
     if (breathe_state->enabled && (breathe_state->period_steps != 0)) {
         // Map step_counter to sine table index
         // We want a full sine wave over the period
-        uint32_t index = (breathe_state->step_counter * FGR_UTIL_ARRAY_LENGTH(g_sine_table)) / breathe_state->period_steps;
+        uint32_t index = (breathe_state->step_counter * FGR_UTIL_ARRAY_LENGTH(
+                              g_sine_table)) / breathe_state->period_steps;
         index &= FGR_UTIL_ARRAY_LENGTH(g_sine_table) - 1;  // Ensure within bounds
         breathe_state->intensity = g_sine_table[index];
 
@@ -595,7 +598,6 @@ static void update_led(context_t *context)
     flash_state_t *flash_state = &(context->flash_state);
     fgr_debug_colour_t final_colour = {0, 0, 0};
     fgr_debug_colour_t temp_colour;
-
 
     // Priority order: Mask > Flash > Breathe > Off
     if (context->led_masked_off) {
@@ -664,8 +666,8 @@ static void task_led_cb(void *handle, void *param)
                 if (breathe_state->enabled) {
                     // Make flash more visible if breathing
                     boost_flash_intensity(&cmd.colour,
-                                            breathe_state->colour,
-                                            breathe_state->intensity);
+                                          breathe_state->colour,
+                                          breathe_state->intensity);
                 }
                 flash_state->colour = cmd.colour;
                 flash_state->total_steps = cmd.flash_duration_steps;
@@ -760,20 +762,20 @@ static void debug_log(const char *tag, const char *prefix,
         switch (level) {
             case ESP_LOG_ERROR:
                 ESP_LOGE(tag, "%s%s", prefix, string);
-            break;
+                break;
             case ESP_LOG_WARN:
                 ESP_LOGW(tag, "%s%s", prefix, string);
-            break;
+                break;
             case ESP_LOG_INFO:
                 ESP_LOGI(tag, "%s%s", prefix, string);
-            break;
+                break;
             case ESP_LOG_DEBUG:
                 ESP_LOGD(tag, "%s%s", prefix, string);
-            break;
+                break;
             case ESP_LOG_VERBOSE:
                 ESP_LOGD(tag, "%s%s", prefix, string);
             default:
-            break;
+                break;
         }
     }
 }
@@ -797,12 +799,6 @@ int32_t fgr_debug_init(fgr_debug_state_cb_t cb, void *cb_param)
         if (!g_context.queue_handle) {
 
             CONTEXT_LOCK(g_context.lock, "fgr_debug_init()");
-
-            // Set up retained storage if required
-            if (g_debug_retained_ram.magic != FGR_UTIL_RETAINED_RAM_MAGIC_MARKER) {
-                memset(&g_debug_retained_ram, 0, sizeof(g_debug_retained_ram));
-                g_debug_retained_ram.magic = FGR_UTIL_RETAINED_RAM_MAGIC_MARKER;
-            }
 
             g_context.led_masked_off = false;
             g_context.breathe_state.enabled = true;
@@ -852,7 +848,8 @@ int32_t fgr_debug_init(fgr_debug_state_cb_t cb, void *cb_param)
                             if (cb) {
                                 g_context.breathe_state.use_cb = true;
                             }
-                            ESP_LOGI(TAG, "If the LED breathes red when obviously connected, toggle CONFIG_FGR_DEBUG_LED_WS2812_GRB.");
+                            ESP_LOGI(TAG,
+                                     "If the LED breathes red when obviously connected, toggle CONFIG_FGR_DEBUG_LED_WS2812_GRB.");
                         } else {
                             vQueueDelete(g_context.queue_handle);
                             g_context.queue_handle = NULL;
@@ -863,11 +860,11 @@ int32_t fgr_debug_init(fgr_debug_state_cb_t cb, void *cb_param)
                     spi_bus_free(CONFIG_FGR_DEBUG_LED_SPI_NUM);
                     g_context.spi = NULL; // Just in case
                     ESP_LOGE(TAG, "spi_bus_add_device() to SPI %d failed (%s)!",
-                            CONFIG_FGR_DEBUG_LED_SPI_NUM, esp_err_to_name(err));
+                             CONFIG_FGR_DEBUG_LED_SPI_NUM, esp_err_to_name(err));
                 }
             } else {
                 ESP_LOGE(TAG, "spi_bus_initialize() on SPI %d failed (%s)!",
-                        CONFIG_FGR_DEBUG_LED_SPI_NUM, esp_err_to_name(err));
+                         CONFIG_FGR_DEBUG_LED_SPI_NUM, esp_err_to_name(err));
             }
 #  else
             // Configure our single colour debug LED
@@ -879,11 +876,11 @@ int32_t fgr_debug_init(fgr_debug_state_cb_t cb, void *cb_param)
                     fgr_debug_led_flash(FGR_DEBUG_LED_LONG_MS, FGR_DEBUG_LED_COLOUR_BOOT);
                 } else {
                     ESP_LOGE(TAG, "gpio_set_direction() on pin %d failed (%s)!",
-                            CONFIG_FGR_DEBUG_LED_PIN, esp_err_to_name(err));
+                             CONFIG_FGR_DEBUG_LED_PIN, esp_err_to_name(err));
                 }
             } else {
                 ESP_LOGE(TAG, "gpio_set_level() on pin %d failed (%s)!",
-                        CONFIG_FGR_DEBUG_LED_PIN, esp_err_to_name(err));
+                         CONFIG_FGR_DEBUG_LED_PIN, esp_err_to_name(err));
             }
 #  endif  // #if defined(CONFIG_FGR_DEBUG_LED_PIN) && (CONFIG_FGR_DEBUG_LED_PIN >= 0)
 #endif    // #  if defined(CONFIG_FGR_DEBUG_LED_SPI_NUM) && (CONFIG_FGR_DEBUG_LED_SPI_NUM > 1)
@@ -898,7 +895,7 @@ int32_t fgr_debug_init(fgr_debug_state_cb_t cb, void *cb_param)
     }
 
     // Returns ESP_OK or negative error code from esp_err_t
-    return (int32_t) -err;
+    return (int32_t) - err;
 }
 
 // Deinitialise debug stuff.
@@ -1052,8 +1049,7 @@ void IRAM_ATTR __wrap_esp_panic_handler(void *param)
     frame.next_pc = next_pc;
     frame.exc_frame = NULL;
 
-    // Use a local stack variable for unwinding to isolate ourselves
-    // the from the vagaries of RTC memory access.
+    // Shadow variable for retained RAM variable.
     backtrace_t backtrace = {0};
 
     // The first two addresses will be those of this function and
@@ -1077,7 +1073,7 @@ void IRAM_ATTR __wrap_esp_panic_handler(void *param)
 
     // Commit to retained RAM
     if (stored > 0) {
-        g_debug_retained_ram.backtrace = backtrace;
+        FGR_RRAM_SET(backtrace);
     }
 
     // Pass control back to the real ESP-IDF panic handler
@@ -1085,21 +1081,16 @@ void IRAM_ATTR __wrap_esp_panic_handler(void *param)
 }
 
 // Get backtrace.
-int32_t fgr_debug_panic_get(uint32_t *backtrace)
+int32_t fgr_debug_panic_get(uint32_t *backtrace_copy)
 {
     int32_t length = 0;
+    backtrace_t backtrace;
 
-    if (g_debug_retained_ram.magic == FGR_UTIL_RETAINED_RAM_MAGIC_MARKER) {
-        // Block-copy retained RAM and work on it locally
-        backtrace_t backtrace_copy = g_debug_retained_ram.backtrace;
-        // Just in case
-        if (backtrace_copy.length > FGR_UTIL_ARRAY_LENGTH(backtrace_copy.address_list)) {
-            backtrace_copy.length = FGR_UTIL_ARRAY_LENGTH(backtrace_copy.address_list);
-        }
-        length = backtrace_copy.length;
-        if (backtrace) {
-            memcpy(backtrace, backtrace_copy.address_list, length * sizeof(backtrace_copy.address_list[0]));
-            g_debug_retained_ram.backtrace.length = 0;
+    if (FGR_RRAM_GET(backtrace) == ESP_OK) {
+        length = backtrace.length;
+        if (backtrace_copy) {
+            memcpy(backtrace_copy, backtrace.address_list, length * sizeof(backtrace.address_list[0]));
+            FGR_RRAM_CLEAR(backtrace);
         }
     }
 
@@ -1154,21 +1145,23 @@ int32_t fgr_debug_panic_log(const char *tag, const char *prefix,
 // Stack overflow callback.
 void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
 {
-    strlcpy(g_debug_retained_ram.stack_overflow_task_name, pcTaskName,
-            sizeof(g_debug_retained_ram.stack_overflow_task_name));
+    stack_overflow_task_t stack_overflow_task;
+    strlcpy(stack_overflow_task.name, pcTaskName, sizeof(stack_overflow_task.name));
+    FGR_RRAM_SET(stack_overflow_task);
 }
 
 // Get the name of a task that had a stack overflow.
 int32_t fgr_debug_stack_overflow_get(char *buffer)
 {
     int32_t length = 0;
+    stack_overflow_task_t stack_overflow_task;
 
-    if (g_debug_retained_ram.magic == FGR_UTIL_RETAINED_RAM_MAGIC_MARKER) {
-        length = strlen(g_debug_retained_ram.stack_overflow_task_name);
+    if (FGR_RRAM_GET(stack_overflow_task) == ESP_OK) {
+        length = strlen(stack_overflow_task.name);
         if (buffer && (length > 0)) {
-            strlcpy(buffer, g_debug_retained_ram.stack_overflow_task_name,
+            strlcpy(buffer, stack_overflow_task.name,
                     FGR_DEBUG_BACKTRACE_BUFFER_LENGTH);
-            g_debug_retained_ram.stack_overflow_task_name[0] = 0;
+            FGR_RRAM_CLEAR(stack_overflow_task);
         }
     }
 
@@ -1207,7 +1200,7 @@ int32_t fgr_debug_core_dump_get(const char *tag, esp_log_level_t level)
         err = -ESP_ERR_NOT_FOUND;
 
         // 2. Fetch the corresponding partition struct
-        const esp_partition_t* partition = esp_partition_find_first(ESP_PARTITION_TYPE_DATA,
+        const esp_partition_t *partition = esp_partition_find_first(ESP_PARTITION_TYPE_DATA,
                                                                     ESP_PARTITION_SUBTYPE_DATA_COREDUMP,
                                                                     NULL);
         if (partition) {
@@ -1289,19 +1282,19 @@ bool fgr_debug_msg_receive_handler_cb(fgr_msg_t *msg, void *param)
             case FGR_REQ_CNF_DEBUG_LED_OFF:
                 fgr_debug_led_off();
                 msg_error = FGR_ERROR_NONE;
-            break;
+                break;
             case FGR_REQ_CNF_DEBUG_LED_ON:
                 fgr_debug_led_on();
                 msg_error = FGR_ERROR_NONE;
-            break;
+                break;
             case FGR_REQ_CNF_DEBUG_LED_BREATHE_OFF:
                 fgr_debug_led_breathe_off();
                 msg_error = FGR_ERROR_NONE;
-            break;
+                break;
             case FGR_REQ_CNF_DEBUG_LED_BREATHE_ON:
                 fgr_debug_led_breathe_on();
                 msg_error = FGR_ERROR_NONE;
-            break;
+                break;
             case FGR_REQ_CNF_DEBUG_LED_STATUS:
                 // Contents should be one uint8_t
                 // representing the bool of LED
@@ -1313,10 +1306,10 @@ bool fgr_debug_msg_receive_handler_cb(fgr_msg_t *msg, void *param)
                 length = 2;
                 CONTEXT_UNLOCK(g_context.lock, "fgr_debug_msg_receive_handler_cb()");
                 msg_error = FGR_ERROR_NONE;
-            break;
+                break;
             default:
                 handled = false;
-            break;
+                break;
         }
 
         if (handled) {
@@ -1339,7 +1332,8 @@ void fgr_debug_print_mac_address()
 {
     uint8_t mac[6] = {0};
     if (esp_read_mac(mac, ESP_MAC_WIFI_STA) == ESP_OK) {
-        ESP_LOGI(TAG, "MAC address %02X:%02X:%02X:%02X:%02X:%02X", mac[0],mac[1],mac[2],mac[3],mac[4],mac[5]);
+        ESP_LOGI(TAG, "MAC address %02X:%02X:%02X:%02X:%02X:%02X", mac[0], mac[1], mac[2], mac[3], mac[4],
+                 mac[5]);
     }
 }
 
@@ -1354,7 +1348,9 @@ int32_t fgr_debug_hex_dump_to_buffer(const void *data, size_t data_size,
     size_t remaining = output_size;
     int32_t total_written = 0;
 
-    if (output_size == 0) return -1;
+    if (output_size == 0) {
+        return -1;
+    }
 
     for (size_t i = 0; i < data_size; i += 16) {
         int32_t line_written;
@@ -1441,4 +1437,3 @@ int32_t fgr_debug_hex_dump_to_buffer(const void *data, size_t data_size,
 }
 
 // End of file
-

@@ -94,8 +94,8 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
         // Print the AP info that failed
         ESP_LOGI(TAG, "AP SSID: %.32s.", event->ssid);
         ESP_LOGI(TAG, "AP BSSID: %02x:%02x:%02x:%02x:%02x:%02x.",
-                event->bssid[0], event->bssid[1], event->bssid[2],
-                event->bssid[3], event->bssid[4], event->bssid[5]);
+                 event->bssid[0], event->bssid[1], event->bssid[2],
+                 event->bssid[3], event->bssid[4], event->bssid[5]);
         ESP_LOGI(TAG, "Reason: %d.", event->reason);
 
         ESP_LOGI(TAG, "Attempting to reconnect...");
@@ -143,7 +143,7 @@ int32_t fgr_network_init(const char *ssid, const char *password,
         // password, the authentication mode is not "open",
         // also if ssid and password are within length
         if ((((password == NULL) || (strlen(password) == 0)) ||
-            (auth_mode != WIFI_AUTH_OPEN)) &&
+             (auth_mode != WIFI_AUTH_OPEN)) &&
             ((ssid != NULL) && (strlen(ssid) < sizeof(wifi_config.sta.ssid))) &&
             ((password == NULL) || (strlen(password) < sizeof(wifi_config.sta.password))))  {
 
@@ -183,14 +183,14 @@ int32_t fgr_network_init(const char *ssid, const char *password,
             // Register event handlers for WiFi and IP
             if (err == ESP_OK) {
                 err = esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
-                                                &wifi_event_handler, NULL);
+                                                 &wifi_event_handler, NULL);
                 if (err != ESP_OK) {
                     ESP_LOGE(TAG, "Failed to register WiFi event handler: %s.", esp_err_to_name(err));
                 }
             }
             if (err == ESP_OK) {
                 err = esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
-                                                &ip_event_handler, g_wifi_semaphore);
+                                                 &ip_event_handler, g_wifi_semaphore);
                 if (err != ESP_OK) {
                     ESP_LOGE(TAG, "Failed to register IP event handler: %s.", esp_err_to_name(err));
                 }
@@ -270,9 +270,9 @@ int32_t fgr_network_init(const char *ssid, const char *password,
                     fgr_monitor_task_wdt_timeout_set(FGR_MONITOR_WDT_TASK_TIMEOUT_SECONDS_MAX);
                 }
                 ESP_LOGI(TAG, "Waiting %d second(s) to connect and be assigned IP address.",
-                        FGR_NETWORK_IP_ADDRESS_ASSIGNMENT_WAIT_SECONDS);
+                         FGR_NETWORK_IP_ADDRESS_ASSIGNMENT_WAIT_SECONDS);
                 if (xSemaphoreTake(g_wifi_semaphore,
-                                pdMS_TO_TICKS(FGR_NETWORK_IP_ADDRESS_ASSIGNMENT_WAIT_SECONDS * 1000)) == pdTRUE) {
+                                   pdMS_TO_TICKS(FGR_NETWORK_IP_ADDRESS_ASSIGNMENT_WAIT_SECONDS * 1000)) == pdTRUE) {
                     ESP_LOGI(TAG, "WiFi connected, IP obtained.");
                 } else {
                     ESP_LOGE(TAG, "Failed to obtain IP address within timeout.");
@@ -297,7 +297,7 @@ int32_t fgr_network_init(const char *ssid, const char *password,
     }
 
     // Returns ESP_OK or negative error code from esp_err_t
-    return (int32_t) -err;
+    return (int32_t) - err;
 }
 
 // Deinitialise networking.
@@ -325,8 +325,8 @@ size_t fgr_network_hostname_from_url(const char *url, char *buffer, size_t lengt
     if (hostname_start && length > 0) {
         hostname_start += 2;
         for (char *p = hostname_start;
-                (*p != 0) && (*p != '/') && (*p != ':');
-                p++) {
+             (*p != 0) && (*p != '/') && (*p != ':');
+             p++) {
             if (buffer_used < length - 1) {
                 buffer[buffer_used] = *p;
                 buffer_used++;
@@ -341,4 +341,3 @@ size_t fgr_network_hostname_from_url(const char *url, char *buffer, size_t lengt
 }
 
 // End of file
-

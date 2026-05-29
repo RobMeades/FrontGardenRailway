@@ -43,8 +43,8 @@
  * COMPILE-TIME MACROS
  * -------------------------------------------------------------- */
 
- // Logging prefix
- #define TAG "socket"
+// Logging prefix
+#define TAG "socket"
 
 #ifndef FGR_SOCKET_RX_BUFFER_LENGTH
 // Receive buffer length: just
@@ -130,7 +130,8 @@ static void task_maintain_cb(void *handle, void *param)
             // Connected: send heartbeat if necessary
             if ((context_channel->heartbeat_seconds > 0) &&
                 (context_channel->heartbeat_cb != NULL) &&
-                (esp_timer_get_time() - context_channel->last_activity_time_us > ((int64_t) context_channel->heartbeat_seconds) * 1000000)) {
+                (esp_timer_get_time() - context_channel->last_activity_time_us > ((int64_t)
+                                                                                  context_channel->heartbeat_seconds) * 1000000)) {
                 // Unlock the channel context here so that heartbeat_cb()
                 // can call fgr_socket_channel_activity() or fgr_socket_channel_failed()
                 xSemaphoreGive(context_channel->lock);
@@ -173,7 +174,8 @@ static void task_maintain_cb(void *handle, void *param)
                     } else if (err == -ESP_ERR_NOT_FINISHED) {
                         // Connection in progress
                         int32_t elapsed_ms = 0;
-                        while ((err == -ESP_ERR_NOT_FINISHED) && (elapsed_ms < FGR_SOCKET_RECONNECT_TIMEOUT_MS) && context_channel->task_handle) {
+                        while ((err == -ESP_ERR_NOT_FINISHED) && (elapsed_ms < FGR_SOCKET_RECONNECT_TIMEOUT_MS) &&
+                               context_channel->task_handle) {
                             int32_t timeout_ms = 100;
                             err = fgr_socket_connect_is_complete(timeout_ms, &context_connect);
                             elapsed_ms += timeout_ms;
@@ -230,7 +232,7 @@ static void task_maintain_cb(void *handle, void *param)
                     if (context_channel->heartbeat_cb) {
                         // Call heartbeat_cb() also so that the controller gets our state
                         context_channel->heartbeat_cb(context_channel->sock,
-                                                        context_channel->cb_param);
+                                                      context_channel->cb_param);
                     }
                 }
             } else {
@@ -342,23 +344,24 @@ static int32_t socket_send(int sock, const void *buffer, size_t length,
     size_t retries = 0;
 
     if (buffer) {
-      while ((total_written < length) && (err == ESP_OK) && (retries <= retry_count)) {
-          int32_t len_written = send(sock, ((uint8_t *) buffer) + total_written, length - total_written, MSG_DONTWAIT);
-          if (len_written >= 0) {
-              total_written += len_written;
-              retries = 0;  // Reset on success
-          } else {
-              if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                  retries++;
-                  vTaskDelay(pdMS_TO_TICKS(10));  // Small delay before retry
-              } else {
-                  err = -errno;
-                  if (log) {
-                    ESP_LOGE(TAG, "Error sending to server %d (%s)!", errno, strerror(errno));
-                  }
-              }
-          }
-      }
+        while ((total_written < length) && (err == ESP_OK) && (retries <= retry_count)) {
+            int32_t len_written = send(sock, ((uint8_t *) buffer) + total_written, length - total_written,
+                                       MSG_DONTWAIT);
+            if (len_written >= 0) {
+                total_written += len_written;
+                retries = 0;  // Reset on success
+            } else {
+                if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    retries++;
+                    vTaskDelay(pdMS_TO_TICKS(10));  // Small delay before retry
+                } else {
+                    err = -errno;
+                    if (log) {
+                        ESP_LOGE(TAG, "Error sending to server %d (%s)!", errno, strerror(errno));
+                    }
+                }
+            }
+        }
     }
 
     if (retries > retry_count) {
@@ -369,7 +372,7 @@ static int32_t socket_send(int sock, const void *buffer, size_t length,
     }
 
     // Returns ESP_OK or negative error code from esp_err_t
-    return (int32_t) -err;
+    return (int32_t) - err;
 }
 
 /* ----------------------------------------------------------------
@@ -908,4 +911,3 @@ void fgr_socket_receive_stop(void **context)
 }
 
 // End of file
-

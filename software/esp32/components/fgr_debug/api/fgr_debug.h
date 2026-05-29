@@ -17,9 +17,9 @@
 #ifndef _FGR_DEBUG_H_
 #define _FGR_DEBUG_H_
 
- /** @file
-  * @brief The debug utilities API for a node of the front garden railway.
-  */
+/** @file
+ * @brief The debug utilities API for a node of the front garden railway.
+ */
 
 #ifdef __cplusplus
 extern "C" {
@@ -330,20 +330,22 @@ void fgr_debug_led_breathe_set(fgr_debug_colour_t colour);
  * See also fgr_debug_panic_str_get() ,fgr_debug_panic_str_get()
  * and fgr_debug_panic_log().
  *
- * @param backtrace  a pointer to storage for
- *                   FGR_DEBUG_BACKTRACE_DEPTH_MAX uint32_t values
- *                   that are the backtrace; may be NULL, in which
- *                   case the backtrace is retained and you might
- *                   use the return value to size your storage
- *                   before calling this function again.  If non-NULL
- *                   the backtrace storage is emptied on return.
- * @return           if there have been one or more panics since
- *                   power-on, the number of uint32_t values
- *                   that would be populated in backtrace if it
- *                   were non-NULL, ESP_OK if there have been no
- *                   panics.
+ * @param backtrace_copy  a pointer to storage for
+ *                        FGR_DEBUG_BACKTRACE_DEPTH_MAX uint32_t
+ *                        values that are the backtrace copied
+ *                        from retained RAM; may be NULL, in which
+ *                        case the backtrace is retained and you might
+ *                        use the return value to size your storage
+ *                        before calling this function again.  If
+ *                        non-NULL the backtrace storage is emptied
+ *                        on return.
+ * @return                if there have been one or more panics since
+ *                        power-on, the number of uint32_t values
+ *                        that would be populated in backtrace if it
+ *                        were non-NULL, ESP_OK if there have been no
+ *                        panics.
  */
-int32_t fgr_debug_panic_get(uint32_t *backtrace);
+int32_t fgr_debug_panic_get(uint32_t *backtrace_copy);
 
 /** As fgr_debug_panic_get() but populates a buffer with
  * a string that can be passed straight to xtensa-esp-elf-addr2line,

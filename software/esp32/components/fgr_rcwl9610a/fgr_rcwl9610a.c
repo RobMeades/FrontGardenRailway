@@ -36,8 +36,8 @@
  * COMPILE-TIME MACROS
  * -------------------------------------------------------------- */
 
- // Logging prefix.
- #define TAG "rcwl9610a"
+// Logging prefix.
+#define TAG "rcwl9610a"
 
 // UART buffer size (has to be at least as big as UART_HW_FIFO).
 #define UART_RX_BUFFER_SIZE 256
@@ -99,8 +99,8 @@ int32_t fgr_rcwl9610a_init(int32_t uart, int32_t pin_txd, int32_t pin_rxd)
         };
 
         ESP_LOGI(TAG, "Installing RCWL-9610A driver on UART %d, TXD pin %d,"
-                " RXD pin %d, baud rate %d.", uart, pin_txd, pin_rxd,
-                UART_BAUD_RATE);
+                      " RXD pin %d, baud rate %d.", uart, pin_txd, pin_rxd,
+                 UART_BAUD_RATE);
         // Configure the UART that talks to the RCWL-9610A
         err = uart_driver_install(uart, UART_RX_BUFFER_SIZE, 0, 0, NULL, 0);
         if (err == ESP_OK) {
@@ -125,7 +125,7 @@ int32_t fgr_rcwl9610a_init(int32_t uart, int32_t pin_txd, int32_t pin_rxd)
     }
 
     // Returns ESP_OK or negative error code from esp_err_t
-    return (int32_t) -err;
+    return (int32_t) - err;
 }
 
 // Deinitialise the interface to the RCWL-9610A.
@@ -157,16 +157,16 @@ int32_t fgr_rcwl9610a_read()
             err = uart_read_bytes((uart_port_t) g_uart, buffer,
                                   sizeof(buffer), pdMS_TO_TICKS(100));
             if (err == sizeof(buffer)) {
-               err = ((((int32_t) buffer[0]) << 16) + (((int32_t) buffer[1]) << 8) + buffer[2]) / 1000;
+                err = ((((int32_t) buffer[0]) << 16) + (((int32_t) buffer[1]) << 8) + buffer[2]) / 1000;
             } else {
                 ESP_LOGE(TAG, "Expected to read %d byte(s) from UART %d but"
-                         " uart_read_bytes() returned %d!", sizeof(buffer),
+                              " uart_read_bytes() returned %d!", sizeof(buffer),
                          g_uart, err);
                 err = -ESP_FAIL;
             }
         } else {
             ESP_LOGE(TAG, "Tried to write 1 byte (0x%02x) to UART %d"
-                     " but uart_write_bytes() returned %d!",
+                          " but uart_write_bytes() returned %d!",
                      RCWL9610A_COMMAND_READ_DISTANCE, g_uart, err);
             err = -ESP_FAIL;
         }
@@ -176,4 +176,3 @@ int32_t fgr_rcwl9610a_read()
 }
 
 // End of file
-

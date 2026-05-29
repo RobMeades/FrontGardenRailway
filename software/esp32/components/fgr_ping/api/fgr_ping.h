@@ -17,9 +17,9 @@
 #ifndef _FGR_PING_H_
 #define _FGR_PING_H_
 
- /** @file
-  * @brief The ping API for a node of the front garden railway.
-  */
+/** @file
+ * @brief The ping API for a node of the front garden railway.
+ */
 
 #ifdef __cplusplus
 extern "C" {
@@ -69,10 +69,10 @@ typedef void (*fgr_ping_loss_cb_t)(void *param);
  *                           negative value from esp_err_t.
  */
 int32_t fgr_ping_start(const char *hostname, int32_t count,
-                       int32_t interval_ms, int32_t timeout_ms,
-                       int32_t data_size,
-                       fgr_ping_loss_cb_t ping_loss_cb,
-                       void *ping_loss_cb_param);
+int32_t interval_ms, int32_t timeout_ms,
+int32_t data_size,
+fgr_ping_loss_cb_t ping_loss_cb,
+void *ping_loss_cb_param);
 
 #ifdef __cplusplus
 }

@@ -37,8 +37,8 @@
  * COMPILE-TIME MACROS
  * -------------------------------------------------------------- */
 
- // Logging prefix
- #define TAG "task"
+// Logging prefix
+#define TAG "task"
 
 /* ----------------------------------------------------------------
  * TYPES
@@ -199,9 +199,9 @@ int32_t fgr_task_init()
         SLIST_INIT(&g_context.task_list);
     }
 
-   if (g_context.lock) {
-       err = ESP_OK;
-   }
+    if (g_context.lock) {
+        err = ESP_OK;
+    }
 
     return err;
 }
@@ -482,4 +482,3 @@ void fgr_task_min_free_stack_stop()
 }
 
 // End of file
-

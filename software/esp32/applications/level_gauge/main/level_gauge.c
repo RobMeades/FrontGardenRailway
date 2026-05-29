@@ -42,8 +42,8 @@
  * COMPILE-TIME MACROS
  * -------------------------------------------------------------- */
 
- // Logging prefix.
- #define TAG "level_gauge"
+// Logging prefix.
+#define TAG "level_gauge"
 
 // The default reporting interval in seconds.
 #define REPORTING_INTERVAL_DEFAULT_SECONDS 1
@@ -180,10 +180,10 @@ static bool msg_receive_cb(fgr_msg_t *msg, void *param)
                                     msg->body.length) == ESP_OK) {
                         msg_error = FGR_ERROR_NONE;
                         ESP_LOGI(TAG, "Reporting interval set to %d second(s).",
-                                state_get(context));
+                                 state_get(context));
                     } else {
                         ESP_LOGE(TAG, "Unable to set reporting interval,"
-                                " it will remain %d second(s).", state_get(context));
+                                      " it will remain %d second(s).", state_get(context));
                     }
                     // We're somewhat in limbo if the above fails,
                     // best to start anyway with the default interval;
@@ -191,30 +191,30 @@ static bool msg_receive_cb(fgr_msg_t *msg, void *param)
                     // the confirmation anyway
                     state_set(context, FGR_STATE_STARTED);
                     msg_cfg_get(context, contents, sizeof(contents));
-                break;
+                    break;
                 case FGR_REQ_CNF_START:
                     state_set(context, FGR_STATE_STARTED);
                     msg_error = FGR_ERROR_NONE;
-                break;
+                    break;
                 case FGR_REQ_CNF_STOP:
                     state_set(context, FGR_STATE_STOPPED);
                     msg_error = FGR_ERROR_NONE;
-                break;
+                    break;
                 case FGR_REQ_CNF_REBOOT:
                     // Just reset the running flag and we will exit
                     context->running = false;
                     state_set(context, FGR_STATE_STOPPED);
                     msg_error = FGR_ERROR_NONE;
-                break;
+                    break;
                 default:
                     handled = false;
-                break;
+                    break;
             }
 
             if (handled) {
                 fgr_msg_send_queue_cnf(MSG_MASK(msg->header.req.type), msg_error,
-                                    msg->header.req.reference,
-                                    contents, length);
+                                       msg->header.req.reference,
+                                       contents, length);
             }
         } else {
             // RESPONSE messages
@@ -226,10 +226,10 @@ static bool msg_receive_cb(fgr_msg_t *msg, void *param)
                                     msg->body.length) == ESP_OK) {
                         msg_error = FGR_ERROR_NONE;
                         ESP_LOGI(TAG, "Reporting interval set to %d second(s).",
-                                state_get(context));
+                                 state_get(context));
                     } else {
                         ESP_LOGE(TAG, "Unable to set reporting interval,"
-                                " it will remain %d second(s).", state_get(context));
+                                      " it will remain %d second(s).", state_get(context));
                     }
                     // We're somewhat in limbo if the above fails,
                     // best to start anyway with the default interval
@@ -238,14 +238,14 @@ static bool msg_receive_cb(fgr_msg_t *msg, void *param)
                     state_set(context, FGR_STATE_STARTED);
                     msg_cfg_get(context, contents, sizeof(contents));
                     fgr_msg_send_queue_ind(FGR_IND_RSP_START, contents, length);
-                break;
+                    break;
                 case FGR_IND_RSP_START:
                 case FGR_IND_RSP_STOP:
                     // Ignore
-                break;
+                    break;
                 default:
                     handled = false;
-                break;
+                    break;
             }
         }
 
@@ -337,7 +337,7 @@ static void deinit(context_t *context)
 static void do_node(context_t *context)
 {
     // Main loop
-    while(context->running) {
+    while (context->running) {
         if (state_cb(context) == FGR_STATE_STARTED) {
             int32_t err = fgr_rcwl9610a_read();
             if (err >= 0) {
@@ -363,7 +363,7 @@ void app_main(void)
     };
 
     ESP_LOGI(TAG, "app_main start, default reporting interval"
-             " %d second(s).", state_get(&context));
+                  " %d second(s).", state_get(&context));
 
     int32_t err = init(&context);
     if (err == ESP_OK) {
