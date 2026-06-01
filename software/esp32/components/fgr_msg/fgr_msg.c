@@ -139,25 +139,21 @@ static const char *g_msg_req_cnf_str_list[] = {"NULL", "CFG", "START", "STOP",
                                                "LOG_LEVEL", "LOG_START", "LOG_STOP",
                                                "LOG_STATUS", "DEBUG_LED_OFF", "DEBUG_LED_ON",
                                                "DEBUG_LED_BREATHE_OFF", "DEBUG_LED_BREATHE_ON",
-                                               "DEBUG_LED_STATUS", "REBOOT", "PING"
-                                              };
+                                               "DEBUG_LED_STATUS", "REBOOT", "PING"};
 
 // List of known message IND/RSP names, in order.
 static const char *g_msg_ind_rsp_str_list[] = {"NULL", "NEEDS_CFG", "START", "STOP",
-                                               "HEARTBEAT"
-                                              };
+                                               "HEARTBEAT"};
 
 // List of known message error codes, in order.
 static const char *g_msg_error_str_list[] = {"NONE", "GENERIC", "INVALID_REQUEST",
                                              "UNHANDLED_REQUEST", "MSG_TOO_LONG",
                                              "ABORTED", "BUSY", "TIMEOUT",
-                                             "OUT_OF_RESOURCES", "HARDWARE"
-                                            };
+                                             "OUT_OF_RESOURCES", "HARDWARE"};
 // List of known message states, in order.
 static const char *g_msg_state_str_list[] = {"NOT_POPULATED", "NEEDS_CFG", "STARTED",
                                              "STOPPED", "BUSY", "GENERIC_FAILED",
-                                             "HARDWARE_FAILURE"
-                                            };
+                                             "HARDWARE_FAILURE"};
 
 // Send queue context.
 static context_send_t g_context_send = {0};
@@ -991,9 +987,9 @@ int32_t fgr_msg_receive_handler_add(uint16_t msg_type,
     if (g_context.lock) {
         err = -ESP_ERR_INVALID_ARG;
         if (cb &&
-                ((msg_type == 0) ||
-                 ((msg_type >> 12) == FGR_MSG_TYPE_REQ) ||
-                 ((msg_type >> 12) == FGR_MSG_TYPE_IND))) {
+            ((msg_type == 0) ||
+             ((msg_type >> 12) == FGR_MSG_TYPE_REQ) ||
+             ((msg_type >> 12) == FGR_MSG_TYPE_IND))) {
             err = -ESP_ERR_NO_MEM;
             msg_rx_handler_cb_t *msg_rx_cb = (msg_rx_handler_cb_t *) malloc(sizeof(*msg_rx_cb));
             if (msg_rx_cb) {
@@ -1198,7 +1194,7 @@ void fgr_msg_print_summary(const char *prefix_str, fgr_log_level_t level,
 
     fgr_msg_name(msg_type, buffer_msg_name, sizeof(buffer_msg_name));
     if (((msg_type >> 12) == FGR_MSG_TYPE_REQ) ||
-            ((msg_type >> 12) == FGR_MSG_TYPE_RSP)) {
+        ((msg_type >> 12) == FGR_MSG_TYPE_RSP)) {
         if (prefix_str == NULL) {
             prefix_str = "Received";
         }
@@ -1210,14 +1206,12 @@ void fgr_msg_print_summary(const char *prefix_str, fgr_log_level_t level,
         }
         if ((msg_type >> 12) == FGR_MSG_TYPE_CNF) {
             fgr_msg_error_name(error_state, buffer_error_state, sizeof(buffer_error_state));
-            snprintf(buffer, sizeof(buffer), "%s %s [0x%04x], error %s [%d], reference %d,"
-                                             " length %lu.", prefix_str, buffer_msg_name, msg_type,
-                     buffer_error_state, error_state, reference, length);
+            snprintf(buffer, sizeof(buffer), "%s %s [0x%04x], error %s [%d], reference %d, length %lu.",
+                     prefix_str, buffer_msg_name, msg_type, buffer_error_state, error_state, reference, length);
         } else if ((msg_type >> 12) == FGR_MSG_TYPE_IND) {
             fgr_msg_state_name(error_state, buffer_error_state, sizeof(buffer_error_state));
-            snprintf(buffer, sizeof(buffer), "%s %s [0x%04x], state %s [%d], reference %d,"
-                                             " length %lu.", prefix_str, buffer_msg_name, msg_type,
-                     buffer_error_state, error_state, reference, length);
+            snprintf(buffer, sizeof(buffer), "%s %s [0x%04x], state %s [%d], reference %d, length %lu.",
+                     prefix_str, buffer_msg_name, msg_type, buffer_error_state, error_state, reference, length);
         } else {
             snprintf(buffer, sizeof(buffer), "Unknown message type (0x%04x).", msg_type);
         }

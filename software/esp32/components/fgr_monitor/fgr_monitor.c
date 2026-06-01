@@ -99,14 +99,12 @@ typedef struct {
 
 // The names of the abort reasons: must have the same number of
 // entries as fgr_monitor_abort_reason_t.
-static const char *g_abort_reason_name[] = {
-    "NONE",
-    "LOW_MONITOR_TASK_STACK",
-    "LOW_HEAP",
-    "FRAGMENTED_HEAP",
-    "TASK_WDT",
-    "CONTROLLER_WDT"
-};
+static const char *g_abort_reason_name[] = {"NONE",
+                                            "LOW_MONITOR_TASK_STACK",
+                                            "LOW_HEAP",
+                                            "FRAGMENTED_HEAP",
+                                            "TASK_WDT",
+                                            "CONTROLLER_WDT"};
 
 // Storage for abort reason in retained RAM
 FGR_RRAM_DEFINE(retained_ram_t, retained_ram);
@@ -168,7 +166,7 @@ static const char *abort_reason_name(int32_t reason)
     const char *reason_name = "USER";
     int32_t reason_name_index = -(reason + 1);
     if ((reason_name_index >= 0) &&
-            (reason_name_index < FGR_UTIL_ARRAY_LENGTH(g_abort_reason_name))) {
+        (reason_name_index < FGR_UTIL_ARRAY_LENGTH(g_abort_reason_name))) {
         reason_name = g_abort_reason_name[reason_name_index];
     }
 
@@ -302,13 +300,13 @@ static void task_monitor(void *param)
             }
         }
         if ((reason == FGR_MONITOR_ABORT_REASON_NONE) &&
-                (heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT) < FGR_MONITOR_HEAP_MIN)) {
+            (heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT) < FGR_MONITOR_HEAP_MIN)) {
             reason = FGR_MONITOR_ABORT_REASON_LOW_HEAP;
         }
 
         // Monitor communications with the controller
         if ((reason == FGR_MONITOR_ABORT_REASON_NONE) &&
-                (context_task->last_msg_receive_us - esp_timer_get_time() >
+            (context_task->last_msg_receive_us - esp_timer_get_time() >
                  FGR_MONITOR_WDT_CONTROLLER_TIMEOUT_SECONDS * 1000000)) {
             reason = FGR_MONITOR_ABORT_REASON_CONTROLLER_WDT;
         }
@@ -317,8 +315,7 @@ static void task_monitor(void *param)
             // Check all of the task last_called_us times
             task_t *iter = NULL;
             SLIST_FOREACH(iter, &context_task->task_list, next) {
-                if (iter->last_called_us - esp_timer_get_time() > (((int64_t) context_task->timeout_seconds) *
-                                                                   1000000)) {
+                if (iter->last_called_us - esp_timer_get_time() > (((int64_t) context_task->timeout_seconds) * 1000000)) {
                     task_name = iter->name;
                     reason = FGR_MONITOR_ABORT_REASON_TASK_WDT;
                     break;

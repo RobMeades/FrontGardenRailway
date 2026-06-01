@@ -205,7 +205,7 @@ typedef struct {
  * @param param  cb_param as passed to fgr_debug_init().
  * @return       the state of the node.
  */
-typedef fgr_state_t (*fgr_debug_state_cb_t)(void *param);
+typedef fgr_state_t (*fgr_debug_state_cb_t) (void *param);
 
 /* ----------------------------------------------------------------
  * FUNCTIONS: INITIALISE/DEINITIALISE

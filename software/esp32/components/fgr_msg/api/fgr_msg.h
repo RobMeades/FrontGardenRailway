@@ -34,7 +34,7 @@ extern "C" {
 
 #ifndef FGR_MSG_SEND_QUEUE_LENGTH
 // Suggested length for a message send queue
-# define FGR_MSG_SEND_QUEUE_LENGTH 10
+#  define FGR_MSG_SEND_QUEUE_LENGTH 10
 #endif
 
 // Make a REQ message type from a REQ_CNF.
@@ -70,21 +70,21 @@ extern "C" {
  * @return       true if the message is handled, false if it
  *               can be passed to subsequent handlers.
  */
-typedef bool (*fgr_msg_receive_handler_cb_t)(fgr_msg_t *msg, void *param);
+typedef bool (*fgr_msg_receive_handler_cb_t) (fgr_msg_t *msg, void *param);
 
 /** Function to call to obtain the state of a node.
  *
  * @param param  cb_param as passed to fgr_msg_init().
  * @return       the state of the node.
  */
-typedef fgr_state_t (*fgr_msg_state_cb_t)(void *param);
+typedef fgr_state_t (*fgr_msg_state_cb_t) (void *param);
 
 /** Function to call to obtain an RSSI reading.
  *
  * @param param  cb_param as passed to fgr_msg_rssi_cb_set().
  * @return       the RSSI reading in dBm.
  */
-typedef int8_t (*fgr_msg_rssi_cb_t)(void *param);
+typedef int8_t (*fgr_msg_rssi_cb_t) (void *param);
 
 /** Function to call when the connection with the controller
  * goes up or down.
@@ -101,13 +101,13 @@ typedef void (*fgr_msg_connection_state_cb_t) (bool upNotDOwn, void *param);
  *
  * @param param  cb_param as passed to fgr_msg_send_cb_set().
  */
-typedef void (*fgr_msg_send_cb_t)(void *param);
+typedef void (*fgr_msg_send_cb_t) (void *param);
 
 /** Function to call to when a message is received.
  *
  * @param param  cb_param as passed to fgr_msg_receive_cb_set().
  */
-typedef void (*fgr_msg_receive_cb_t)(void *param);
+typedef void (*fgr_msg_receive_cb_t) (void *param);
 
 /** Function to populate a buffer with what will be
  * the contents of an FGR_REQ_CNF_PING response to
@@ -120,9 +120,9 @@ typedef void (*fgr_msg_receive_cb_t)(void *param);
                  fgr_msg_send_ping_body_cb().
  * @return       the amount of data coped into buffer.
  */
-typedef uint32_t (*fgr_msg_send_ping_body_cb_t)(uint8_t *buffer,
-uint32_t length,
-void *param);
+typedef uint32_t (*fgr_msg_send_ping_body_cb_t) (uint8_t *buffer,
+                                                 uint32_t length,
+                                                 void *param);
 
 /* ----------------------------------------------------------------
  * FUNCTIONS: INITIALISATION/DEINITIALISATION
@@ -163,8 +163,8 @@ void *param);
  *                          from esp_err_t.
  */
 int32_t fgr_msg_init(const char *server_ip, uint16_t port,
-size_t heartbeat_seconds, fgr_msg_state_cb_t cb,
-void *cb_param);
+                     size_t heartbeat_seconds, fgr_msg_state_cb_t cb,
+                     void *cb_param);
 
 /** Deinitialise the messaging interface; after this has been called
  * the state callback passed to fgr_msg_init() will no longer be called,
@@ -206,8 +206,8 @@ int32_t fgr_msg_rssi_cb_set(fgr_msg_rssi_cb_t cb, void *cb_param);
  *                  esp_err_t.
  */
 int32_t fgr_msg_send_cnf(fgr_req_cnf_t cnf, fgr_error_t error,
-uint8_t reference, const void *buffer,
-size_t length);
+                         uint8_t reference, const void *buffer,
+                         size_t length);
 
 /** Send an IND message.
  *
@@ -225,7 +225,7 @@ size_t length);
  *                esp_err_t.
  */
 int32_t fgr_msg_send_ind(fgr_ind_rsp_t ind, const void *buffer,
-size_t length);
+                         size_t length);
 
 /** Initialise a send message queue: you may need one of these if
  * you intend to send messages from a message receive handler
@@ -257,8 +257,8 @@ int32_t fgr_msg_send_queue_init(size_t length);
  *                  esp_err_t.
  */
 int32_t fgr_msg_send_queue_cnf(fgr_req_cnf_t cnf, fgr_error_t error,
-uint8_t reference, const void *buffer,
-size_t length);
+                               uint8_t reference, const void *buffer,
+                               size_t length);
 
 /** Queue an IND message for transmission.  fgr_msg_send_queue_init()
  * must have been called for this to work
@@ -272,7 +272,7 @@ size_t length);
  *                esp_err_t.
  */
 int32_t fgr_msg_send_queue_ind(fgr_ind_rsp_t ind, const void *buffer,
-size_t length);
+                               size_t length);
 
 /** Get how many messages are currently on the send queue.
  *
@@ -340,7 +340,7 @@ int32_t fgr_msg_send_cb_set(fgr_msg_send_cb_t cb, void *cb_param);
  *                  from esp_err_t.
  */
 int32_t fgr_msg_send_ping_body_cb(fgr_msg_send_ping_body_cb_t cb,
-void *cb_param);
+                                  void *cb_param);
 
 /* ----------------------------------------------------------------
  * FUNCTIONS: RECEIVING
@@ -413,8 +413,8 @@ int32_t fgr_msg_receive_cb_set(fgr_msg_receive_cb_t cb, void *cb_param);
  *                  from esp_err_t.
  */
 int32_t fgr_msg_receive_handler_add(uint16_t msg_type,
-fgr_msg_receive_handler_cb_t cb,
-void *cb_param);
+                                    fgr_msg_receive_handler_cb_t cb,
+                                    void *cb_param);
 
 /** Remove a message receive handler that was added with
  * fgr_msg_receive_handler_add().  ALL message handlers with
@@ -520,8 +520,8 @@ int32_t fgr_msg_state_name(fgr_state_t error, char *buffer, size_t length);
  *                    of the message.
  */
 void fgr_msg_print_summary(const char *prefix_str, fgr_log_level_t level,
-uint16_t msg_type, uint8_t error_state,
-uint8_t reference, uint32_t length);
+                           uint16_t msg_type, uint8_t error_state,
+                           uint8_t reference, uint32_t length);
 
 #ifdef __cplusplus
 }

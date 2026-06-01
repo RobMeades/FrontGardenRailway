@@ -49,7 +49,7 @@ typedef enum {
  *               hence needs to call fgr_monitor_task_wdt_feed().
  * @param param  cb_param as passed to fgr_task_create().
  */
-typedef void (*fgr_task_cb_t)(void *handle, void *param);
+typedef void (*fgr_task_cb_t) (void *handle, void *param);
 
 /** Callback function to provide a tasks's state.
  *
@@ -58,10 +58,10 @@ typedef void (*fgr_task_cb_t)(void *handle, void *param);
  * @param name   the task name, may be NULL.
  * @param param  cb_param as passed to fgr_task_state_cb_set().
  */
-typedef void (*fgr_task_state_cb_t)(fgr_task_state_t state,
-                                    void *handle,
-                                    const char *name,
-                                    void *param);
+typedef void (*fgr_task_state_cb_t) (fgr_task_state_t state,
+                                     void *handle,
+                                     const char *name,
+                                     void *param);
 
 /* ----------------------------------------------------------------
  * FUNCTIONS: INITIALISATION/DEINITIALISATION

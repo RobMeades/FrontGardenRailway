@@ -133,11 +133,11 @@ extern "C" {
 
 // Macro to set a retained RAM variable from a shadow variable.
 #define FGR_RRAM_SET(variable)                                                             \
-    fgr_rram_set(&(variable), &(g_##variable##_rr_container), sizeof(g_##variable##_rr_container))
+    fgr_rram_set(&(variable), sizeof(variable), &(g_##variable##_rr_container), sizeof(g_##variable##_rr_container))
 
 // Macro to get a retained RAM variable into a normal variable.
 #define FGR_RRAM_GET(variable)                                                             \
-    fgr_rram_get(&(g_##variable##_rr_container), &(variable), sizeof(g_##variable##_rr_container))
+    fgr_rram_get(&(g_##variable##_rr_container), sizeof(g_##variable##_rr_container), &(variable), sizeof(variable))
 
 // Macro to clear a retained RAM variable.
 // Note: the RAM variable is cleared as well as the retained RAM variable, only because
@@ -160,6 +160,7 @@ extern "C" {
  *
  * @param variable           a pointer to the variable to copy, cannot
  *                           be NULL.
+ * @param variable_size      sizeof(variable).
  * @param rram_variable      a pointer to the retained RAM variable
  *                           to copy into; the variable MUST have
  *                           been defined using the macro
@@ -168,8 +169,8 @@ extern "C" {
  * @return                   ESP_OK on success, else negative error
  *                           code from esp_err_t.
  */
-int32_t fgr_rram_set(const void *variable, void *rram_variable,
-size_t rram_variable_size);
+int32_t fgr_rram_set(const void *variable, size_t variable_size,
+                     void *rram_variable, size_t rram_variable_size);
 
 /** Get a retained RAM variable into a normal variable; rather
  * than calling this directly, use the macro FGR_RRAM_GET()
@@ -179,14 +180,15 @@ size_t rram_variable_size);
  *                           to copy from; the variable MUST have
  *                           been defined using the macro
  *                           FGR_RRAM_DEFINE().  Cannot be NULL.
+ * @param rram_variable_size sizeof(rram_variable).
  * @param variable           a pointer to the normal variable to copy
  *                           into; cannot be NULL.
- * @param rram_variable_size sizeof(rram_variable).
+ * @param variable_size      sizeof(variable).
  * @return                   ESP_OK on success, else negative error
  *                           code from esp_err_t.
  */
-int32_t fgr_rram_get(const void *rram_variable, void *variable,
-size_t rram_variable_size);
+int32_t fgr_rram_get(const void *rram_variable, size_t rram_variable_size,
+                     void *variable, size_t variable_size);
 
 /** Clear a retained RAM variable; rather than calling this directly,
  * use the macro FGR_RRAM_CLEAR() above.

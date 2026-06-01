@@ -123,28 +123,18 @@ typedef union {
     fgr_metrics_event_t local_reboot;
     fgr_metrics_event_t panic;
     fgr_metrics_event_t power_bad;
-    fgr_metrics_event_bool_t
-    wifi_connection;         // Event true: connection successful, event false: connection failure, amount unused
+    fgr_metrics_event_bool_t wifi_connection;         // Event true: connection successful, event false: connection failure, amount unused
     fgr_metrics_event_t ip_connection;
     int32_t wifi_rssi_dbm;
-    fgr_metrics_event_bool_t
-    ota_connection;          // Event true: connection successful, event false: connection failure, amount unused
-    fgr_metrics_event_bool_t
-    ota_nvs_write;           // Event true: updated version in NVS, event false: failed to update version in NVS, amount unused
-    fgr_metrics_event_bool_t
-    log_server_connection;   // Event true: connection successful, event false: connection failure, amount unused
-    fgr_metrics_event_bool_t
-    controller_connection;   // Event true: connection successful, event false: connection failure, amount unused
-    fgr_metrics_event_bool_t
-    controller_socket_tx;    // Event true: TX successful, event false: TX successful, amount: the number of bytes that [would have been] transmitted
-    fgr_metrics_event_t
-    controller_socket_rx;         // Event RX successful, amount: the number of bytes received
-    fgr_metrics_event_bool_t
-    ping_tx;                 // Event true: ping TX successful, event false: ping TX failure, amount: the number of bytes that [would have been] transmitted
-    fgr_metrics_event_bool_t
-    ping_rx;                 // Event true: ping RX successful, event false: ping RX failure, amount: the number of bytes received
-    fgr_metrics_event_bool_t
-    nvs_write;               // Event true: NVS write successful, event false: NVS write failure, amount: the number of bytes that [would have been] written
+    fgr_metrics_event_bool_t ota_connection;          // Event true: connection successful, event false: connection failure, amount unused
+    fgr_metrics_event_bool_t ota_nvs_write;           // Event true: updated version in NVS, event false: failed to update version in NVS, amount unused
+    fgr_metrics_event_bool_t log_server_connection;   // Event true: connection successful, event false: connection failure, amount unused
+    fgr_metrics_event_bool_t controller_connection;   // Event true: connection successful, event false: connection failure, amount unused
+    fgr_metrics_event_bool_t controller_socket_tx;    // Event true: TX successful, event false: TX successful, amount: the number of bytes that [would have been] transmitted
+    fgr_metrics_event_t controller_socket_rx;         // Event RX successful, amount: the number of bytes received
+    fgr_metrics_event_bool_t ping_tx;                 // Event true: ping TX successful, event false: ping TX failure, amount: the number of bytes that [would have been] transmitted
+    fgr_metrics_event_bool_t ping_rx;                 // Event true: ping RX successful, event false: ping RX failure, amount: the number of bytes received
+    fgr_metrics_event_bool_t nvs_write;               // Event true: NVS write successful, event false: NVS write failure, amount: the number of bytes that [would have been] written
     fgr_metrics_stack_min_free_lowest_t stack_min_free_lowest;
     int32_t heap_min_free_bytes;
 } fgr_metrics_union_t;
@@ -166,8 +156,8 @@ typedef union {
  *               be zero if metric is NULL.
  * @param param  cb_param as passed to fgr_metrics_init().
  */
-typedef void (*fgr_metrics_report_cb_t)(fgr_metrics_storage_t *list,
-                                        size_t length, void *param);
+typedef void (*fgr_metrics_report_cb_t) (fgr_metrics_storage_t *list,
+                                         size_t length, void *param);
 
 /* ----------------------------------------------------------------
  * FUNCTIONS

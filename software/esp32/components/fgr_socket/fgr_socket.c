@@ -129,9 +129,8 @@ static void task_maintain_cb(void *handle, void *param)
         if (context_channel->connected) {
             // Connected: send heartbeat if necessary
             if ((context_channel->heartbeat_seconds > 0) &&
-                    (context_channel->heartbeat_cb != NULL) &&
-                    (esp_timer_get_time() - context_channel->last_activity_time_us > ((int64_t)
-                                                                                      context_channel->heartbeat_seconds) * 1000000)) {
+                (context_channel->heartbeat_cb != NULL) &&
+                (esp_timer_get_time() - context_channel->last_activity_time_us > ((int64_t) context_channel->heartbeat_seconds) * 1000000)) {
                 // Unlock the channel context here so that heartbeat_cb()
                 // can call fgr_socket_channel_activity() or fgr_socket_channel_failed()
                 xSemaphoreGive(context_channel->lock);
@@ -175,7 +174,7 @@ static void task_maintain_cb(void *handle, void *param)
                         // Connection in progress
                         int32_t elapsed_ms = 0;
                         while ((err == -ESP_ERR_NOT_FINISHED) && (elapsed_ms < FGR_SOCKET_RECONNECT_TIMEOUT_MS) &&
-                                context_channel->task_handle) {
+                               context_channel->task_handle) {
                             int32_t timeout_ms = 100;
                             err = fgr_socket_connect_is_complete(timeout_ms, &context_connect);
                             elapsed_ms += timeout_ms;
@@ -345,8 +344,7 @@ static int32_t socket_send(int sock, const void *buffer, size_t length,
 
     if (buffer) {
         while ((total_written < length) && (err == ESP_OK) && (retries <= retry_count)) {
-            int32_t len_written = send(sock, ((uint8_t *) buffer) + total_written, length - total_written,
-                                       MSG_DONTWAIT);
+            int32_t len_written = send(sock, ((uint8_t *) buffer) + total_written, length - total_written, MSG_DONTWAIT);
             if (len_written >= 0) {
                 total_written += len_written;
                 retries = 0;  // Reset on success
@@ -610,7 +608,7 @@ int32_t fgr_socket_connect_is_complete(int32_t timeout_ms, void **context)
     int32_t err = -ESP_ERR_INVALID_ARG;
 
     if (fgr_util_is_valid_ptr_to_ptr(context, TAG, "socket context", __FILE__, __LINE__) &&
-            context && *context) {
+        context && *context) {
 
         err = -ESP_ERR_NOT_FINISHED;
         context_connect_t *context_connect = (context_connect_t *) *context;
@@ -666,9 +664,7 @@ int32_t fgr_socket_connect_is_complete(int32_t timeout_ms, void **context)
 // Stop connecting a non-blocking socket.
 void fgr_socket_connect_stop(void **context)
 {
-    if (fgr_util_is_valid_ptr_to_ptr(context, TAG, "socket context", __FILE__, __LINE__) &&
-            context) {
-
+    if (fgr_util_is_valid_ptr_to_ptr(context, TAG, "socket context", __FILE__, __LINE__) && context) {
         free(*context);
         *context = NULL;
     }
@@ -740,8 +736,7 @@ int32_t fgr_socket_channel_maintain(void **context,
     int32_t err = -ESP_ERR_INVALID_ARG;
 
     if (fgr_util_is_valid_ptr_to_ptr(context, TAG, "channel context", __FILE__, __LINE__) &&
-            context && *context &&
-            ((heartbeat_seconds == 0) || (heartbeat_cb != NULL))) {
+        context && *context && ((heartbeat_seconds == 0) || (heartbeat_cb != NULL))) {
 
         context_channel_t *context_channel = (context_channel_t *) *context;
         // Start a task that will send hearbeats and reconnect the socket
@@ -780,7 +775,7 @@ int32_t fgr_socket_channel_maintain(void **context,
 void fgr_socket_channel_activity(void **context)
 {
     if (fgr_util_is_valid_ptr_to_ptr(context, TAG, "channel context", __FILE__, __LINE__) &&
-            context && *context) {
+        context && *context) {
 
         context_channel_t *context_channel = (context_channel_t *) *context;
         if (context_channel->lock) {
@@ -796,7 +791,7 @@ void fgr_socket_channel_activity(void **context)
 void fgr_socket_channel_failed(void **context)
 {
     if (fgr_util_is_valid_ptr_to_ptr(context, TAG, "channel context", __FILE__, __LINE__) &&
-            context && *context) {
+        context && *context) {
 
         context_channel_t *context_channel = (context_channel_t *) *context;
         if (context_channel->lock) {
@@ -812,7 +807,7 @@ void fgr_socket_channel_failed(void **context)
 void fgr_socket_channel_stop(void **context)
 {
     if (fgr_util_is_valid_ptr_to_ptr(context, TAG, "channel context", __FILE__, __LINE__) &&
-            context && *context) {
+        context && *context) {
 
         context_channel_t *context_channel = (context_channel_t *) *context;
 

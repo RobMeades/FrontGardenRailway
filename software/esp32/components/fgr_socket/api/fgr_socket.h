@@ -63,14 +63,14 @@ extern "C" {
  * @param sock   the socket.
  * @param param  cb_param as passed to fgr_socket_channel_maintain().
  */
-typedef void (*fgr_socket_channel_cb_t)(int sock, void *param);
+typedef void (*fgr_socket_channel_cb_t) (int sock, void *param);
 
 /** Function to call to when a channel has become disconnected and
  * reconnection is taking a while.
  *
  * @param param  cb_param as passed to fgr_socket_channel_maintain().
  */
-typedef void (*fgr_socket_channel_down_cb_t)(void *param);
+typedef void (*fgr_socket_channel_down_cb_t) (void *param);
 
 /** Function to call when data is received on a socket.
  *
@@ -79,8 +79,8 @@ typedef void (*fgr_socket_channel_down_cb_t)(void *param);
  * @param length the amount of data at buffer.
  * @param param  rx_cb_param as passed to fgr_socket_receive_start().
  */
-typedef void (*fgr_socket_rx_cb_t)(void *buffer, size_t length,
-void *param);
+typedef void (*fgr_socket_rx_cb_t) (void *buffer, size_t length,
+                                    void *param);
 
 /** Function to call to trigger a reconnction: matches the
  * function signature of fgr_socket_channel_failed().
@@ -88,7 +88,7 @@ void *param);
  * @param context reconnect_cb_param as passed to
  *                fgr_socket_receive_start().
  */
-typedef void (*fgr_socket_reconnect_cb_t)(void **context);
+typedef void (*fgr_socket_reconnect_cb_t) (void **context);
 
 /* ----------------------------------------------------------------
  * FUNCTIONS: SIMPLE OPERATIONS
@@ -135,9 +135,9 @@ int32_t fgr_socket_set_non_blocking(int sock, int32_t timeout_seconds);
  *                                          value from esp_err_t.
  */
 int32_t fgr_socket_enable_tcp_keep_alive(int sock,
-int32_t tcp_keep_alive_idle_time_seconds,
-int32_t tcp_keep_alive_probe_interval_seconds,
-size_t tcp_keep_alive_count);
+                                         int32_t tcp_keep_alive_idle_time_seconds,
+                                         int32_t tcp_keep_alive_probe_interval_seconds,
+                                         size_t tcp_keep_alive_count);
 
 /** Disable Nagle's algorithm on the log socket; more likely
  * to spot socket failures early this way.
@@ -201,7 +201,7 @@ int32_t fgr_socket_connect(int sock, const char *server_ip, uint16_t port);
  *                    negative error code from esp_err_t.
  */
 int32_t fgr_socket_connect_start(int sock, const char *server_ip,
-uint16_t port, void **context);
+                                 uint16_t port, void **context);
 
 /** Check if a connection attempt that was started with a call
  * to fgr_socket_connect_start() has completed.
@@ -290,7 +290,7 @@ void fgr_socket_connect_stop(void **context);
  * @return            ESP_OK on success, else a negative value from esp_err_t.
  */
 int32_t fgr_socket_channel_start(const char *server_ip, uint16_t port,
-int *sock, void **context);
+                                 int *sock, void **context);
 
 /** May be called after fgr_socket_channel_start() and will ensure that a
  * connection is re-made on failure.  A task is created to
@@ -328,12 +328,11 @@ int *sock, void **context);
  *                           and cfg_cb() when they are called; may be NULL.
  *
  */
-int32_t fgr_socket_channel_maintain(void **context,
-size_t heartbeat_seconds,
-fgr_socket_channel_cb_t heartbeat_cb,
-fgr_socket_channel_cb_t cfg_cb,
-fgr_socket_channel_down_cb_t down_cb,
-void *cb_param);
+int32_t fgr_socket_channel_maintain(void **context, size_t heartbeat_seconds,
+                                    fgr_socket_channel_cb_t heartbeat_cb,
+                                    fgr_socket_channel_cb_t cfg_cb,
+                                    fgr_socket_channel_down_cb_t down_cb,
+                                    void *cb_param);
 
 /** If fgr_socket_channel_maintain() has been called with
  * a heartbeat callback, you should call this function
@@ -378,7 +377,7 @@ void fgr_socket_channel_stop(void **context);
  * @return               ESP_OK on success, else a negative value from esp_err_t.
  */
 int32_t fgr_socket_send(int sock, const void *buffer, size_t length,
-size_t retry_count);
+                        size_t retry_count);
 
 /** As fgr_socket_send() but don't call any of the logging
  * APIs on failure: used by fgr_log() to avoid recursion.
@@ -391,7 +390,7 @@ size_t retry_count);
  * @return               ESP_OK on success, else a negative value from esp_err_t.
  */
 int32_t fgr_socket_send_no_log(int sock, const void *buffer, size_t length,
-size_t retry_count);
+                               size_t retry_count);
 
 /** Start receiving data on a socket.  A task is created to receive
  * data and rx_cb() may be called from this task until
@@ -419,10 +418,10 @@ size_t retry_count);
  *                           from esp_err_t.
  */
 int32_t fgr_socket_receive_start(int sock,
-fgr_socket_reconnect_cb_t reconnect_cb,
-void **reconnect_cb_param,
-fgr_socket_rx_cb_t rx_cb,
-void *rx_cb_param, void **context);
+                                 fgr_socket_reconnect_cb_t reconnect_cb,
+                                 void **reconnect_cb_param,
+                                 fgr_socket_rx_cb_t rx_cb,
+                                 void *rx_cb_param, void **context);
 
 /** Stop receiving data on a socket.  When this function has returned
  * reconnect_cb() and rx_cb() will no longer be called.

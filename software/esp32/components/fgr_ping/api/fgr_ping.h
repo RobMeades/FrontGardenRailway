@@ -37,7 +37,7 @@ extern "C" {
  *
  * @param param  ping_loss_cb_param as passed to fgr_ping_start().
  */
-typedef void (*fgr_ping_loss_cb_t)(void *param);
+typedef void (*fgr_ping_loss_cb_t) (void *param);
 
 /* ----------------------------------------------------------------
  * FUNCTIONS
@@ -69,10 +69,10 @@ typedef void (*fgr_ping_loss_cb_t)(void *param);
  *                           negative value from esp_err_t.
  */
 int32_t fgr_ping_start(const char *hostname, int32_t count,
-int32_t interval_ms, int32_t timeout_ms,
-int32_t data_size,
-fgr_ping_loss_cb_t ping_loss_cb,
-void *ping_loss_cb_param);
+                       int32_t interval_ms, int32_t timeout_ms,
+                       int32_t data_size,
+                       fgr_ping_loss_cb_t ping_loss_cb,
+                       void *ping_loss_cb_param);
 
 #ifdef __cplusplus
 }

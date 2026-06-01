@@ -69,9 +69,8 @@ int32_t fgr_ota_init();
  * @return                  ESP_OK on success, else a negative
  *                          value from esp_err_t.
  */
-int32_t fgr_ota_update(const char *update_file_url,
-const char *server_cert_pem,
-int32_t timeout_ms);
+int32_t fgr_ota_update(const char *update_file_url, const char *server_cert_pem,
+                       int32_t timeout_ms);
 
 #ifdef __cplusplus
 }

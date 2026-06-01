@@ -143,9 +143,9 @@ int32_t fgr_network_init(const char *ssid, const char *password,
         // password, the authentication mode is not "open",
         // also if ssid and password are within length
         if ((((password == NULL) || (strlen(password) == 0)) ||
-                (auth_mode != WIFI_AUTH_OPEN)) &&
-                ((ssid != NULL) && (strlen(ssid) < sizeof(wifi_config.sta.ssid))) &&
-                ((password == NULL) || (strlen(password) < sizeof(wifi_config.sta.password))))  {
+             (auth_mode != WIFI_AUTH_OPEN)) &&
+            ((ssid != NULL) && (strlen(ssid) < sizeof(wifi_config.sta.ssid))) &&
+            ((password == NULL) || (strlen(password) < sizeof(wifi_config.sta.password))))  {
 
             // Initialize network interface
             err = esp_netif_init();

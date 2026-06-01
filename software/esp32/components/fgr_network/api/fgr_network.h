@@ -66,8 +66,8 @@ extern "C" {
  *                  esp_err_t.
  */
 int32_t fgr_network_init(const char *ssid, const char *password,
-wifi_auth_mode_t auth_mode,
-bool reduced_tx_power);
+                         wifi_auth_mode_t auth_mode,
+                         bool reduced_tx_power);
 
 /** Deinitialise networking.  This function should be called ONCE
  * at end of day.
@@ -93,7 +93,8 @@ bool fgr_network_is_connected();
  * that the return value is at least one byte smaller (to
  * allow for the null terminator) than length.
  *
- * @param url        the url string, e.g. HTTPS://blah:port/something.
+ * @param url        the
+                                                        }; // ESP_LOG_VERBOSE  url string, e.g. HTTPS://blah:port/something.
  * @param buffer     the buffer to put the hostname (blah) into.
  * @param length     the number of bytes of storage at buffer.
  * @return           the number of bytes written to buffer.

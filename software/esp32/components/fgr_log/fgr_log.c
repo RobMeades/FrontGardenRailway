@@ -139,8 +139,7 @@ static context_t g_context = {
 static const esp_log_level_t g_fgr_to_esp_log_level[] = {ESP_LOG_DEBUG,  // FGR_LOG_LEVEL_DEBUG (0)
                                                          ESP_LOG_INFO,   // FGR_LOG_LEVEL_INFO (1)
                                                          ESP_LOG_WARN,   // FGR_LOG_LEVEL_WARN (2)
-                                                         ESP_LOG_ERROR
-                                                        }; // FGR_LOG_LEVEL_ERROR (3)
+                                                         ESP_LOG_ERROR}; // FGR_LOG_LEVEL_ERROR (3)
 
 // Table to convert an esp_log_level_t (the index) into an fgr_log_level_t.
 static const fgr_log_level_t g_esp_to_fgr_log_level[] = {FGR_LOG_LEVEL_ERROR,  // ESP_LOG_NONE (0)
@@ -148,8 +147,7 @@ static const fgr_log_level_t g_esp_to_fgr_log_level[] = {FGR_LOG_LEVEL_ERROR,  /
                                                          FGR_LOG_LEVEL_WARN,   // ESP_LOG_WARN (2)
                                                          FGR_LOG_LEVEL_INFO,   // ESP_LOG_INFO (3)
                                                          FGR_LOG_LEVEL_DEBUG,  // ESP_LOG_DEBUG (4)
-                                                         FGR_LOG_LEVEL_DEBUG
-                                                        }; // ESP_LOG_VERBOSE (5)
+                                                         FGR_LOG_LEVEL_DEBUG}; // ESP_LOG_VERBOSE (5)
 
 /* ----------------------------------------------------------------
  * STATIC FUNCTIONS: MISC

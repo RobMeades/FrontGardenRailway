@@ -233,6 +233,8 @@ typedef struct {
 } backtrace_t;
 
 // Storage for an overflowing task name.
+// Note: name _must_ be at the start of the structure,
+// see vApplicationStackOverflowHook() for why.
 typedef struct {
     char name[FGR_UTIL_TASK_NAME_MAX_LENGTH];
 } stack_overflow_task_t;
@@ -280,8 +282,7 @@ static const fgr_debug_colour_t g_state_to_breathe_colour[] = {FGR_DEBUG_LED_COL
                                                                FGR_DEBUG_LED_COLOUR_STOPPED,   // FGR_STATE_STOPPED (3)
                                                                FGR_DEBUG_LED_COLOUR_BAD,       // FGR_STATE_DISCONNECTED (4)
                                                                FGR_DEBUG_LED_COLOUR_BAD,       // FGR_STATE_GENERIC_FAILED (5)
-                                                               FGR_DEBUG_LED_COLOUR_BAD
-                                                              };      // FGR_STATE_HARDWARE_FAILURE (6)
+                                                               FGR_DEBUG_LED_COLOUR_BAD};      // FGR_STATE_HARDWARE_FAILURE (6)
 
 #  endif  // #if defined(CONFIG_FGR_DEBUG_LED_PIN) && (CONFIG_FGR_DEBUG_LED_PIN >= 0)
 #endif    // #  if defined(CONFIG_FGR_DEBUG_LED_SPI_NUM) && (CONFIG_FGR_DEBUG_LED_SPI_NUM > 1)
@@ -1145,22 +1146,32 @@ int32_t fgr_debug_panic_log(const char *tag, const char *prefix,
 // Stack overflow callback.
 void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
 {
-    stack_overflow_task_t stack_overflow_task;
-    strlcpy(stack_overflow_task.name, pcTaskName, sizeof(stack_overflow_task.name));
-    FGR_RRAM_SET(stack_overflow_task);
+    // Don't want to put a shadow variable on the stack in this
+    // case, so call the fgr_rram function directly.
+
+    size_t length = strlen(pcTaskName);
+
+    if (length > FGR_UTIL_TASK_NAME_MAX_LENGTH - 1) {
+        length = FGR_UTIL_TASK_NAME_MAX_LENGTH - 1;
+    }
+    length++; // Include the terminator in the copy
+
+    // This is safe as "name" is at the start of stack_overflow_task_t.
+    fgr_rram_set(pcTaskName, length, &g_stack_overflow_task_rr_container,
+                 sizeof(g_stack_overflow_task_rr_container));
 }
 
 // Get the name of a task that had a stack overflow.
 int32_t fgr_debug_stack_overflow_get(char *buffer)
 {
     int32_t length = 0;
-    stack_overflow_task_t stack_overflow_task;
+    stack_overflow_task_t stack_overflow_task = {0};
 
     if (FGR_RRAM_GET(stack_overflow_task) == ESP_OK) {
         length = strlen(stack_overflow_task.name);
         if (buffer && (length > 0)) {
             strlcpy(buffer, stack_overflow_task.name,
-                    FGR_DEBUG_BACKTRACE_BUFFER_LENGTH);
+                    FGR_UTIL_TASK_NAME_MAX_LENGTH);
             FGR_RRAM_CLEAR(stack_overflow_task);
         }
     }

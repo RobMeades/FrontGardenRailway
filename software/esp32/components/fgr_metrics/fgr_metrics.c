@@ -246,8 +246,8 @@ static int32_t retained_ram_set()
     // RAM variable, hence we can't use the FGR_RRAM macros here.
     // Instead, call the function directly using the retained RAM
     // variable name that we know FGR_RRAM_DEFINE() creates.
-    return fgr_rram_set(&g_storage_rr_container, &g_context.storage,
-                        sizeof(g_storage_rr_container));
+    return fgr_rram_set(&g_context.storage, sizeof(g_context.storage),
+                        &g_storage_rr_container, sizeof(g_storage_rr_container));
 }
 
 // Set a simple metric.
@@ -617,8 +617,8 @@ static cJSON *encode_json_event_inner(const fgr_metrics_event_t *event)
         if (event->count > 0) {
             const char *t = event->time.since_boot_not_power_cycle ? "tb" : "tp";
             if (!json ||
-                    !cJSON_AddNumberToObject(json, t, (double) event->time.seconds) ||
-                    !cJSON_AddNumberToObject(json, "n", (double) event->count)) {
+                !cJSON_AddNumberToObject(json, t, (double) event->time.seconds) ||
+                !cJSON_AddNumberToObject(json, "n", (double) event->count)) {
                 cJSON_Delete(json);
                 json = NULL;
             } else {
@@ -704,8 +704,7 @@ static int32_t encode_json_event_bool(const fgr_metrics_event_bool_t *event_bool
 }
 
 // JSON encode the stack min free metric.
-static int32_t encode_json_stack_min_free_lowest(const fgr_metrics_stack_min_free_lowest_t
-                                                 *stack_min_free_lowest,
+static int32_t encode_json_stack_min_free_lowest(const fgr_metrics_stack_min_free_lowest_t *stack_min_free_lowest,
                                                  const char *name, cJSON *json)
 {
     int32_t err = -ESP_ERR_INVALID_ARG;
@@ -815,26 +814,22 @@ int32_t fgr_metrics_init(fgr_metrics_report_cb_t cb,
 
     // Do some checking
     if (FGR_UTIL_ARRAY_LENGTH(g_metric_type) != FGR_METRIC_COUNT) {
-        ESP_LOGE(TAG,
-                 "The number of entries in g_metric_type [%d] must match the number of entries in fgr_metrics_t [%d]!",
+        ESP_LOGE(TAG, "The number of entries in g_metric_type [%d] must match the number of entries in fgr_metrics_t [%d]!",
                  FGR_UTIL_ARRAY_LENGTH(g_metric_type), FGR_METRIC_COUNT);
         err = -ESP_ERR_INVALID_SIZE;
     }
     if (FGR_UTIL_ARRAY_LENGTH(g_metric_name) != FGR_METRIC_COUNT) {
-        ESP_LOGE(TAG,
-                 "The number of entries in g_metric_name [%d] must match the number of entries in fgr_metrics_t [%d]!",
+        ESP_LOGE(TAG, "The number of entries in g_metric_name [%d] must match the number of entries in fgr_metrics_t [%d]!",
                  FGR_UTIL_ARRAY_LENGTH(g_metric_name), FGR_METRIC_COUNT);
         err = -ESP_ERR_INVALID_SIZE;
     }
     if (FGR_UTIL_ARRAY_LENGTH(g_metric_json_name) != FGR_METRIC_COUNT) {
-        ESP_LOGE(TAG,
-                 "The number of entries in g_metric_json_name [%d] must match the number of entries in fgr_metrics_t [%d]!",
+        ESP_LOGE(TAG, "The number of entries in g_metric_json_name [%d] must match the number of entries in fgr_metrics_t [%d]!",
                  FGR_UTIL_ARRAY_LENGTH(g_metric_json_name), FGR_METRIC_COUNT);
         err = -ESP_ERR_INVALID_SIZE;
     }
     if (FGR_UTIL_ARRAY_LENGTH(g_metric_reset_at_boot) != FGR_METRIC_COUNT) {
-        ESP_LOGE(TAG,
-                 "The number of entries in g_metric_reset_at_boot [%d] must match the number of entries in fgr_metrics_t [%d]!",
+        ESP_LOGE(TAG, "The number of entries in g_metric_reset_at_boot [%d] must match the number of entries in fgr_metrics_t [%d]!",
                  FGR_UTIL_ARRAY_LENGTH(g_metric_reset_at_boot), FGR_METRIC_COUNT);
         err = -ESP_ERR_INVALID_SIZE;
     }

@@ -73,10 +73,10 @@
 extern const char g_server_cert_pem_start[] asm("_binary_ca_cert_pem_start");
 
 // An OTA data write buffer ready to write to the flash
-static char g_ota_write_data[OTA_BUFFER_SIZE + 1] = { 0 };
+static char g_ota_write_data[OTA_BUFFER_SIZE + 1] = {0};
 
 // Buffer for accumulating header data
-static char g_header_buffer[OTA_FILE_HEADER_BUFFER_SIZE] = { 0 };
+static char g_header_buffer[OTA_FILE_HEADER_BUFFER_SIZE] = {0};
 
 /* ----------------------------------------------------------------
  * STATIC FUNCTIONS
@@ -139,8 +139,7 @@ static int32_t parse_firmware_header(const char *buffer, size_t buffer_len,
            &buffer[sizeof(esp_image_header_t) + sizeof(esp_image_segment_header_t)],
            sizeof(esp_app_desc_t));
 
-    ESP_LOGI(TAG,
-             "sizeof(esp_image_header_t): %d, sizeof(esp_image_segment_header_t) %d, sizeof(esp_app_desc_t) %d",
+    ESP_LOGI(TAG, "sizeof(esp_image_header_t): %d, sizeof(esp_image_segment_header_t) %d, sizeof(esp_app_desc_t) %d",
              sizeof(esp_image_header_t),
              sizeof(esp_image_segment_header_t), sizeof(esp_app_desc_t));
     ESP_LOGI(TAG, "New firmware version: %s.", new_app_info.version);
@@ -253,11 +252,9 @@ int32_t fgr_ota_update(const char *update_file_url,
     const esp_partition_t *running = esp_ota_get_running_partition();
 
     if (configured != running) {
-        ESP_LOGW(TAG,
-                 "Configured OTA boot partition at offset 0x%08"PRIx32", but running from offset 0x%08"PRIx32".",
+        ESP_LOGW(TAG, "Configured OTA boot partition at offset 0x%08"PRIx32", but running from offset 0x%08"PRIx32".",
                  configured->address, running->address);
-        ESP_LOGW(TAG,
-                 "(This can happen if either the OTA boot data or preferred boot image become corrupted somehow.)");
+        ESP_LOGW(TAG, "(This can happen if either the OTA boot data or preferred boot image become corrupted somehow.)");
     }
     ESP_LOGI(TAG, "Running partition type %d subtype %d (offset 0x%08"PRIx32").",
              running->type, running->subtype, running->address);
@@ -275,8 +272,8 @@ int32_t fgr_ota_update(const char *update_file_url,
     if (client != NULL) {
         err = esp_http_client_open(client, 0);
         if (err == ESP_OK) {
-            int content_length = esp_http_client_fetch_headers(client);
-            ESP_LOGI(TAG, "Content-Length: %d.", content_length);
+            int32_t content_length = esp_http_client_fetch_headers(client);
+            ESP_LOGI(TAG, "Content-Length: %d.", (int) content_length);
         } else {
             ESP_LOGE(TAG, "Failed to open HTTP connection: %s.", esp_err_to_name(err));
         }
