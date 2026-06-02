@@ -85,7 +85,7 @@ typedef struct {
 // Top-level context.
 typedef struct {
     SemaphoreHandle_t lock;
-    fgr_monitor_cb_t cb;
+    fgr_util_cb_t cb;
     void *cb_param;
     TaskHandle_t handle;
     bool running;
@@ -366,7 +366,7 @@ static void espidf_wdt_set(int32_t timeout_seconds)
  * -------------------------------------------------------------- */
 
 // Initialise monitoring.
-int32_t fgr_monitor_init(fgr_monitor_cb_t cb, void *cb_param)
+int32_t fgr_monitor_init(fgr_util_cb_t cb, void *cb_param)
 {
     int32_t err = ESP_OK;
     context_task_t *context_task = &g_context.context_task;

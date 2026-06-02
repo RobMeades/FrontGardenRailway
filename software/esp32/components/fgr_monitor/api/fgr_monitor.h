@@ -25,6 +25,8 @@
 extern "C" {
 #endif
 
+#include "fgr_util.h" // for fgr_util_cb_t
+
 /* ----------------------------------------------------------------
  * COMPILE-TIME MACROS
  * -------------------------------------------------------------- */
@@ -112,13 +114,6 @@ typedef enum {
     FGR_MONITOR_ABORT_REASON_CONTROLLER_WDT = -6
 } fgr_monitor_abort_reason_t;
 
-/** A callback to the main application that will be called just
- * before abort().
- *
- * @param param  cb_param as passed to fgr_monitor_init().
- */
-typedef void (*fgr_monitor_cb_t)(void *param);
-
 /* ----------------------------------------------------------------
  * FUNCTIONS
  * -------------------------------------------------------------- */
@@ -145,7 +140,7 @@ typedef void (*fgr_monitor_cb_t)(void *param);
  * @return           ESP_OK on success, else a negative value from
  *                   esp_err_t.
  */
-int32_t fgr_monitor_init(fgr_monitor_cb_t cb, void *cb_param);
+int32_t fgr_monitor_init(fgr_util_cb_t cb, void *cb_param);
 
 /** Feed the monitor task watchdog; this will also reset the
  * ESP-IDF HW watchdog, and will do so even if fgr_monitor_init()
@@ -243,7 +238,7 @@ int32_t fgr_monitor_abort_reason_get(char *task_name);
  *               may be NULL.
  * @param level  the log level to log the abort as.
  * @return       1 if there was an abort, ESP_OK if not, else a
- *               negative error code from esp_err_t.
+ *               negative errcontext_taskor code from esp_err_t.
  */
 int32_t fgr_monitor_abort_reason_log(const char *tag, const char *prefix,
                                      esp_log_level_t level);

@@ -94,6 +94,12 @@ extern "C" {
  * TYPES
  * -------------------------------------------------------------- */
 
+/** A callback with a single parameter.
+ *
+ * @param param  the user parameter.
+ */
+typedef void (*fgr_util_cb_t)(void *param);
+
 /* ----------------------------------------------------------------
  * FUNCTIONS: STATIC
  * -------------------------------------------------------------- */

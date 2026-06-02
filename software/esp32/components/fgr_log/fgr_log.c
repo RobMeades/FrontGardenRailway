@@ -933,4 +933,19 @@ bool fgr_log_msg_receive_handler_cb(fgr_msg_t *msg, void *param)
     return handled;
 }
 
+// Return true if logging is connected to the log server.
+bool fgr_log_is_connected()
+{
+    bool is_connected = false;
+
+    if (g_context.lock) {
+
+        CONTEXT_LOCK(g_context.lock, "fgr_log_is_connected()");
+        is_connected = g_context.connected;
+        CONTEXT_UNLOCK(g_context.lock, "fgr_log_is_connected()");
+    }
+
+    return is_connected;
+}
+
 // End of file

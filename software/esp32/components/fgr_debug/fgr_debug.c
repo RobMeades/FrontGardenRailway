@@ -1127,7 +1127,7 @@ int32_t fgr_debug_panic_log(const char *tag, const char *prefix,
     int32_t length = fgr_debug_panic_str_get(NULL);
     if (length > 0) {
         err = -ESP_ERR_NO_MEM;
-        char *buffer = malloc(length);
+        char *buffer = malloc(length + 1);  // +1 for terminator
         if (buffer) {
             fgr_debug_panic_str_get(buffer);
             debug_log(tag, prefix, buffer, level);

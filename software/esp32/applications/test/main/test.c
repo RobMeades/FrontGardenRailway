@@ -192,11 +192,19 @@ static void send_cb(void *param)
     fgr_debug_led_flash(FGR_DEBUG_LED_SHORT_MS, FGR_DEBUG_LED_COLOUR_MSG_SENT);
 }
 
-// Callback for when an abort occurs.
-static void abort_cb(void *param)
+// Callback for when a restart is about to happen.
+static void restart_cb(void *param)
 {
     (void) param;
     // Nothing to do.
+}
+
+// Callback to confirm to the OTA code that all is good.
+static bool is_good_cb(void *param)
+{
+    (void) param;
+    // Nothing to check.
+    return true;
 }
 
 /* ----------------------------------------------------------------
@@ -227,7 +235,8 @@ static int32_t init(context_t *context)
     // Initialise all of the libraries
     if (err == ESP_OK) {
         err = fgr_lib_init((const char *) g_server_cert_pem_start,
-                           state_cb, send_cb, abort_cb, context);
+                           state_cb, send_cb, restart_cb, is_good_cb,
+                           context);
     }
 
     // Node-specific initialisation goes here

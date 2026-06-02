@@ -247,7 +247,7 @@ class HandleFirmware:
         <!DOCTYPE html>
         <html>
         <head>
-            <title>Garden Railway Fleet Control Dashboard</title>
+            <title>FGR OTA Dashboard</title>
             <meta name="viewport" content="width=device-width, initial-scale=1">
             <style>
                 body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 40px; background: #f4f7f6; color: #333; }}
@@ -274,7 +274,7 @@ class HandleFirmware:
             </style>
         </head>
         <body>
-            <h1>Garden Railway Node OTA Programming</h1>
+            <h1>FGT OTA Dashboard</h1>
             <p class="sub">Deployment tracking dashboard.</p>
             <table>
                 <thead>

@@ -57,6 +57,7 @@ typedef struct {
     fgr_state_t state;
     SemaphoreHandle_t lock;
     bool running;
+    bool is_good;
     uint32_t reporting_interval_seconds;
 } context_t;
 
@@ -270,11 +271,18 @@ static void send_cb(void *param)
     fgr_debug_led_flash(FGR_DEBUG_LED_SHORT_MS, FGR_DEBUG_LED_COLOUR_MSG_SENT);
 }
 
-// Callback for when an abort occurs.
-static void abort_cb(void *param)
+// Callback for when a restart is about to happen.
+static void restart_cb(void *param)
 {
     (void) param;
     fgr_rcwl9610a_deinit();
+}
+
+// Callback to confirm to the OTA code that all is good.
+static bool is_good_cb(void *param)
+{
+    context_t *context = (context_t *) param;
+    return context->is_good;
 }
 
 /* ----------------------------------------------------------------
@@ -305,7 +313,8 @@ static int32_t init(context_t *context)
     // Initialise all of the libraries
     if (err == ESP_OK) {
         err = fgr_lib_init((const char *) g_server_cert_pem_start,
-                           state_cb, send_cb, abort_cb, context);
+                           state_cb, send_cb, restart_cb, is_good_cb,
+                           context);
     }
 
     // Node-specific initialisation
@@ -342,6 +351,7 @@ static void do_node(context_t *context)
             int32_t err = fgr_rcwl9610a_read();
             if (err >= 0) {
                 ESP_LOGI(TAG, "Distance %d mm.", err);
+                context->is_good = true;
             }
         }
         vTaskDelay(pdMS_TO_TICKS(1000));

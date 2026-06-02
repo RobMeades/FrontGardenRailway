@@ -187,6 +187,12 @@ void fgr_msg_deinit();
  */
 int32_t fgr_msg_rssi_cb_set(fgr_msg_rssi_cb_t cb, void *cb_param);
 
+/** Determine if messaging is connected to the controller.
+ *
+ * @return true if messaging is connected, else false.
+ */
+bool fgr_msg_is_connected();
+
 /* ----------------------------------------------------------------
  * FUNCTIONS: SENDING
  * -------------------------------------------------------------- */

@@ -11,5 +11,6 @@
 
 idf_component_register(SRCS "fgr_ota.c"
                        INCLUDE_DIRS "api"
-                       PRIV_REQUIRES esp_http_client app_update nvs_flash fgr_util fgr_metrics fgr_monitor fgr_nvs)
+                       PRIV_REQUIRES esp_http_client app_update nvs_flash esp_timer fgr_util fgr_metrics fgr_monitor fgr_msg fgr_lib fgr_nvs
+                       REQUIRES fgr_util)
 target_compile_options(${COMPONENT_LIB} PRIVATE -Wall -Wextra -Werror)

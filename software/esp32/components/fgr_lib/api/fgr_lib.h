@@ -25,8 +25,10 @@
 extern "C" {
 #endif
 
-// Needed for fgr_msg_state_cb_t and fgr_msg_send_cb_t,
+// Needed for fgr_msg_state_cb_t and fgr_msg_send_cb_t.
 #include "fgr_msg.h"
+#include "fgr_ota.h"  // for fgr_ota_is_good_cb_t
+#include "fgr_util.h" // for fgr_util_cb_t
 
 /* ----------------------------------------------------------------
  * COMPILE-TIME MACROS
@@ -74,24 +76,33 @@ extern "C" {
  *                              fashion after the* send, so don't do much in
  *                              your callback unless you are* happy to delay
  *                              message transmission.
- * @param cb                    a callback that will be called just before
- *                              fgr_monitor calls abort() to cause a system
+ * @param restart_cb            a callback that will be called just before
+ *                              fgr_monitor calls abort() or fgr_ota()
+ *                              triggers a roll-back, i.e. causing a system
  *                              restart; use this to do any absolutely
  *                              necessary tidy-ups in your application, noting
  *                              that the system may be unstable at the time,
  *                              otherwise the monitor task wouldn't be calling
  *                              abort().  You don't need to call fgr_lib_deinit()
- *                              (fgr_monitor will do that), though there is no
- *                              harm in doing so.  May be NULL.
- * @param cb_param              parameter that will be passed to state_cb()
- *                              and send_cb() when they are called; may be NULL.
+ *                              (fgr_monitor/fgr_ota will do that), though
+ *                              there is no harm in doing so.  May be NULL.
+ * @param app_is_good_cb        callback that must be called by the application
+ *                              once it has established that all is fine within
+ *                              FGR_OTA_VERIFY_TIME_SECONDS of boot; this is
+ *                              so that the OTA library knows that a new
+ *                              software version is working fine.  May be
+ *                              NULL (in which case everything will be
+ *                              assumed to be OK).
+ * @param cb_param              parameter that will be passed to state_cb(),
+ *                              send_cb(), restart_cb() and app_is_good_cb()
+ *                              when they are called; may be NULL.
  * @return                      ESP_OK on success, else a negative value
  *                              from esp_err_t.
 
  */
 int32_t fgr_lib_init(const char *ota_server_cert_pem, fgr_msg_state_cb_t state_cb,
-                     fgr_msg_send_cb_t send_cb, fgr_monitor_cb_t monitor_cb,
-                     void *cb_param);
+                     fgr_msg_send_cb_t send_cb, fgr_util_cb_t restart_cb,
+                     fgr_ota_app_is_good_cb_t app_is_good_cb, void *cb_param);
 
 /** Deinitialise all libraries.  Should only be called ONCE at end of day.
  */

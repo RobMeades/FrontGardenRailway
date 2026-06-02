@@ -33,6 +33,8 @@
 #include "esp_http_client.h"
 #include "esp_flash_partitions.h"
 #include "esp_partition.h"
+#include "esp_task_wdt.h"
+#include "esp_timer.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "errno.h"
@@ -42,6 +44,7 @@
 #include "fgr_metrics.h"
 #include "fgr_monitor.h"
 #include "fgr_nvs.h"
+#include "fgr_lib.h"
 #include "fgr_ota.h"
 
 /* ----------------------------------------------------------------
@@ -63,9 +66,23 @@
 // OTA URL buffer
 #define OTA_URL_SIZE 256
 
+#ifndef FGR_OTA_TASK_STACK_SIZE
+#  define FGR_OTA_TASK_STACK_SIZE (1024 * 4)
+#endif
+
 /* ----------------------------------------------------------------
  * TYPES
  * -------------------------------------------------------------- */
+
+// Context.
+typedef struct {
+    TaskHandle_t handle;
+    fgr_ota_lib_is_good_cb_t msg_is_good_cb;
+    fgr_ota_lib_is_good_cb_t log_is_good_cb;
+    fgr_ota_app_is_good_cb_t app_is_good_cb;
+    fgr_util_cb_t cb;
+    void *cb_param;
+} context_t;
 
 /* ----------------------------------------------------------------
  * VARIABLES
@@ -74,11 +91,14 @@
 // The CA certificate for the OTA update server.
 extern const char g_server_cert_pem_start[] asm("_binary_ca_cert_pem_start");
 
-// An OTA data write buffer ready to write to the flash
+// An OTA data write buffer ready to write to the flash.
 static char g_ota_write_data[OTA_BUFFER_SIZE + 1] = {0};
 
-// Buffer for accumulating header data
+// Buffer for accumulating header data.
 static char g_header_buffer[OTA_FILE_HEADER_BUFFER_SIZE] = {0};
+
+// Context.
+static context_t g_context = {0};
 
 /* ----------------------------------------------------------------
  * STATIC FUNCTIONS
@@ -225,10 +245,10 @@ static int32_t version_get(const char *version_str,
 // Determine if an update is required based on version number;
 // a positive number means an update is required, zero means no
 // update is required, a negative number indicates an error.
-// Format of version number is expected to be vX.Y.devZ_githash,
+// Format of version number is expected to be vX.Y.dZ_githash,
 // where X is the application version, Y the system version,
 // both two digits, Z a development version number (which may
-// be absent) so something like v1.2.1.5.dev12346_a4b2c1d.
+// be absent) so something like v1.2.1.5.d12346_a4b2c.
 static int32_t is_update_required(const char *version_downloading_str,
                                   const char *version_current_str)
 {
@@ -338,15 +358,73 @@ static int32_t parse_firmware_header(const char *buffer, size_t buffer_len,
     return 1;  // Update in progress
 }
 
+// Task to monitor the state of a new software image.
+static void task_ota(void *param)
+{
+    context_t *context = (context_t *) param;
+    int64_t start_us = esp_timer_get_time();
+    bool verified = false;
+    bool msg_is_good = false;
+    bool log_is_good = false;
+    bool app_is_good = false;
+
+    esp_task_wdt_add(NULL);
+
+    while (!verified && (esp_timer_get_time() - start_us < FGR_OTA_VERIFY_TIME_SECONDS * 1000000)) {
+        // Need to be good once in FGR_OTA_VERIFY_TIME_SECONDS
+        msg_is_good = msg_is_good || !context->msg_is_good_cb || context->msg_is_good_cb();
+        log_is_good = log_is_good || !context->log_is_good_cb || context->log_is_good_cb();
+        app_is_good = app_is_good || !context->app_is_good_cb || context->app_is_good_cb(context->cb_param);
+        verified = msg_is_good && log_is_good && app_is_good;
+        esp_task_wdt_reset();
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+
+    esp_task_wdt_delete(NULL);
+
+    if (verified) {
+        ESP_LOGW(TAG, "New OTA'ed software image verified, all is good.");
+        esp_ota_mark_app_valid_cancel_rollback();
+    } else {
+        ESP_LOGE(TAG, "==================================================");
+        ESP_LOGE(TAG, "New OTA'ed image failed verification.");
+        if (!msg_is_good) {
+            ESP_LOGE(TAG, "Messaging did not report good within %d second(s).",
+                     FGR_OTA_VERIFY_TIME_SECONDS);
+        }
+        if (!log_is_good) {
+            ESP_LOGE(TAG, "Logging did not report good within %d second(s).",
+                     FGR_OTA_VERIFY_TIME_SECONDS);
+        }
+        if (!app_is_good) {
+            ESP_LOGE(TAG, "Application did not report good within %d second(s).",
+                     FGR_OTA_VERIFY_TIME_SECONDS);
+        }
+        ESP_LOGE(TAG, "Rolling back...");
+        ESP_LOGE(TAG, "==================================================");
+        if (context->cb) {
+            context->cb(context->cb_param);
+        }
+        fgr_lib_deinit();
+        esp_ota_mark_app_invalid_rollback_and_reboot();
+    }
+
+    vTaskDelete(NULL);
+}
+
 /* ----------------------------------------------------------------
  * PUBLIC FUNCTIONS
  * -------------------------------------------------------------- */
 
 // Initialise OTA.
-int32_t fgr_ota_init()
+int32_t fgr_ota_init(fgr_ota_lib_is_good_cb_t msg_is_good_cb,
+                     fgr_ota_lib_is_good_cb_t log_is_good_cb,
+                     fgr_ota_app_is_good_cb_t app_is_good_cb,
+                     fgr_util_cb_t cb, void *cb_param)
 {
     uint8_t sha_256[HASH_LEN] = { 0 };
     esp_partition_t partition;
+    int32_t err = ESP_OK;
 
     // Get sha256 digest for the partition table
     partition.address   = ESP_PARTITION_TABLE_OFFSET;
@@ -367,16 +445,46 @@ int32_t fgr_ota_init()
     print_sha256(sha_256, "SHA-256 for current firmware: ");
 
     const esp_partition_t *running = esp_ota_get_running_partition();
+    ESP_LOGI(TAG, "Running from partition \"%s\"", running->label);
     esp_ota_img_states_t ota_state;
     if (esp_ota_get_state_partition(running, &ota_state) == ESP_OK) {
+        ESP_LOGI(TAG, "Partition state at boot is %d.", ota_state);
         if (ota_state == ESP_OTA_IMG_PENDING_VERIFY) {
-            ESP_LOGI(TAG, "No diagnostic, continuing execution ...");
-            esp_ota_mark_app_valid_cancel_rollback();
+            if (msg_is_good_cb || log_is_good_cb || app_is_good_cb) {
+                ESP_LOGW(TAG, "New image pending verification, monitoring"
+                         " for %d second(s).", FGR_OTA_VERIFY_TIME_SECONDS);
+                // Start a task to monitor the behaviour of the new image
+                err = -ESP_ERR_NO_MEM;
+                g_context.msg_is_good_cb = msg_is_good_cb;
+                g_context.log_is_good_cb = log_is_good_cb;
+                g_context.app_is_good_cb = app_is_good_cb;
+                g_context.cb = cb;
+                g_context.cb_param = cb_param;
+                if (xTaskCreate(task_ota, TAG, FGR_OTA_TASK_STACK_SIZE,
+                                &g_context, 3, &g_context.handle) == pdPASS) {
+                    err = ESP_OK;
+                } else {
+                    g_context.msg_is_good_cb = NULL;
+                    g_context.log_is_good_cb = NULL;
+                    g_context.app_is_good_cb = NULL;
+                    g_context.cb = NULL;
+                    g_context.cb_param = NULL;
+                }
+            } else {
+                ESP_LOGI(TAG, "No image diagnostic, assuming all is good.");
+                esp_ota_mark_app_valid_cancel_rollback();
+            }
         }
+    } else {
+        ESP_LOGW(TAG, "Unable to obtain partition state.");
     }
 
-    // Initialize NVS
-    return fgr_nvs_init();
+    if (err == ESP_OK) {
+        // Initialize NVS
+        err = fgr_nvs_init();
+    }
+
+    return err;
 }
 
 // Perform an OTA update, requires networking to have been established.
@@ -438,7 +546,7 @@ int32_t fgr_ota_update(const char *update_file_url,
             update_partition = esp_ota_get_next_update_partition(NULL);
             assert(update_partition != NULL);
             ESP_LOGI(TAG, "Writing to partition subtype %d at offset 0x%"PRIx32".",
-                    update_partition->subtype, update_partition->address);
+                     update_partition->subtype, update_partition->address);
 
             bool image_header_was_checked = false;
             size_t header_accumulated = 0;
@@ -473,7 +581,7 @@ int32_t fgr_ota_update(const char *update_file_url,
                         if (has_complete_header(header_accumulated)) {
                             ESP_LOGI(TAG, "Complete header accumulated (%d byte(s)).", header_accumulated);
                             int32_t parse_result = parse_firmware_header(g_header_buffer, header_accumulated,
-                                                                        running, &update_handle, update_partition);
+                                                                         running, &update_handle, update_partition);
                             if (parse_result == 1) {
                                 // Update in progress
                                 image_header_was_checked = true;
@@ -517,7 +625,7 @@ int32_t fgr_ota_update(const char *update_file_url,
                             // Server says transfer is complete, but we don't have enough header data
                             ESP_LOGE(TAG, "Connection closed before accumulating enough header data!");
                             ESP_LOGE(TAG, "Accumulated only %zu bytes, need at least %zu.",
-                                    header_accumulated, has_complete_header_min_size());
+                                     header_accumulated, has_complete_header_min_size());
                             err = ESP_ERR_NOT_FINISHED;
                         } else if (zero_read_count >= max_zero_reads) {
                             // Too many consecutive zero reads - connection might be dead
@@ -583,8 +691,8 @@ int32_t fgr_ota_update(const char *update_file_url,
                     }
                 }
                 fgr_metrics_event_bool_set(FGR_METRIC_EVENT_BOOL_OTA_NVS_WRITE,
-                                        err == ESP_OK,
-                                        binary_file_length);
+                                           err == ESP_OK,
+                                           binary_file_length);
             }
         }
 

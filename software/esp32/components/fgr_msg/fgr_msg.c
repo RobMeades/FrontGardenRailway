@@ -695,6 +695,21 @@ int32_t fgr_msg_rssi_cb_set(fgr_msg_rssi_cb_t cb, void *cb_param)
     return err;
 }
 
+// Determine if messaging is connected to the controller.
+bool fgr_msg_is_connected()
+{
+    bool is_connected = false;
+
+    if (g_context.lock) {
+
+        CONTEXT_LOCK(g_context.lock, "fgr_msg_is_connected()");
+        is_connected = g_context.connected;
+        CONTEXT_UNLOCK(g_context.lock, "fgr_msg_is_connected()");
+    }
+
+    return is_connected;
+}
+
 /* ----------------------------------------------------------------
  * PUBLIC FUNCTIONS: SENDING
  * -------------------------------------------------------------- */

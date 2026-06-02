@@ -36,6 +36,7 @@
 #include "fgr_network.h"
 #include "fgr_debug.h"
 #include "fgr_metrics.h"
+#include "fgr_msg.h"
 #include "fgr_log.h"
 
 #include "fgr_lib.h"
@@ -70,7 +71,8 @@ static bool g_called = false;
 int32_t fgr_lib_init(const char *ota_server_cert_pem,
                      fgr_msg_state_cb_t state_cb,
                      fgr_msg_send_cb_t send_cb,
-                     fgr_monitor_cb_t monitor_cb,
+                     fgr_util_cb_t restart_cb,
+                     fgr_ota_app_is_good_cb_t app_is_good_cb,
                      void *cb_param)
 {
     int32_t err = ESP_OK;
@@ -93,7 +95,7 @@ int32_t fgr_lib_init(const char *ota_server_cert_pem,
         // Configure monitoring: monitors tasks so has to come after
         // fgr_task_init()
         if (err == ESP_OK) {
-            err = fgr_monitor_init(monitor_cb, cb_param);
+            err = fgr_monitor_init(restart_cb, cb_param);
         }
 
         // Configure metrics: needs tasks so has to come after
@@ -108,7 +110,8 @@ int32_t fgr_lib_init(const char *ota_server_cert_pem,
         // as there are some OTA-related steps that need to be
         // performed beforehand)
         if (err == ESP_OK) {
-            err = fgr_ota_init();
+            err = fgr_ota_init(fgr_msg_is_connected, fgr_log_is_connected,
+                               app_is_good_cb, restart_cb, cb_param);
         }
 
         // Configure our debug LED: do this after non-volatile

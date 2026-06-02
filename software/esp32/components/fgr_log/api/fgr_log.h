@@ -124,6 +124,13 @@ int32_t fgr_log_on();
  */
 bool fgr_log_msg_receive_handler_cb(fgr_msg_t *msg, void *param);
 
+/** Returns true if logging is connected to the log server,
+ * else false.
+ *
+ * @return  true if logging is connected, else false.
+ */
+bool fgr_log_is_connected();
+
 #ifdef __cplusplus
 }
 #endif
