@@ -1,0 +1,54 @@
+{
+  "system_version_file": "sdkconfig_fragments/system_version.txt",
+
+  "global_variants": [
+    "esp32s3-rgb-4mbyte",
+    "esp32s3-grb-4mbyte"
+  ],
+
+"variants_matrix": {
+    "esp32s3-rgb-4mbyte": {
+      "partition_table": "flash_4mbyte_partitions.csv",
+      "traits": [
+        "sdkconfig_fragments/chip_esp32s3",
+        "sdkconfig_fragments/flash_4mbyte",
+        "sdkconfig_fragments/led_multicolour"
+      ]
+    },
+    "esp32s3-grb-4mbyte": {
+      "partition_table": "flash_4mbyte_partitions.csv",
+      "traits": [
+        "sdkconfig_fragments/chip_esp32s3",
+        "sdkconfig_fragments/flash_4mbyte",
+        "sdkconfig_fragments/led_multicolour",
+        "sdkconfig_fragments/led_multicolour_grb"
+      ]
+    }
+  },
+
+  "applications": {
+    "test": {
+      "description": "Development/test node"
+    },
+    "level_gauge": {
+      "description": "Water tank level gauge transmitter",
+      "supported_variants": [
+        "esp32s3-rgb-4mbyte"
+      ]
+    }
+  },
+
+  "inventory": {
+      "10.10.3.2": { "app": "test",        "variant": "esp32s3-rgb-4mbyte" },
+      "10.10.3.3": { "app": "level_gauge", "variant": "esp32s3-rgb-4mbyte" },
+      "10.10.3.4": { "app": "test",        "variant": "esp32s3-grb-4mbyte" },
+      "10.10.3.5": { "app": "test",        "variant": "esp32s3-grb-4mbyte" },
+      "10.10.3.6": { "app": "test",        "variant": "esp32s3-grb-4mbyte" },
+      "10.10.3.7": { "app": "test",        "variant": "esp32s3-grb-4mbyte" },
+      "10.10.3.8": { "app": "test",        "variant": "esp32s3-grb-4mbyte" }
+    }
+}
+
+
+
+

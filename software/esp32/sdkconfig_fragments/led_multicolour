@@ -1,0 +1,4 @@
+# sdkconfig parameters specific to a multi-colour LED on pin 21 that expects colours in order RGB (and uses SPI HW block 2)
+
+CONFIG_FGR_DEBUG_LED_PIN=21
+CONFIG_FGR_DEBUG_LED_SPI_NUM=2

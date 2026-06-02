@@ -2,9 +2,12 @@ menu "FGR OTA Configuration"
 
     config FGR_OTA_FIRMWARE_UPGRADE_URL
         string "Firmware Upgrade URL"
-        default "https://10.10.3.1:8070/default.bin"
+        default "https://10.10.3.1:8070/update"
         help
-            URL of the firmware image.
+            URL of the firmware image, default designed to be used
+            with https_server.py running in differentiated mode;
+            for non-differentiated mode using a file name directly,
+            e.g. https://10.10.3.1:8070/default.bin
 
     config FGR_OTA_RECEIVE_TIMEOUT_MS
         int "OTA Receive Timeout in milliseconds"

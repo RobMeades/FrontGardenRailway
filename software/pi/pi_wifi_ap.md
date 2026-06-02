@@ -112,10 +112,6 @@ All of the ESP32 nodes will want to make an HTTPS connection to the access point
 
 - Create a directory off your home directory named `fw`.
 
-- Copy the `https_server.py` script to this directory with:
-
-  `cp ~/FrontGardenRailway/software/pi/https_server.py ~/fw`
-
 - `cd` to that directory and run SSL to create a key pair with:
 
   `openssl req -newkey rsa:2048 -x509 -days 36500 -nodes -out ca_cert.pem -keyout ca_key.pem`
@@ -130,7 +126,7 @@ All of the ESP32 nodes will want to make an HTTPS connection to the access point
 
 - On the Pi, run the script:
 
-  `python https_server.py`
+  `python ~/FrontGardenRailway/software/pi/https_server.py ~/fw`
 
 - Plug the same build PC into an ESP32, flash the newly created `test.bin` to the ESP32 and monitor the output of the ESP32.  You should see that the ESP connects to the Wi-Fi access point of the Pi, downloads at least the start of the file `default.bin` via HTTPS, realises it does not need to do an update and drops the HTTPS connection.
 
@@ -143,8 +139,8 @@ All of the ESP32 nodes will want to make an HTTPS connection to the access point
 
   [Service]
   Type=simple
-  WorkingDirectory=/home/<your home directory name>/fw/
-  ExecStart=python /home/<your home directory name>/fw/https_server.py
+  WorkingDirectory=/home/<your home directory name>/fw
+  ExecStart=python /home/<your home directory name>/FrontGardenRailway/software/pi/https_server.py
   KillSignal=SIGINT
   Restart=on-failure
 
@@ -165,6 +161,8 @@ All of the ESP32 nodes will want to make an HTTPS connection to the access point
   ...then take the power down and up again and repeat the check.
 
 - If you had hardened the Pi, put it back into read-only mode with the command `ro`.
+
+- NOTE: the way the HTTPS server works will change later (see "Proper OTA" in [`pi_installation.md`](pi_installation.md)) but for now this is good enough.
 
 # Log Server Setup
 The `log_server.py` script can be run on the Raspberry Pi to listen for log messages from all nodes and stuff the messages into the journal.  To get this script to run at boot, make sure port 5001 (the default port it will listen on) is open, then:

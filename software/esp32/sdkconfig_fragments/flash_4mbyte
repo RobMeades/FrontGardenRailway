@@ -1,0 +1,18 @@
+# sdkconfig parameters for an ESP32 device with 4 Mbytes flash
+
+# Use a custom partition table for best use of the 4 Mbyte flash
+CONFIG_PARTITION_TABLE_CUSTOM=y
+
+# Note: unfortunately it is not possible to specify the partition table
+# .csv file in here because ESP-IDF refuses to accept anything but a file
+# name that _must_ be in the project directory; that bit has to go in
+# the project's CMakeLists.txt, a couple of lines like this:
+#
+#  set(CONFIG_PARTITION_TABLE_CUSTOM_FILENAME "${CMAKE_CURRENT_SOURCE_DIR}/../../sdkconfig/flash_4mbyte_partitions.csv")
+#  set(CONFIG_PARTITION_TABLE_FILENAME        "${CMAKE_CURRENT_SOURCE_DIR}/../../sdkconfig/flash_4mbyte_partitions.csv")
+
+# Force a 4 Mbyte flash size, in case of misdetection
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+# Uncomment this line if, for some reason, you decide not to use a custom
+# partition table and want a good set of defaults for OTA
+# CONFIG_PARTITION_TABLE_TWO_OTA=y

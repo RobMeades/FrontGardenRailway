@@ -60,9 +60,13 @@ int32_t fgr_ota_init();
  * fgr_monitor_task_wdt_feed().
  *
  * @param update_file_url   the URL of the binary file, e.g.
- *                          https://10.10.3.1:8070/stepper.bin.
+ *                          https://10.10.3.1:8070/default.bin,
+ *                          or, if you are running https_server.py
+ *                          in differentaited mode,
+ *                          https://10.10.3.1:8070/update;
+ *                          cannot be NULL.
  * @param server_cert_pem   a pointer to the start of the CA
- *                          certificate of the server.
+ *                          certificate of the server, cannot be NULL.
  * @param timeout_ms        how long to hang around when downloading
  *                          the file in milliseconds, 5000 is a good
  *                          value.

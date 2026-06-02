@@ -1,16 +1,5 @@
 # Default sdkconfig parameters, designed to be used with OTA and for maximum robustness
 
-# Use a customer partition table for best use of the 4 Mbyte flash
-CONFIG_PARTITION_TABLE_CUSTOM=y
-CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
-CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
-
-# Force a 4 Mbyte flash size, in case of misdetection
-CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
-# Uncomment this line if, for some reason, you decide not to use a custom
-# partition table and want a good set of defaults for OTA
-# CONFIG_PARTITION_TABLE_TWO_OTA=y
-
 # Enable stack checking in all functions to catch memory corruption early
 CONFIG_COMPILER_STACK_CHECK_MODE_ALL=y
 

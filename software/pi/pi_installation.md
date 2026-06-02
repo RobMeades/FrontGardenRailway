@@ -65,3 +65,65 @@ For isolation, the Raspberry Pi should be installed on a VLAN of the home networ
 - Note: later you can use `log_viewer.py` to query the database.
 
 - Enter `ro` again to make the file system of the Raspberry Pi read-only once more.
+
+# Proper OTA
+Once you have a number of nodes on the front garden railway, all doing different things, potentially with different ESP32 hardware variants, you will need more comprehensive OTA management.  For this, the same `https_server.py` as you set up earlier will be used in `differentiated` mode.  In this mode it does not simply give a node the file that node requested, it looks up what that node should do and what HW variant it is in a JSON configuration file and supplies the correct binary.
+
+For details of the JSON configuration file, which is primarily used by [`nodes_esp32_deploy.py`](../esp32/nodes_esp32_deploy.py) see the [`README.md` in the ESP32 directory](../esp32/README.md)].  For the Raspberry Pi side, a couple of things are required:
+
+- [`nodes_esp32_deploy.py`](../esp32/nodes_esp32_deploy.py) uses `rsync` to move the generated binary files to the Raspberry Pi (over SSH).  To avoid having to enter a password, on the development machine where you run [`nodes_esp32_deploy.py`](../esp32/nodes_esp32_deploy.py), generate an SSH key with:
+
+  ```
+  ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519_fgr -N ""
+  ```
+  
+- This will create two files inside your `.ssh` directory: leave the private key `id_ed25519_fgr` where it is and never share it.
+
+- On the Pi, enter `rw` to make the file system writable.
+
+- On the machine where you generated the key pair, copy the public key `id_ed25519_fgr.pub` to the Pi with:
+
+  ```
+  ssh-copy-id -i ~/.ssh/id_ed25519_fgr.pub username@ip
+  ```
+
+  ...where `username` is replaced with your username on the Pi and `ip` with the IP address of the Pi.
+  
+- Check that this has worked by logging in manually from that machine with:
+
+   ```
+   ssh -i ~/.ssh/id_ed25519_fgr username@ip
+   ```
+
+...where `username` is replaced with your username on the Pi and `ip` with the IP address of the Pi; you should end up logged in without being prompted for a password.
+
+- [`nodes_esp32_deploy.py`](../esp32/nodes_esp32_deploy.py) will also need to be able to restart the `https_server` service: do that by, on the Raspberry Pi, entering `sudo visudo` and then adding, at the end:
+
+```
+<your username> ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart *
+```
+
+- The final step is to switch `https_server.py` into differentiated mode but BEFORE YOU DO THIS you need to have successfully run [`nodes_esp32_deploy.py`](../esp32/nodes_esp32_deploy.py), and at least once with the `--production` flag, to populate the `~/fw` directory on the Pi with a tree of properly named/versioned binary files.  Once you have done that, `sudo nano /lib/systemd/system/https_server.service` and change this line:
+
+  ```
+  ExecStart=python /home/<your home directory name>/FrontGardenRailway/software/pi/https_server.py
+  ```
+  
+  ...too:
+  
+  ```
+  ExecStart=python /home/<your home directory name>/FrontGardenRailway/software/pi/https_server.py . --node-cfg /home/<your home directory name>/FrontGardenRailway/software/esp32/nodes_esp32_deploy.json
+  ```
+
+  ...and reload the `https_service` with:
+  
+  ````
+  sudo systemctl daemon-reload
+  sudo systemctl start https_server
+  ```
+
+  The revised line points `https_server.py` at the `~/fw` directory as its working directory (you will have already populated this using [`nodes_esp32_deploy.py`](../esp32/nodes_esp32_deploy.py)), putting it into differentiated mode, and points it at [`nodes_esp32_deploy.json`](../esp32/nodes_esp32_deploy.json) for node configuration information.
+
+- In this mode `https_server.py` has a dashboard running at the URL `https://<pi IP address>:8070/dashboard`: in order to stop your browser objecting that it uses a self-signed certificate, on Windows copy `ca_cert.pem` to your PC, rename it to `ca_cert.crt`, double-click on it and `Install Certificate...` -> `Local Machine`, browse to `Trusted Root Certification Authorities` and place the certificate there, or on Linux copy `ca_cert.pem` to `/usr/local/share/ca-certificates/ca_fgr.crt` and run `sudo update-ca-certificates`.
+
+- Enter `ro` again to make the file system of the Raspberry Pi read-only once more.

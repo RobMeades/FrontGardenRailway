@@ -36,7 +36,9 @@
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "errno.h"
+#include "sdkconfig.h"
 
+#include "fgr_util.h"
 #include "fgr_metrics.h"
 #include "fgr_monitor.h"
 #include "fgr_nvs.h"
@@ -125,6 +127,149 @@ static size_t has_complete_header_min_size(void)
            sizeof(esp_app_desc_t) + 1024;  // + safety margin
 }
 
+// Parse a version string of the form a.b, where a and b are integers.
+static int32_t parse_version_digits(const char *version_str,
+                                    int32_t *version_major,
+                                    int32_t *version_minor,
+                                    char **endptr)
+{
+    int32_t err = -ESP_ERR_INVALID_ARG;
+    char *_endptr = 0;
+
+    if (version_str) {
+        if (!endptr) {
+            endptr = &_endptr;
+        }
+        err = -ESP_ERR_NOT_FOUND;
+        // Extract major version number
+        const char *start = version_str;
+        int32_t major = strtol(start, endptr, 10);
+
+        // Ensure we read a positive number and stopped exactly at a '.'
+        if ((*endptr != start) && (major >= 0) && (**endptr == '.')) {
+            // Extract minor version number
+            start = *endptr + 1;
+            int32_t minor = strtol(start, endptr, 10);
+
+            // Ensure we read a positive number
+            if ((*endptr != start) && (minor >= 0)) {
+                err = ESP_OK;
+                if (version_major) {
+                    *version_major = major;
+                }
+                if (version_minor) {
+                    *version_minor = minor;
+                }
+            }
+        }
+    }
+
+    return err;
+}
+
+// Parse a version string of the form v1.2.1.5.d12345_a4b2c.
+// version must be a pointer to storage for at least five
+// int32_t's and will be populated with X major/minor
+// i.e. 1.2 in the example above, followed by Y major/minor
+// i.e. 1.5 in the example above, followed by the dev version
+// number, i.e. 12345 if it is present (if not a negative
+// number will be returned).  version_git will be
+// populated with a pointer to a 5 digit Git hash, potentially
+// terminated with an x if dirty.
+// Only if X, Y and the git hash are all found will ESP_OK be
+// returned.
+static int32_t version_get(const char *version_str,
+                           int32_t *version,
+                           const char **version_git)
+{
+    int32_t err = -ESP_ERR_INVALID_ARG;
+
+    if (version_str && version) {
+        err = -ESP_ERR_NOT_FOUND;
+        if (*version_str == 'v') {
+            char *endptr;
+            // Parse out the application version, X
+            err = parse_version_digits(version_str + 1,
+                                       version, version + 1,
+                                       &endptr);
+            if (err == ESP_OK) {
+                err = -ESP_ERR_NOT_FOUND;
+                if (*endptr == '.') {
+                    // Parse out the system version, Y
+                    err = parse_version_digits(endptr + 1,
+                                               version + 2, version + 3,
+                                               &endptr);
+                }
+            }
+            if (err == ESP_OK) {
+                // Check for `.dev'
+                *(version + 4) = -1;
+                const char *start = endptr;
+                if ((strlen(start) >= 2) && (strncmp(start, ".d", 2) == 0)) {
+                    *(version+ 4) = strtol(start + 2, &endptr, 10);
+                }
+                err = -ESP_ERR_NOT_FOUND;
+                if ((*endptr == '_') && (strlen(endptr) >= 6)) {
+                    err = ESP_OK;
+                    if (version_git) {
+                        *version_git = endptr + 1;
+                    }
+                }
+            }
+        }
+    }
+
+    return err;
+}
+
+// Determine if an update is required based on version number;
+// a positive number means an update is required, zero means no
+// update is required, a negative number indicates an error.
+// Format of version number is expected to be vX.Y.devZ_githash,
+// where X is the application version, Y the system version,
+// both two digits, Z a development version number (which may
+// be absent) so something like v1.2.1.5.dev12346_a4b2c1d.
+static int32_t is_update_required(const char *version_downloading_str,
+                                  const char *version_current_str)
+{
+    int32_t version_downloading[5];
+    int32_t version_current[5];
+
+    int32_t err = version_get(version_downloading_str,
+                              &(version_downloading[0]), NULL);
+    if (err == ESP_OK) {
+        err = version_get(version_current_str,
+                          &(version_current[0]), NULL);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to parse internal version \"%s\"!", version_current_str);
+        }
+    } else {
+        ESP_LOGE(TAG, "Failed to parse version string in downloading file \"%s\"!", version_downloading_str);
+    }
+
+    if (err == ESP_OK) {
+        // Compare application and system version numbers
+        for (size_t x = 0; (x < 4) && (err == ESP_OK); x += 2) {
+            // Compare major version number
+            err = version_downloading[x] - version_current[x];
+            if (err == ESP_OK) {
+                // If those are the same, compare minor version number
+                err = version_downloading[x + 1] - version_current[x + 1];
+            }
+            if (err < 0) {
+                err = ESP_OK;
+            }
+        }
+        if (err == ESP_OK) {
+            // If all else is equal, a different development version
+            // number means do an OTA
+            err = (version_downloading[4] != version_current[4]);
+        }
+    }
+
+    return err;
+}
+
 // Parse and validate firmware header from accumulated buffer
 // return 1 if OTA should proceed, 0 if no update needed, -1 on error
 static int32_t parse_firmware_header(const char *buffer, size_t buffer_len,
@@ -151,15 +296,14 @@ static int32_t parse_firmware_header(const char *buffer, size_t buffer_len,
 
     const esp_partition_t *last_invalid_app = esp_ota_get_last_invalid_partition();
     esp_app_desc_t invalid_app_info;
-    if (last_invalid_app != NULL &&
-            esp_ota_get_partition_description(last_invalid_app, &invalid_app_info) == ESP_OK) {
+    if ((last_invalid_app != NULL) &&
+        esp_ota_get_partition_description(last_invalid_app, &invalid_app_info) == ESP_OK) {
         ESP_LOGI(TAG, "Last invalid firmware version: %s.", invalid_app_info.version);
     }
 
     // Check if this is the same as the last invalid version
     if (last_invalid_app != NULL) {
-        if (memcmp(invalid_app_info.version, new_app_info.version, sizeof(new_app_info.version)) == 0) {
-            ESP_LOGW(TAG, "New version is the same as previously invalid version.");
+        if (is_update_required(invalid_app_info.version, new_app_info.version) == ESP_OK) {
             ESP_LOGW(TAG, "The firmware with version %s previously failed to boot.", invalid_app_info.version);
             ESP_LOGW(TAG, "To prevent boot loop, we will not install this version.");
             return -1;  // This is still an error - don't install known bad version
@@ -167,8 +311,7 @@ static int32_t parse_firmware_header(const char *buffer, size_t buffer_len,
     }
 
     // Check if this is the same as the currently running version
-    if (memcmp(new_app_info.version, running_app_info.version, sizeof(new_app_info.version)) == 0) {
-        ESP_LOGW(TAG, "Current running version is the same as the new version.");
+    if (is_update_required(new_app_info.version, running_app_info.version) == ESP_OK) {
         ESP_LOGW(TAG, "No update needed - already running %s.", running_app_info.version);
         return 0;  // Success, but no update needed
     }
@@ -183,7 +326,7 @@ static int32_t parse_firmware_header(const char *buffer, size_t buffer_len,
 
     // Write any accumulated data that hasn't been written yet
     if (buffer_len > 0) {
-        err = esp_ota_write(*update_handle, (const void *)buffer, buffer_len);
+        err = esp_ota_write(*update_handle, (const void *) buffer, buffer_len);
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "esp_ota_write failed for accumulated data.");
             esp_ota_abort(*update_handle);
@@ -241,209 +384,217 @@ int32_t fgr_ota_update(const char *update_file_url,
                        const char *server_cert_pem,
                        int32_t timeout_ms)
 {
-    esp_err_t err = ESP_OK;
-    // update handle: set by esp_ota_begin(), must be freed via esp_ota_end()
-    esp_ota_handle_t update_handle = 0 ;
-    const esp_partition_t *update_partition = NULL;
+    esp_err_t err = ESP_ERR_INVALID_ARG;
 
-    ESP_LOGI(TAG, "Starting OTA");
+    if (update_file_url && server_cert_pem) {
+        err = ESP_OK;
+        // update handle: set by esp_ota_begin(), must be freed via esp_ota_end()
+        esp_ota_handle_t update_handle = 0 ;
+        const esp_partition_t *update_partition = NULL;
 
-    const esp_partition_t *configured = esp_ota_get_boot_partition();
-    const esp_partition_t *running = esp_ota_get_running_partition();
+        ESP_LOGI(TAG, "Starting OTA");
 
-    if (configured != running) {
-        ESP_LOGW(TAG, "Configured OTA boot partition at offset 0x%08"PRIx32", but running from offset 0x%08"PRIx32".",
-                 configured->address, running->address);
-        ESP_LOGW(TAG, "(This can happen if either the OTA boot data or preferred boot image become corrupted somehow.)");
-    }
-    ESP_LOGI(TAG, "Running partition type %d subtype %d (offset 0x%08"PRIx32").",
-             running->type, running->subtype, running->address);
+        const esp_partition_t *configured = esp_ota_get_boot_partition();
+        const esp_partition_t *running = esp_ota_get_running_partition();
 
-    esp_http_client_config_t config = {
-        .url = update_file_url,
-        .cert_pem = g_server_cert_pem_start,
-        .timeout_ms = timeout_ms,
-        .keep_alive_enable = true,
-        .buffer_size = 2048
-    };
-
-    // Begin the HTTP download
-    esp_http_client_handle_t client = esp_http_client_init(&config);
-    if (client != NULL) {
-        err = esp_http_client_open(client, 0);
-        if (err == ESP_OK) {
-            int32_t content_length = esp_http_client_fetch_headers(client);
-            ESP_LOGI(TAG, "Content-Length: %d.", (int) content_length);
-        } else {
-            ESP_LOGE(TAG, "Failed to open HTTP connection: %s.", esp_err_to_name(err));
+        if (configured != running) {
+            ESP_LOGW(TAG, "Configured OTA boot partition at offset 0x%08"PRIx32", but running from offset 0x%08"PRIx32".",
+                    configured->address, running->address);
+            ESP_LOGW(TAG, "(This can happen if either the OTA boot data or preferred boot image become corrupted somehow.)");
         }
-    } else {
-        ESP_LOGE(TAG, "Failed to initialise HTTP connection.");
-        err = ESP_ERR_NO_MEM;
-    }
+        ESP_LOGI(TAG, "Running partition type %d subtype %d (offset 0x%08"PRIx32").",
+                running->type, running->subtype, running->address);
 
-    // Get the file
-    int32_t binary_file_length = 0;
-    if (err == ESP_OK) {
-        update_partition = esp_ota_get_next_update_partition(NULL);
-        assert(update_partition != NULL);
-        ESP_LOGI(TAG, "Writing to partition subtype %d at offset 0x%"PRIx32".",
-                 update_partition->subtype, update_partition->address);
+        // Signal our current version to the server also
+        char url_buffer[256];
+        snprintf(url_buffer, sizeof(url_buffer), "%s?version=%s", update_file_url, CONFIG_APP_PROJECT_VERSION);
 
-        bool image_header_was_checked = false;
-        size_t header_accumulated = 0;
-        int32_t zero_read_count = 0;
-        int32_t max_zero_reads = 10;  // Maximum consecutive zero reads before considering connection dead
+        esp_http_client_config_t config = {
+            .url = url_buffer,
+            .cert_pem = g_server_cert_pem_start,
+            .timeout_ms = timeout_ms,
+            .keep_alive_enable = true,
+            .buffer_size = 2048
+        };
 
-        // State variables to control the loop
-        bool transfer_complete = false;
-        bool same_version_detected = false;
+        // Begin the HTTP download
+        esp_http_client_handle_t client = esp_http_client_init(&config);
+        if (client != NULL) {
+            err = esp_http_client_open(client, 0);
+            if (err == ESP_OK) {
+                int32_t content_length = esp_http_client_fetch_headers(client);
+                ESP_LOGI(TAG, "Content-Length: %d.", (int) content_length);
+            } else {
+                ESP_LOGE(TAG, "Failed to open HTTP connection: %s.", esp_err_to_name(err));
+            }
+        } else {
+            ESP_LOGE(TAG, "Failed to initialise HTTP connection.");
+            err = ESP_ERR_NO_MEM;
+        }
 
-        // Deal with all receive packets
-        while (err == ESP_OK && !transfer_complete && !same_version_detected) {
-            int32_t data_read = esp_http_client_read(client, g_ota_write_data, OTA_BUFFER_SIZE);
-            if (data_read < 0) {
-                ESP_LOGE(TAG, "Error: SSL data read error.");
-                err = ESP_ERR_INVALID_RESPONSE;
-            } else if (data_read > 0) {
-                // Reset zero read counter on successful read
-                zero_read_count = 0;
-                if (image_header_was_checked == false) {
-                    // Accumulate data until we have enough to parse the header
-                    if (header_accumulated + data_read <= OTA_FILE_HEADER_BUFFER_SIZE) {
-                        memcpy(g_header_buffer + header_accumulated, g_ota_write_data, data_read);
-                        header_accumulated += data_read;
-                        ESP_LOGI(TAG, "Accumulated %d/%d bytes for header.", header_accumulated,
-                                 OTA_FILE_HEADER_BUFFER_SIZE);
-                    } else {
-                        ESP_LOGE(TAG, "Header buffer overflow!");
-                        err = ESP_ERR_NO_MEM;
-                    }
-                    /* Check if we have accumulated enough data to parse the header */
-                    if (has_complete_header(header_accumulated)) {
-                        ESP_LOGI(TAG, "Complete header accumulated (%d byte(s)).", header_accumulated);
-                        int32_t parse_result = parse_firmware_header(g_header_buffer, header_accumulated,
-                                                                     running, &update_handle, update_partition);
-                        if (parse_result == 1) {
-                            // Update in progress
-                            image_header_was_checked = true;
-                            binary_file_length = header_accumulated;
-                            ESP_LOGI(TAG, "New version detected, continuing with OTA...");
-                            // Will continue to next iteration naturally
-                        } else if (parse_result == 0) {
-                            // Same version - no update needed
-                            ESP_LOGI(TAG, "Already running latest version, no update needed.");
-                            // Set flag to exit loop and go to infinite loop
-                            same_version_detected = true;
-                        } else { /* parse_result == -1 */
-                            // Fatal error (like invalid version that previously failed)
-                            ESP_LOGE(TAG, "Firmware header validation failed.");
-                            err = ESP_ERR_INVALID_RESPONSE;
+        // Get the file
+        int32_t binary_file_length = 0;
+        if (err == ESP_OK) {
+            update_partition = esp_ota_get_next_update_partition(NULL);
+            assert(update_partition != NULL);
+            ESP_LOGI(TAG, "Writing to partition subtype %d at offset 0x%"PRIx32".",
+                    update_partition->subtype, update_partition->address);
+
+            bool image_header_was_checked = false;
+            size_t header_accumulated = 0;
+            int32_t zero_read_count = 0;
+            int32_t max_zero_reads = 10;  // Maximum consecutive zero reads before considering connection dead
+
+            // State variables to control the loop
+            bool transfer_complete = false;
+            bool same_version_detected = false;
+
+            // Deal with all receive packets
+            while (err == ESP_OK && !transfer_complete && !same_version_detected) {
+                int32_t data_read = esp_http_client_read(client, g_ota_write_data, OTA_BUFFER_SIZE);
+                if (data_read < 0) {
+                    ESP_LOGE(TAG, "Error: SSL data read error.");
+                    err = ESP_ERR_INVALID_RESPONSE;
+                } else if (data_read > 0) {
+                    // Reset zero read counter on successful read
+                    zero_read_count = 0;
+                    if (image_header_was_checked == false) {
+                        // Accumulate data until we have enough to parse the header
+                        if (header_accumulated + data_read <= OTA_FILE_HEADER_BUFFER_SIZE) {
+                            memcpy(g_header_buffer + header_accumulated, g_ota_write_data, data_read);
+                            header_accumulated += data_read;
+                            ESP_LOGI(TAG, "Accumulated %d/%d bytes for header.", header_accumulated,
+                                    OTA_FILE_HEADER_BUFFER_SIZE);
+                        } else {
+                            ESP_LOGE(TAG, "Header buffer overflow!");
+                            err = ESP_ERR_NO_MEM;
+                        }
+                        /* Check if we have accumulated enough data to parse the header */
+                        if (has_complete_header(header_accumulated)) {
+                            ESP_LOGI(TAG, "Complete header accumulated (%d byte(s)).", header_accumulated);
+                            int32_t parse_result = parse_firmware_header(g_header_buffer, header_accumulated,
+                                                                        running, &update_handle, update_partition);
+                            if (parse_result == 1) {
+                                // Update in progress
+                                image_header_was_checked = true;
+                                binary_file_length = header_accumulated;
+                                ESP_LOGI(TAG, "New version detected, continuing with OTA...");
+                                // Will continue to next iteration naturally
+                            } else if (parse_result == 0) {
+                                // Same version - no update needed
+                                ESP_LOGI(TAG, "Already running latest version, no update needed.");
+                                // Set flag to exit loop and go to infinite loop
+                                same_version_detected = true;
+                            } else { /* parse_result == -1 */
+                                // Fatal error (like invalid version that previously failed)
+                                ESP_LOGE(TAG, "Firmware header validation failed.");
+                                err = ESP_ERR_INVALID_RESPONSE;
+                            }
+                        } else {
+                            ESP_LOGI(TAG, "Still accumulating header data (need more than %zu byte(s), currently at %zu).",
+                                    has_complete_header_min_size(), header_accumulated);
+                            // Need to keep accumulating - will continue naturally
                         }
                     } else {
-                        ESP_LOGI(TAG, "Still accumulating header data (need more than %zu byte(s), currently at %zu).",
-                                 has_complete_header_min_size(), header_accumulated);
-                        // Need to keep accumulating - will continue naturally
+                        // Header already processed, write data directly
+                        err = esp_ota_write(update_handle, (const void *)g_ota_write_data, data_read);
+                        if (err != ESP_OK) {
+                            ESP_LOGE(TAG, "esp_ota_write failed.");
+                        }
+                        binary_file_length += data_read;
                     }
-                } else {
-                    // Header already processed, write data directly
-                    err = esp_ota_write(update_handle, (const void *)g_ota_write_data, data_read);
-                    if (err != ESP_OK) {
-                        ESP_LOGE(TAG, "esp_ota_write failed.");
-                    }
-                    binary_file_length += data_read;
-                }
-                // Feed the watchdog
-                fgr_monitor_task_wdt_feed(NULL);
-            } else if (data_read == 0) {
-                // Handle zero read - this could be temporary or permanent
-                zero_read_count++;
-                ESP_LOGI(TAG, "Zero read #%d, header_accumulated=%d, header_checked=%d.",
-                         zero_read_count, header_accumulated, image_header_was_checked);
-                // If we haven't checked the header yet, we need to be careful
-                if (!image_header_was_checked) {
-                    // We haven't accumulated enough header data yet - this zero read might be temporary
-                    if (esp_http_client_is_complete_data_received(client) == true) {
-                        // Server says transfer is complete, but we don't have enough header data
-                        ESP_LOGE(TAG, "Connection closed before accumulating enough header data!");
-                        ESP_LOGE(TAG, "Accumulated only %zu bytes, need at least %zu.",
-                                 header_accumulated, has_complete_header_min_size());
-                        err = ESP_ERR_NOT_FINISHED;
-                    } else if (zero_read_count >= max_zero_reads) {
-                        // Too many consecutive zero reads - connection might be dead
-                        ESP_LOGE(TAG, "Too many zero reads (%d) while accumulating header.", zero_read_count);
-                        err = ESP_ERR_INVALID_RESPONSE;
+                    // Feed the watchdog
+                    fgr_monitor_task_wdt_feed(NULL);
+                } else if (data_read == 0) {
+                    // Handle zero read - this could be temporary or permanent
+                    zero_read_count++;
+                    ESP_LOGI(TAG, "Zero read #%d, header_accumulated=%d, header_checked=%d.",
+                            zero_read_count, header_accumulated, image_header_was_checked);
+                    // If we haven't checked the header yet, we need to be careful
+                    if (!image_header_was_checked) {
+                        // We haven't accumulated enough header data yet - this zero read might be temporary
+                        if (esp_http_client_is_complete_data_received(client) == true) {
+                            // Server says transfer is complete, but we don't have enough header data
+                            ESP_LOGE(TAG, "Connection closed before accumulating enough header data!");
+                            ESP_LOGE(TAG, "Accumulated only %zu bytes, need at least %zu.",
+                                    header_accumulated, has_complete_header_min_size());
+                            err = ESP_ERR_NOT_FINISHED;
+                        } else if (zero_read_count >= max_zero_reads) {
+                            // Too many consecutive zero reads - connection might be dead
+                            ESP_LOGE(TAG, "Too many zero reads (%d) while accumulating header.", zero_read_count);
+                            err = ESP_ERR_INVALID_RESPONSE;
+                        } else {
+                            // Temporary zero read - wait a bit and continue
+                            ESP_LOGI(TAG, "Temporary zero read during header accumulation, waiting...");
+                            vTaskDelay(pdMS_TO_TICKS(100));
+                            // Will continue naturally
+                        }
                     } else {
-                        // Temporary zero read - wait a bit and continue
-                        ESP_LOGI(TAG, "Temporary zero read during header accumulation, waiting...");
-                        vTaskDelay(pdMS_TO_TICKS(100));
-                        // Will continue naturally
-                    }
-                } else {
-                    // We've already processed the header, now handle zero reads normally
-                    if (errno == ECONNRESET || errno == ENOTCONN) {
-                        ESP_LOGE(TAG, "Connection closed, errno = %d.", errno);
-                        err = ESP_ERR_NOT_FINISHED;
-                    } else if (esp_http_client_is_complete_data_received(client) == true) {
-                        ESP_LOGI(TAG, "Connection closed - transfer complete.");
-                        transfer_complete = true;
-                    } else if (zero_read_count >= max_zero_reads) {
-                        ESP_LOGE(TAG, "Too many zero reads (%d) after header, connection may be dead.", zero_read_count);
-                        err = ESP_ERR_INVALID_RESPONSE;
-                    } else {
-                        // Small delay to avoid busy-looping when no data available
-                        ESP_LOGI(TAG, "Temporary zero read, waiting for more data...");
-                        vTaskDelay(pdMS_TO_TICKS(50));
-                        // Will continue naturally
+                        // We've already processed the header, now handle zero reads normally
+                        if (errno == ECONNRESET || errno == ENOTCONN) {
+                            ESP_LOGE(TAG, "Connection closed, errno = %d.", errno);
+                            err = ESP_ERR_NOT_FINISHED;
+                        } else if (esp_http_client_is_complete_data_received(client) == true) {
+                            ESP_LOGI(TAG, "Connection closed - transfer complete.");
+                            transfer_complete = true;
+                        } else if (zero_read_count >= max_zero_reads) {
+                            ESP_LOGE(TAG, "Too many zero reads (%d) after header, connection may be dead.", zero_read_count);
+                            err = ESP_ERR_INVALID_RESPONSE;
+                        } else {
+                            // Small delay to avoid busy-looping when no data available
+                            ESP_LOGI(TAG, "Temporary zero read, waiting for more data...");
+                            vTaskDelay(pdMS_TO_TICKS(50));
+                            // Will continue naturally
+                        }
                     }
                 }
             }
-        }
 
-        if ((err != ESP_OK) && !same_version_detected) {
-            // Download failed and it wasn't because we dropped it because the
-            // downloading file was the same version as we are running
+            if ((err != ESP_OK) && !same_version_detected) {
+                // Download failed and it wasn't because we dropped it because the
+                // downloading file was the same version as we are running
+                fgr_metrics_event_bool_set(FGR_METRIC_EVENT_BOOL_OTA_CONNECTION, false, 0);
+            }
+        } else {
+            // Connection failed
             fgr_metrics_event_bool_set(FGR_METRIC_EVENT_BOOL_OTA_CONNECTION, false, 0);
         }
-    } else {
-        // Connection failed
-        fgr_metrics_event_bool_set(FGR_METRIC_EVENT_BOOL_OTA_CONNECTION, false, 0);
-    }
 
-    // Either have a new binary file or don't need one, finish the OTA
-    if (err == ESP_OK) {
-        ESP_LOGI(TAG, "Total write binary data length: %d.", binary_file_length);
-        if (esp_http_client_is_complete_data_received(client)) {
-            err = esp_ota_end(update_handle);
-            update_handle = 0;
-            if (err == ESP_OK) {
-                err = esp_ota_set_boot_partition(update_partition);
+        // Either have a new binary file or don't need one, finish the OTA
+        if (err == ESP_OK) {
+            ESP_LOGI(TAG, "Total write binary data length: %d.", binary_file_length);
+            if (esp_http_client_is_complete_data_received(client)) {
+                err = esp_ota_end(update_handle);
+                update_handle = 0;
                 if (err == ESP_OK) {
-                    ESP_LOGI(TAG, "Prepare to restart system!");
-                    fgr_metrics_event_set(FGR_METRIC_EVENT_LOCAL_REBOOT, 0);
-                    // Reset the stack min free metric as it means nothing after reprogramming
-                    fgr_metrics_reset(FGR_METRIC_SIMPLE_HEAP_MIN_FREE);
-                    esp_restart();
-                }
-            } else {
-                if (err == ESP_ERR_OTA_VALIDATE_FAILED) {
-                    ESP_LOGE(TAG, "Image validation failed, image is corrupted.");
+                    err = esp_ota_set_boot_partition(update_partition);
+                    if (err == ESP_OK) {
+                        ESP_LOGI(TAG, "Prepare to restart system!");
+                        fgr_metrics_event_set(FGR_METRIC_EVENT_LOCAL_REBOOT, 0);
+                        // Reset the stack min free metric as it means nothing after reprogramming
+                        fgr_metrics_reset(FGR_METRIC_SIMPLE_HEAP_MIN_FREE);
+                        esp_restart();
+                    }
                 } else {
-                    ESP_LOGE(TAG, "esp_ota_end failed (%s)!", esp_err_to_name(err));
+                    if (err == ESP_ERR_OTA_VALIDATE_FAILED) {
+                        ESP_LOGE(TAG, "Image validation failed, image is corrupted.");
+                    } else {
+                        ESP_LOGE(TAG, "esp_ota_end failed (%s)!", esp_err_to_name(err));
+                    }
                 }
+                fgr_metrics_event_bool_set(FGR_METRIC_EVENT_BOOL_OTA_NVS_WRITE,
+                                        err == ESP_OK,
+                                        binary_file_length);
             }
-            fgr_metrics_event_bool_set(FGR_METRIC_EVENT_BOOL_OTA_NVS_WRITE,
-                                       err == ESP_OK,
-                                       binary_file_length);
         }
-    }
 
-    // Clean-up
-    if (client) {
-        http_cleanup(client);
-    }
-    if (update_handle) {
-        esp_ota_abort(update_handle);
+        // Clean-up
+        if (client) {
+            http_cleanup(client);
+        }
+        if (update_handle) {
+            esp_ota_abort(update_handle);
+        }
     }
 
     // Returns ESP_OK or negative error code from esp_err_t
