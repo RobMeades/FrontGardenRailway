@@ -280,7 +280,7 @@ class HandleFirmware:
                 <thead>
                     <tr>
                         <th>IP</th>
-                        <th>Build type</th>
+                        <th>Application (Variant)</th>
                         <th>Track</th>
                         <th>Reported Software Version</th>
                         <th>Deployment Status</th>
