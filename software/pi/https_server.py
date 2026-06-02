@@ -275,17 +275,17 @@ class HandleFirmware:
         </head>
         <body>
             <h1>FGT OTA Dashboard</h1>
-            <p class="sub">Deployment tracking dashboard.</p>
+            <p class="sub">Software version dashboard.</p>
             <table>
                 <thead>
                     <tr>
-                        <th>Node Network IP</th>
-                        <th>Target Identity Allocation</th>
-                        <th>Target Track</th>
-                        <th>Reporting Boot Version</th>
-                        <th>Deployment Status Flags</th>
-                        <th>Last Vital Signal</th>
-                        <th>Operational Dispatch Action</th>
+                        <th>IP</th>
+                        <th>Build type</th>
+                        <th>Track</th>
+                        <th>Reported Software Version</th>
+                        <th>Deployment Status</th>
+                        <th>Last Boot</th>
+                        <th>Change Track</th>
                     </tr>
                 </thead>
                 <tbody>
