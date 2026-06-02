@@ -109,7 +109,7 @@ For details of the JSON configuration file, which is primarily used by [`nodes_e
   ExecStart=python /home/<your home directory name>/FrontGardenRailway/software/pi/https_server.py
   ```
   
-  ...too:
+  ...to:
   
   ```
   ExecStart=python /home/<your home directory name>/FrontGardenRailway/software/pi/https_server.py . --node-cfg /home/<your home directory name>/FrontGardenRailway/software/esp32/nodes_esp32_deploy.json
@@ -117,7 +117,7 @@ For details of the JSON configuration file, which is primarily used by [`nodes_e
 
   ...and reload the `https_service` with:
   
-  ````
+  ```
   sudo systemctl daemon-reload
   sudo systemctl start https_server
   ```
