@@ -188,6 +188,14 @@ extern "C" {
 // plus the terminator.
 #define FGR_DEBUG_BACKTRACE_BUFFER_LENGTH ((FGR_DEBUG_BACKTRACE_DEPTH_MAX * FGR_DEBUG_BACKTRACE_NUMBER_LENGTH) + 1)
 
+// The length of the hash of an image file.
+#define FGR_DEBUG_HASH_LENGTH 32
+
+// The amount of storage needed for the hash of the current
+// binary as a null-terminated human-readable string; used
+// by fgr_debug_get_hash().
+#define FGR_DEBUG_HASH_BUFFER_LENGTH ((FGR_DEBUG_HASH_LENGTH * 2) + 1)
+
 /* ----------------------------------------------------------------
  * TYPES
  * -------------------------------------------------------------- */
@@ -339,13 +347,18 @@ void fgr_debug_led_breathe_set(fgr_debug_colour_t colour);
  *                        before calling this function again.  If
  *                        non-NULL the backtrace storage is emptied
  *                        on return.
+ * @param hash            a pointer to at least FGR_DEBUG_HASH_BUFFER_LENGTH
+ *                        bytes of storage for the hash of the software
+ *                        version at the time of the panic; a human-
+ *                        readable string, null-terminated will be
+ *                        placed here.  May be NULL.
  * @return                if there have been one or more panics since
  *                        power-on, the number of uint32_t values
  *                        that would be populated in backtrace if it
  *                        were non-NULL, ESP_OK if there have been no
  *                        panics.
  */
-int32_t fgr_debug_panic_get(uint32_t *backtrace_copy);
+int32_t fgr_debug_panic_get(uint32_t *backtrace_copy, char *hash);
 
 /** As fgr_debug_panic_get() but populates a buffer with
  * a string that can be passed straight to xtensa-esp-elf-addr2line,
@@ -353,24 +366,32 @@ int32_t fgr_debug_panic_get(uint32_t *backtrace_copy);
  *
  * See also fgr_debug_panic_str_get();
  *
- * @param buffer a pointer to storage for up to
- *               FGR_DEBUG_BACKTRACE_BUFFER_LENGTH that will be
- *               populated with the backtrace string; may be NULL,
- *               in which case the backtrace is retained and you
- *               might use the return value to size your storage
- *               before calling this function again.  If non-NULL
- *               the backtrace storage is emptied on return.
- * @return       if there have been one or more panics since
- *               power-on, the number of characters that would be
- *               populated in buffer (i.e. what strlen() would
- *               return) if it were not NULL, ESP_OK if there have
- *               been no panics.
+ * @param backtrace_str a pointer to storage for up to
+ *                      FGR_DEBUG_BACKTRACE_BUFFER_LENGTH that will be
+ *                      populated with the null-termkinated backtrace
+ *                      string; may be NULL, in which case the backtrace
+ *                      is retained and you might use the return value
+ *                      to size your storage before calling this function
+ *                      again.  If non-NULL the backtrace storage is
+ *                      emptied on return.
+ * @param hash          a pointer to at least FGR_DEBUG_HASH_BUFFER_LENGTH
+ *                      bytes of storage for the hash of the software
+ *                      version at the time of the panic; a human-
+ *                      readable string, null-terminated, will be
+ *                      placed here.  May be NULL.
+ * @return              if there have been one or more panics since
+ *                      power-on, the number of characters that would be
+ *                      populated in buffer (i.e. what strlen() would
+ *                      return) if it were not NULL, ESP_OK if there have
+ *                      been no panics.
  */
-int32_t fgr_debug_panic_str_get(char *buffer);
+int32_t fgr_debug_panic_str_get(char *backtrace_str, char *hash);
 
 /** As fgr_debug_panic_str_get() but instead of returning a
- * string, logs the backtrace string (if present) to an ESP_LOGx()
- * macro with the given ESP-IDF log level.
+ * string, logs the backtrace string (if present) to two ESP_LOGx()
+ * macros with the given ESP-IDF log level: the first will contain
+ * the hash of the software version when the panic occurred, the
+ * second will contain the backtrace.
  *
  * @param tag    the tag to apply to the log message; may be NULL
  *               in which case whatever is the default tag for
@@ -438,7 +459,10 @@ int32_t fgr_debug_stack_overflow_log(const char *tag, const char *prefix,
  * ...and you must have set CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
  * and likely CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y in your sdkconfig
  * file.  With this configuration, core dumps are automatically sent
- * by ESP-IDF when a crash occurs.
+ * by ESP-IDF when a crash occurs.  You will need the hash of the
+ * software version that was running at the time to decode it: this
+ * can be obtained from the panic backtrace that will have been saved
+ * at the same time as the core dump.
  *
  * @param tag    the tag to apply to the log message; may be NULL
  *               in which case whatever is the default tag for
@@ -476,6 +500,16 @@ bool fgr_debug_msg_receive_handler_cb(fgr_msg_t *msg, void *param);
 /** Print out our MAC address if possible.
  */
 void fgr_debug_print_mac_address();
+
+/** Get the hash of the current firmware version as a
+ * human-readable string.
+ *
+ * @param buffer a pointer to at least
+ *               FGR_DEBUG_HASH_BUFFER_LENGTH bytes of
+ *               storage for the hash; the string
+ *               written to buffer will be null-terminated.
+ */
+void fgr_debug_get_hash(char *buffer);
 
 /** Create a hex dump of data in a provided buffer.
  *

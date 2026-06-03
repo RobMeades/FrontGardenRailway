@@ -38,6 +38,7 @@ def parse_args(script_dir):
     parser.add_argument("--staging", default="staging", help="Path to the local staging and archive folder")
     parser.add_argument("--variant", help="Force compilation of a single specific hardware variant only")
     parser.add_argument("--app", help="Force compilation of a single specific application only")
+    parser.add_argument("--ip", help="Target a specific node by its IP address to automatically determine app and variant")
     parser.add_argument("--incremental", action="store_true", help="Skip fullclean pass for faster debugging builds")
     parser.add_argument("--production", action="store_true",
                         help="Build a clean production release (disables ephemeral .dev suffix and prompts for version checks).")
@@ -105,13 +106,32 @@ def main():
     with open(args.node_cfg, "r") as f:
         node_cfg = json.load(f)
 
+    # =========================================================================
+    # IP RESOLUTION LOGIC
+    # =========================================================================
+    target_app = args.app
+    target_variant = args.variant
+
+    if args.ip:
+        print(f"Resolving application and variant configuration for IP: {args.ip}")
+        inventory = node_cfg.get("inventory", {})
+
+        if args.ip in inventory:
+            target_app = inventory[args.ip].get("app")
+            target_variant = inventory[args.ip].get("variant")
+            print(f"[INFO] IP Matched -> Application: '{target_app}', Variant: '{target_variant}'")
+        else:
+            print(f"[ERROR] IP address '{args.ip}' could not be found in the configuration inventory.")
+            print(f"Available IPs: {', '.join(inventory.keys())}")
+            sys.exit(1)
+
     workspace_root = script_dir
     git_hash = get_git_hash()
 
     system_version_path = os.path.join(workspace_root, node_cfg.get("system_version_file", "sdkconfig/system_version.txt"))
     system_version = read_version_file(system_version_path)
 
-    apps_to_build = [args.app] if args.app else node_cfg["applications"].keys()
+    apps_to_build = [target_app] if target_app else node_cfg["applications"].keys()
 
     for app in apps_to_build:
         app_path = os.path.join(workspace_root, "applications", app)
@@ -124,7 +144,7 @@ def main():
         supported_variants = app_meta.get("supported_variants", node_cfg["global_variants"])
 
         for variant in supported_variants:
-            if args.variant and variant != args.variant:
+            if target_variant and variant != target_variant:
                 continue
 
             print(f"\n=======================================================")

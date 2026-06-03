@@ -261,6 +261,7 @@ static void deinit(context_t *context)
 // What this node does.
 static void do_node(context_t *context)
 {
+    int32_t x = 0;
     // Main loop
     while (context->running) {
 
@@ -268,6 +269,14 @@ static void do_node(context_t *context)
 
         vTaskDelay(pdMS_TO_TICKS(1000));
         esp_task_wdt_reset();
+        x++;
+#if 0
+        if (x > 10) {
+            ESP_LOGI(TAG, "kaboom!");
+            int32_t y = 0;
+            x = x / y;
+        }
+#endif
     }
 }
 

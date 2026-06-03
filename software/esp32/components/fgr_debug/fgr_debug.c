@@ -37,6 +37,7 @@
 #include "driver/spi_master.h"
 #include "esp_core_dump.h"
 #include "esp_partition.h"
+#include "esp_app_desc.h"
 #include "mbedtls/base64.h"
 
 #include "fgr_util.h"
@@ -228,6 +229,7 @@ typedef struct {
 
 // Storage for a backtrace.
 typedef struct {
+    uint8_t hash[32];
     uint8_t length;
     uint32_t address_list[FGR_DEBUG_BACKTRACE_DEPTH_MAX];
 } backtrace_t;
@@ -781,6 +783,18 @@ static void debug_log(const char *tag, const char *prefix,
     }
 }
 
+// Format a 32-byte hash into a null-terminated string.
+static void hash_str(char *buffer_str, const uint8_t *hash)
+{
+    if (buffer_str && hash) {
+        // Convert the raw 32-byte binary SHA256 into a readable hex string
+        for (size_t x = 0; x < FGR_DEBUG_HASH_LENGTH; x++) {
+            buffer_str += sprintf(buffer_str, "%02x", *(hash + x));
+        }
+        *buffer_str = '\0'; // null-terminate
+    }
+}
+
 /* ----------------------------------------------------------------
  * PUBLIC FUNCTIONS: INITIALISE/DEINITIALISE
  * -------------------------------------------------------------- */
@@ -1018,6 +1032,7 @@ void fgr_debug_led_breathe_off(void)
 void fgr_debug_led_breathe_on(void)
 {
     led_breathe_enabled(&g_context, true);
+
 }
 
 // Turn all debug LEDs off.
@@ -1071,6 +1086,11 @@ void IRAM_ATTR __wrap_esp_panic_handler(void *param)
     }
 
     backtrace.length = stored;
+    if (backtrace.length > 0) {
+        // Add the hash of the currently running image
+        const esp_app_desc_t *app_desc = esp_app_get_description();
+        memcpy(backtrace.hash, app_desc->app_elf_sha256, sizeof(backtrace.hash));
+    }
 
     // Commit to retained RAM
     if (stored > 0) {
@@ -1082,13 +1102,14 @@ void IRAM_ATTR __wrap_esp_panic_handler(void *param)
 }
 
 // Get backtrace.
-int32_t fgr_debug_panic_get(uint32_t *backtrace_copy)
+int32_t fgr_debug_panic_get(uint32_t *backtrace_copy, char *hash)
 {
     int32_t length = 0;
     backtrace_t backtrace;
 
     if (FGR_RRAM_GET(backtrace) == ESP_OK) {
         length = backtrace.length;
+        hash_str(hash, backtrace.hash);
         if (backtrace_copy) {
             memcpy(backtrace_copy, backtrace.address_list, length * sizeof(backtrace.address_list[0]));
             FGR_RRAM_CLEAR(backtrace);
@@ -1099,15 +1120,15 @@ int32_t fgr_debug_panic_get(uint32_t *backtrace_copy)
 }
 
 // Populates a buffer with a backtrace as a string.
-int32_t fgr_debug_panic_str_get(char *buffer)
+int32_t fgr_debug_panic_str_get(char *backtrace_str, char *hash)
 {
-    int32_t length = fgr_debug_panic_get(NULL);
+    int32_t length = fgr_debug_panic_get(NULL, NULL);
     int32_t length_str = length * FGR_DEBUG_BACKTRACE_NUMBER_LENGTH;
 
-    if ((length > 0) && buffer) {
+    if ((length > 0) && backtrace_str) {
         uint32_t backtrace[length];
-        fgr_debug_panic_get(backtrace);
-        char *p = buffer;
+        fgr_debug_panic_get(backtrace, hash);
+        char *p = backtrace_str;
         for (size_t x = 0; x < length; x++) {
             snprintf(p, FGR_DEBUG_BACKTRACE_NUMBER_LENGTH + 1,
                      FGR_DEBUG_BACKTRACE_FORMAT_STRING, (int) backtrace[x]);
@@ -1124,16 +1145,19 @@ int32_t fgr_debug_panic_log(const char *tag, const char *prefix,
 {
     int32_t err = ESP_OK;
 
-    int32_t length = fgr_debug_panic_str_get(NULL);
+    int32_t length = fgr_debug_panic_str_get(NULL, NULL);
     if (length > 0) {
         err = -ESP_ERR_NO_MEM;
         char *buffer = malloc(length + 1);  // +1 for terminator
-        if (buffer) {
-            fgr_debug_panic_str_get(buffer);
+        char *hash = malloc(FGR_DEBUG_HASH_BUFFER_LENGTH);
+        if (buffer && hash) {
+            fgr_debug_panic_str_get(buffer, hash);
+            debug_log(tag, prefix, hash, level);
             debug_log(tag, prefix, buffer, level);
             err = 1;
-            free(buffer);
         }
+        free(buffer);
+        free(hash);
     }
 
     return err;
@@ -1346,6 +1370,14 @@ void fgr_debug_print_mac_address()
         ESP_LOGI(TAG, "MAC address %02X:%02X:%02X:%02X:%02X:%02X", mac[0], mac[1], mac[2], mac[3], mac[4],
                  mac[5]);
     }
+}
+
+// Get the hash of the current firmware version as a string.
+void fgr_debug_get_hash(char *buffer)
+{
+    // Get description of the currently running app
+    const esp_app_desc_t *app_desc = esp_app_get_description();
+    hash_str(buffer, app_desc->app_elf_sha256);
 }
 
 // Create a hex dump of data in a provided buffer

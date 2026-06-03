@@ -11,7 +11,7 @@ CONFIG_NVS_ENCRYPTION=n
 # Enable the Interrupt WDT to catch blocked interrupts (default anyway, but just in case)
 CONFIG_ESP_INT_WDT=y
 # Enable the Task WDT to catch stuck tasks (default anyway, but just in case)
-CONFIG_ESP_TASK_WDT=y
+CONFIG_ESP_TASK_WDT_INIT=y
 # 15 second watchog time, though fgr_monitor will come 5 seconds before this:
 # long enough to connect to WiFi and do an OTA update
 CONFIG_ESP_TASK_WDT_TIMEOUT_S=15
@@ -23,7 +23,6 @@ CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
 CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y
 
 # Enable comprehensive heap corruption detection
-CONFIG_HEAP_CORRUPTION_DETECTION=y
 CONFIG_HEAP_POISONING_COMPREHENSIVE=y
 
 # Enable roll-back of OTA'ed images on a panic/crash
