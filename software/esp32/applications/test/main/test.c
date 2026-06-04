@@ -270,13 +270,6 @@ static void do_node(context_t *context)
         vTaskDelay(pdMS_TO_TICKS(1000));
         esp_task_wdt_reset();
         x++;
-#if 0
-        if (x > 10) {
-            ESP_LOGI(TAG, "kaboom!");
-            int32_t y = 0;
-            x = x / y;
-        }
-#endif
     }
 }
 

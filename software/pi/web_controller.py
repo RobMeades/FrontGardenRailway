@@ -203,6 +203,12 @@ def format_connection_duration(node: Node) -> str:
             return f"disconnected {int(duration // 3600)}h ago (since {since_str})"
     return ""
 
+def linkify_log_line(text):
+   # This matches the full URL structure and ensures it keeps capturing
+    # until a character that doesn't fit a URL (like a space or closing bracket)
+    url_pattern = r'(http://[\d\.]+:[\d]+/\d+_[0-9\.]+)'
+
+    return re.sub(url_pattern, r'<a href="\1" target="_blank">\1</a>', text)
 
 class WebController(Controller):
     """Web-enabled FGR Controller with journal log reading"""
@@ -280,7 +286,8 @@ class WebController(Controller):
         timestamp = datetime.now().strftime('%H:%M:%S')
         version = self._log_counter
         self._log_counter += 1
-        self.log_entries.append((version, f"[{timestamp}] {prefix} {message}"))
+        linkified_message = linkify_log_line(message)
+        self.log_entries.append((version, f"[{timestamp}] {prefix} {linkified_message}"))
 
         # Trim if needed
         while len(self.log_entries) > self.max_log_entries:
@@ -2370,6 +2377,13 @@ class WebController(Controller):
             color: #9cdcfe;
         }
 
+        /* Highligh links in log messages */
+        .debug-window .log-node a {
+            color: #FFFF00; /* Bright Yellow */
+            text-decoration: underline;
+            font-weight: bold;
+        }
+
         .footer {
             text-align: center;
             color: #999;
@@ -3357,11 +3371,11 @@ class WebController(Controller):
                     if (highlightedContent !== log) {
                         logDiv.innerHTML = highlightedContent;
                     } else {
-                        logDiv.textContent = log;
+                        logDiv.innerHTML = log;
                     }
                     logDiv.style.display = '';
                 } else {
-                    logDiv.textContent = log;
+                    logDiv.innerHTML = log;
                     logDiv.style.setProperty('display', 'none', 'important');
                 }
 

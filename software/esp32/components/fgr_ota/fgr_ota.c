@@ -323,7 +323,7 @@ static int32_t parse_firmware_header(const char *buffer, size_t buffer_len,
 
     // Check if this is the same as the last invalid version
     if (last_invalid_app != NULL) {
-        if (is_update_required(invalid_app_info.version, new_app_info.version) == ESP_OK) {
+        if (strcmp(invalid_app_info.version, new_app_info.version) == 0) {
             ESP_LOGW(TAG, "The firmware with version %s previously failed to boot.", invalid_app_info.version);
             ESP_LOGW(TAG, "To prevent boot loop, we will not install this version.");
             return -1;  // This is still an error - don't install known bad version

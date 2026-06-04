@@ -10,11 +10,13 @@ Since the Pi will lose connectivity to your Wi-Fi network (you do _not_ want an 
 
   - `sudo apt install git`: 'cos you'll need that for the next line,
 
-  - `git clone https://github.com/RobMeades/FrontGardenRailway.git`: 'cos you will need the `https_server.py` script,
+  - `git clone https://github.com/RobMeades/FrontGardenRailway.git`: 'cos you will need the various Python scripts,
 
   - `sudo apt install python3-aiohttp`: which will be needed by `https_server.py`,
 
   - `sudo apt install python3-systemd`: which will be needed by `log_server.py`,
+
+  - `sudo apt install python3-venv python3-pip libncurses6 libpython3-dev libsystemd-dev gcc`: which will be needed later by `log_server.py` when it is decoding crash-dumps,
 
   - `sudo apt install ntpsec-ntpdate`: useful if you get into a tangle with NTP time offsets later,
 
@@ -165,7 +167,7 @@ All of the ESP32 nodes will want to make an HTTPS connection to the access point
 - NOTE: the way the HTTPS server works will change later (see "Proper OTA" in [`pi_installation.md`](pi_installation.md)) but for now this is good enough.
 
 # Log Server Setup
-The `log_server.py` script can be run on the Raspberry Pi to listen for log messages from all nodes and stuff the messages into the journal.  To get this script to run at boot, make sure port 5001 (the default port it will listen on) is open, then:
+The `log_server.py` script can be run on the Raspberry Pi to listen for log messages from all nodes and stuff the messages into the journal.  To get `log_server.py` to run at boot, make sure port 5001 (the default port it will listen for logs on) is open, then:
 
 - `sudo nano /lib/systemd/system/log_server.service` with the following contents:
 

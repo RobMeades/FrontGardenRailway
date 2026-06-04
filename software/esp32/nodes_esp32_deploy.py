@@ -25,6 +25,7 @@ import subprocess
 import tempfile
 import argparse
 import re
+import hashlib
 
 def parse_args(script_dir):
     default_config = os.path.join(script_dir, "nodes_esp32_deploy.json")
@@ -69,16 +70,55 @@ def read_version_file(filepath):
     return "1.0"
 
 def parse_remote_target(target_str):
-    match = re.match(r"^([^@]+)@([^/:]+)[/:]+(.+)$", target_str)
+    match = re.match(r"^([^@]+)@([^/:]+)[:/](.+)$", target_str)
     if not match:
         print(f"Error: Invalid remote target format '{target_str}'.")
-        print("Expected format: user@ip/directory  (e.g. pi@10.10.3.1/fw)")
+        print("Expected format: user@ip:/directory")
         sys.exit(1)
     return {
         "user": match.group(1),
         "host": match.group(2),
         "directory": match.group(3)
     }
+
+def prune_archive(staging_dir, max_to_keep=10):
+    """
+    Scans the local archive directories and keeps only the 'max_to_keep' most recent
+    build tracking subfolders per app/variant, deleting the oldest ones.
+    """
+    archive_root = os.path.join(staging_dir, "archive")
+    if not os.path.exists(archive_root):
+        return
+
+    print(f"\n[INFO] Sweeping staging archive (retaining top {max_to_keep} entries per variant)...")
+
+    # Drill down: staging/archive -> application -> variant -> [timestamped version folders]
+    for app in os.listdir(archive_root):
+        app_path = os.path.join(archive_root, app)
+        if not os.path.isdir(app_path):
+            continue
+
+        for variant in os.listdir(app_path):
+            variant_path = os.path.join(app_path, variant)
+            if not os.path.isdir(variant_path):
+                continue
+
+            # Gather all subdirectories inside this variant track
+            subdirs = [
+                os.path.join(variant_path, d)
+                for d in os.listdir(variant_path)
+                if os.path.isdir(os.path.join(variant_path, d))
+            ]
+
+            # Sort them by creation/modification time (oldest first)
+            subdirs.sort(key=os.path.getmtime)
+
+            # If we exceed our retention budget, wipe the oldest out entirely
+            if len(subdirs) > max_to_keep:
+                to_delete = subdirs[:-max_to_keep]
+                for old_dir in to_delete:
+                    print(f"  -> Pruning old archive footprint: {os.path.basename(old_dir)}")
+                    shutil.rmtree(old_dir)
 
 def main():
     script_path = os.path.abspath(__file__)
@@ -198,9 +238,7 @@ def main():
                     min_sec_nonce = f"{time_struct.tm_min:02d}{time_struct.tm_sec:02d}"
                     version_tag = f"v{app_version}.{system_version}.d{min_sec_nonce}_{git_hash}"
 
-                # Create the unique subfolder inside the archive safety net
-                archive_dir = os.path.join(workspace_root, args.staging, "archive", app, variant, version_tag)
-                os.makedirs(archive_dir, exist_ok=True)
+                # Create the unique subfolder
                 os.makedirs(target_output_dir, exist_ok=True)
 
                 if not args.incremental:
@@ -223,30 +261,55 @@ def main():
                 target_elf = os.path.join(app_path, "build", f"{app}.elf")
 
                 if os.path.exists(target_bin):
-                    # Save version-labeled .bin file directly into safety archive folder
-                    archive_dest = os.path.join(archive_dir, f"{app}_{variant}_{version_tag}.bin")
-                    shutil.copy2(target_bin, archive_dest)
-                    print(f"[SUCCESS] Archived diagnostic safe-net footprint: {archive_dest}")
+                    fw_build_hash = "unknown_sha"
+                    try:
+                        # Read the ESP application descriptor header from the binary file
+                        # The app_desc structure starts after the image header (24 bytes) + segment header (8 bytes)
+                        with open(target_bin, "rb") as f:
+                            f.seek(24 + 8)
+                            # Read the esp_app_desc_t structural fields
+                            # Magic word (4 bytes), Secure version (4 bytes), App version (32 bytes), Project name (32 bytes)
+                            # Compile time (16 bytes), Compile date (16 bytes), ESP-IDF version (32 bytes), ELF SHA256 (32 bytes)
+                            app_desc_data = f.read(256)
+
+                            # The SHA256 array sits precisely at offset 144 inside the description struct
+                            sha256_bytes = app_desc_data[144:176]
+
+                            # Convert the raw bytes into a clean lowercase hex string
+                            fw_build_hash = sha256_bytes.hex()
+                    except Exception as e:
+                        print(f"[WARN] Failed to read ELF SHA256 directly from binary header structure: {e}")
+                        # Fallback safe measurement if header structure parsing encounters read boundary bugs
+                        hasher = hashlib.sha256()
+                        with open(target_bin, "rb") as f:
+                            for chunk in iter(lambda: f.read(4096), b""):
+                                hasher.update(chunk)
+                        fw_build_hash = hasher.hexdigest()
+
+                    # Create the unique subfolder named strictly by its true ELF runtime hash string
+                    archive_dir = os.path.join(workspace_root, args.staging, "archive", app, variant, fw_build_hash)
+                    os.makedirs(archive_dir, exist_ok=True)
+                    os.makedirs(target_output_dir, exist_ok=True)
 
                     # Save version-labeled .elf file directly into safety archive folder (if it exists)
                     if os.path.exists(target_elf):
-                        archive_elf_dest = os.path.join(archive_dir, f"{app}_{variant}_{version_tag}.elf")
+                        archive_elf_dest = os.path.join(archive_dir, f"{app}.elf")
                         shutil.copy2(target_elf, archive_elf_dest)
                         print(f"[SUCCESS] Archived debug symbols blueprint: {archive_elf_dest}")
-                    else:
-                        print(f"[WARNING] Could not find matching ELF file for symbols at: {target_elf}")
 
-                    # Save standard file footprint directly inside targeted release directory track
-                    release_dest = os.path.join(target_output_dir, f"{app}_{variant}.bin")
-                    shutil.copy2(target_bin, release_dest)
-                    print(f"[SUCCESS] Staged live binary payload link: {release_dest}")
-                else:
-                    print(f"[ERROR] Compilation complete, but couldn't locate binary asset at: {target_bin}")
-                    sys.exit(1)
+                    # Construct structural naming pattern: e.g., test_esp32s3-rgb-4mbyte.bin
+                    track_filename = f"{app}_{variant}.bin"
+                    track_dest_path = os.path.join(target_output_dir, track_filename)
+
+                    shutil.copy2(target_bin, track_dest_path)
+                    print(f"[SUCCESS] Promoted release payload to active track channel: {track_dest_path}")
 
             finally:
                 if os.path.exists(temp_cfg_path):
                     os.remove(temp_cfg_path)
+
+    # Clean up the local archive folder before syncing everything over to the Pi
+    prune_archive(os.path.join(workspace_root, args.staging), max_to_keep=50)
 
     # =========================================================================
     # OPTIONAL REMOTE DEPLOYMENT STEP
@@ -258,13 +321,17 @@ def main():
 
         local_staging_path = os.path.join(workspace_root, args.staging) + "/"
         user_prefix = f"{remote['user']}@" if remote['user'] else ""
+
+        # Using a single ':' lets rsync differentiate:
+        # host:fw       -> relative to home (/home/pi/fw)
+        # host:/mnt/ssd -> absolute path (/mnt/ssd)
         remote_destination = f"{user_prefix}{remote['host']}:{remote['directory']}"
 
         # Keep server credentials untouched
         exclude_certs = "--exclude='/*.pem'"
 
         deploy_cmd = (
-            f'rsync -avz --delete {exclude_certs} '
+            f'rsync -rltvz --no-perms --no-owner --no-group --inplace --delete {exclude_certs} '
             f'"{local_staging_path}" "{remote_destination}"'
         )
 
