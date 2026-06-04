@@ -645,7 +645,8 @@ class WebController(Controller):
 
     def _format_metrics_display(self, node_ip: str, metrics: dict) -> Tuple[str, dict]:
         """Format metrics for display, return (display_html, importance_map)"""
-        formatted_parts = []
+        formatted_parts_important = []  # Store important metrics first
+        formatted_parts_normal = []     # Store normal metrics after
         importance_map = {}
 
         # Get all metrics that are not excluded and have configuration
@@ -658,7 +659,7 @@ class WebController(Controller):
 
             metric_data = metrics[key]
 
-            # Check importance
+            # Check importance BEFORE formatting
             is_important = self._check_metric_importance(key, metric_data, metrics)
             importance_map[key] = is_important
 
@@ -678,13 +679,19 @@ class WebController(Controller):
                     formatted = self._format_stack_metric(key, metric_data, is_important)
 
             if formatted:
-                formatted_parts.append(formatted)
+                if is_important:
+                    formatted_parts_important.append(formatted)
+                else:
+                    formatted_parts_normal.append(formatted)
 
-        if not formatted_parts:
+        # Combine: important first, then normal
+        all_formatted_parts = formatted_parts_important + formatted_parts_normal
+
+        if not all_formatted_parts:
             return '<span class="metric-normal">Waiting for metrics data...</span>', importance_map
 
         # Join with separators
-        display_html = ' | '.join(formatted_parts)
+        display_html = ' | '.join(all_formatted_parts)
         return display_html, importance_map
 
     def _update_node_metrics(self, node_ip: str, metrics: dict):
@@ -1871,7 +1878,7 @@ class WebController(Controller):
         }
 
         .node-metrics-data.scrolling .ticker-content {
-            animation: ticker 15s linear infinite;
+            animation: ticker 30s linear infinite;
         }
 
         .node-metrics-data.scrolling .ticker-content:hover {
@@ -1879,11 +1886,11 @@ class WebController(Controller):
         }
 
         @keyframes ticker {
-            /* 0% to 20% (First 3 seconds): Stationary pause */
+            /* 0% to 20% (First 6 seconds): Stationary pause */
             0%, 20% {
                 transform: translateX(0);
             }
-            /* 20% to 100% (Next 12 seconds): Smooth scroll */
+            /* 20% to 100% (Next 24 seconds): Smooth scroll */
             100% {
                 transform: translateX(-100%);
             }

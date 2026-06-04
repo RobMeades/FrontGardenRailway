@@ -29,7 +29,7 @@ the front garden railway.
 When a crash occurs, a node will reboot and emit a backtrace and a
 core dump, along with the hash of the running image when the
 crash occurred.  `log_server.py` captures this and inserts a URL
-style link into the log stream after if, of the form:
+style link into the log stream after it, of the form:
 
 CRASH! Decode: http://127.0.0.1:8080/1780542538_10.10.3.8
 
@@ -90,8 +90,8 @@ xdg-mime default fgr-crash-decoder.desktop x-scheme-handler/fgr-crash-decoder
 supply as '--port') is available.
 
 You will also need to set up three environment
-variables (so nano ~/.bashrc and add, at the end, add
-"export blah") containing some of the values from above:
+variables (so nano ~/.bashrc and add, at the end,
+"export blah") with some of the values from above:
 
 FGR_LOG_SERVER_ADDRESS=<ip>
 FGR_LOG_SERVER_WEB_PORT=<port>
