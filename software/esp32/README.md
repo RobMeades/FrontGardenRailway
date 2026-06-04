@@ -1,13 +1,13 @@
 # Introduction
-This directory contains a script, [nodes_esp32_deploy.py](nodes_esp32_deploy.py) and an associated JSON configuration file [nodes_esp32_deploy.json](nodes_esp32_deploy.json).  Together these manage the build and deployment of all ESP32 "nodes", meaning an application, along with all the necessary custom components to be a node on the front garden railway, talking to a controller, a logging system and an HTTPS server for OTA updates that all run on a Raspberry Pi.
+This directory contains a script, [nodes_esp32_deploy.py](nodes_esp32_deploy.py) and an associated JSON configuration file [nodes_esp32_deploy.json](nodes_esp32_deploy.json).  Together these manage the build and deployment of all ESP32 "nodes", meaning an application, along with all the necessary custom components to be a node on the front garden railway.
 
-In particular, the HTTPS server script ([https_server.py](../pi/https_server.py)) reads [nodes_esp32_deploy.json](nodes_esp32_deploy.json) so that it knows exactly which binary files to server to a node, effectively working with [nodes_esp32_deploy.py](nodes_esp32_deploy.py) which builds the code and pushes it to the Raspberry Pi to be served.
+Note: the Pi-side HTTPS server script ([https_server.py](../pi/https_server.py)) also reads [nodes_esp32_deploy.json](nodes_esp32_deploy.json) so that it knows exactly which binary files to server to a node, effectively working with [nodes_esp32_deploy.py](nodes_esp32_deploy.py) (which builds the code and pushes it to the Raspberry Pi to be served).
 
-By default, [nodes_esp32_deploy.py](nodes_esp32_deploy.py) creates development builds that are stored in the `beta` directory off wherever you have told it to stage files.  These builds are only served to nodes that have been put into development mode (via the [https_server.py](../pi/https_server.py) dashboard).  If the flag `--production` is specified then the builds are considered production builds, put in the `production` sub-directory off wherever you have told [nodes_esp32_deploy.py](nodes_esp32_deploy.py) to stage files and served to all nodes.  All builds are also copied to an `archive` directory in a tree intended to make them easily searchable in order to decode backtraces and core dumps.
+By default, [nodes_esp32_deploy.py](nodes_esp32_deploy.py) creates development builds that are stored in the `beta` directory off wherever you have told it to stage files (e.g. `~/fw`).  These builds are only served to nodes that have been put into development mode (via the [https_server.py](../pi/https_server.py) dashboard).  If the flag `--production` is specified then the builds are considered production builds, put in the `production` sub-directory off wherever you have told [nodes_esp32_deploy.py](nodes_esp32_deploy.py) to stage files and served to all nodes.  All builds are also copied to an `archive` directory in a tree intended to make them easily searchable in order to decode back-traces and core-dumps.
 
-The lot can then be `rsync`'ed to the Raspberry Pi by [nodes_esp32_deploy.py](nodes_esp32_deploy.py).
+The lot can then be `rsync`'ed to the Raspberry Pi (e.g. to `/mnt/ssd/fw`) by [nodes_esp32_deploy.py](nodes_esp32_deploy.py).
 
-A good way to work during development is to use the [https_server.py](../pi/https_server.py) dashboard to switch a device into development mode and then create development builds just for it using the `--ip` flag to [nodes_esp32_deploy.py](nodes_esp32_deploy.py).
+A good way to work during development is to use the [https_server.py](../pi/https_server.py) dashboard to switch a node into development mode and then create development builds just for it that IP address using the `--ip` flag to [nodes_esp32_deploy.py](nodes_esp32_deploy.py).
 
 Some examples:
 
