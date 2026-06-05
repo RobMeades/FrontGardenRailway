@@ -41,6 +41,9 @@ import threading
 import signal
 import re
 import logging
+import sqlite3
+import concurrent.futures
+from pathlib import Path
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
@@ -216,18 +219,27 @@ class WebController(Controller):
     def __init__(self, listen_ip: str = CONTROLLER_IP_DEFAULT,
                  port: int = CONTROLLER_PORT_DEFAULT,
                  nodes_dir: str = None, cfg_file: str = None,
-                 http_port: int = HTTP_PORT_DEFAULT):
+                 http_port: int = HTTP_PORT_DEFAULT,
+                 db_path: Path = None):
         super().__init__(listen_ip, port, nodes_dir, cfg_file)
 
         self.http_port = http_port
-        self.web_app = None
-        self.web_runner = None
-        self.web_running = False
 
         # Log storage for web interface - store as list with version tracking
         self.log_entries: List[Tuple[int, str]] = []  # (version, message)
         self.max_log_entries = MAX_LOG_ENTRIES
         self._log_counter = 0
+
+        self.db_path = db_path
+        self.graphs_enabled = db_path is not None and db_path.exists()
+        if not self.graphs_enabled:
+            self._log_message(f"Graphs disabled - database not found at {db_path}")
+        else:
+            self._log_message(f"Graphs enabled using database: {db_path}")
+
+        self.web_app = None
+        self.web_runner = None
+        self.web_running = False
 
         # SSE clients
         self.sse_clients = set()
@@ -259,6 +271,12 @@ class WebController(Controller):
 
         # Store metrics for each node
         self.node_metrics: Dict[str, Dict[str, Any]] = {}
+
+        # Create a thread pool for database queries
+        self.db_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+
+        self.graph_cache = {}  # Simple in-memory cache
+        self.graph_cache_timeout = 300  # 5 minutes
 
         # Record start time
         self._start_time = time.time()
@@ -892,6 +910,11 @@ class WebController(Controller):
             'log_level_names': LOG_LEVEL_NAMES
         }
 
+    async def _run_db_query(self, query_func, *args):
+        """Run a database query in a thread pool to avoid blocking the event loop"""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(self.db_executor, query_func, *args)
+
     async def _broadcast_status(self):
         """Broadcast status updates to SSE clients"""
         last_status = None
@@ -1448,6 +1471,212 @@ class WebController(Controller):
 
         return web.json_response({'status': 'ok', 'html': complete_html})
 
+    def _get_metrics_db_connection(self):
+        """Get connection to metrics database"""
+        if not self.graphs_enabled or not self.db_path or not self.db_path.exists():
+            return None
+        return sqlite3.connect(str(self.db_path))
+
+    async def handle_api_graph_data(self, request):
+        """Get graph data for RSSI and WiFi metrics"""
+        if not self.graphs_enabled:
+            return web.json_response({'error': 'Graphs disabled'}, status=503)
+
+        data = await request.json() if request.body_exists else {}
+        end_time = data.get('end_time', time.time())
+        start_time = data.get('start_time', end_time - (24 * 3600))
+        node_ips = data.get('nodes', [])
+
+        # Create cache key
+        cache_key = f"{int(start_time/3600)}_{int(end_time/3600)}_{','.join(sorted(node_ips))}"
+
+        # Check cache
+        if cache_key in self.graph_cache:
+            cached_time, cached_data = self.graph_cache[cache_key]
+            if time.time() - cached_time < self.graph_cache_timeout:
+                self._log_message(f"Returning cached graph data for {cache_key}")
+                return web.json_response(cached_data)
+
+        self._log_message(f"Querying fresh graph data for {cache_key}")
+        loop = asyncio.get_event_loop()
+
+        rssi_data = await loop.run_in_executor(
+            self.db_executor,
+            self._query_rssi_data,
+            start_time, end_time, node_ips
+        )
+        wifi_failures_data = await loop.run_in_executor(
+            self.db_executor,
+            self._query_wifi_failures,
+            start_time, end_time, node_ips
+        )
+
+        result = {
+            'rssi': rssi_data,
+            'wifi_failures': wifi_failures_data,
+            'time_range': {'start': start_time, 'end': end_time}
+        }
+
+        # Cache the result
+        self.graph_cache[cache_key] = (time.time(), result)
+
+        return web.json_response(result)
+
+    def _query_rssi_data(self, start_time, end_time, node_ips):
+        """Query RSSI values from metrics database"""
+        conn = self._get_metrics_db_connection()
+        if not conn:
+            return {}
+
+        try:
+            cursor = conn.cursor()
+
+            node_filter = ""
+            params = [start_time, end_time]
+            if node_ips:
+                placeholders = ','.join(['?' for _ in node_ips])
+                node_filter = f"AND node_ip IN ({placeholders})"
+                params.extend(node_ips)
+
+            # Escape curly braces by doubling them: {{ and }}
+            query = f"""
+                SELECT epoch_time, node_ip,
+                    json_extract(substr(message, instr(message, '{{')), '$.dbm') as rssi
+                FROM device_logs
+                WHERE message_type = 'METRIC'
+                AND epoch_time BETWEEN ? AND ?
+                {node_filter}
+                AND json_extract(substr(message, instr(message, '{{')), '$.dbm') IS NOT NULL
+                ORDER BY epoch_time ASC
+            """
+
+            cursor.execute(query, params)
+            rows = cursor.fetchall()
+
+            self._log_message(f"RSSI query returned {len(rows)} rows")
+
+            result = {}
+            for row in rows:
+                epoch_time, node_ip, rssi = row
+                if rssi is not None and -100 <= rssi <= 0:
+                    if node_ip not in result:
+                        result[node_ip] = []
+                    result[node_ip].append([epoch_time * 1000, rssi])
+
+            # Downsample if too many points
+            for node_ip in result:
+                points = result[node_ip]
+                if len(points) > 5000:
+                    step = max(1, len(points) // 3000)
+                    result[node_ip] = points[::step]
+                    self._log_message(f"Downsampled {node_ip}: {len(points)} -> {len(result[node_ip])} points")
+
+            total_points = sum(len(v) for v in result.values())
+            self._log_message(f"RSSI: {total_points} points from {len(result)} nodes")
+            return result
+
+        except Exception as e:
+            self._log_message(f"Error querying RSSI: {e}")
+            import traceback
+            self._log_message(traceback.format_exc())
+            return {}
+        finally:
+            conn.close()
+
+
+    def _query_wifi_failures(self, start_time, end_time, node_ips):
+        """Query WiFi connection failures from metrics (w.-.n field)"""
+        conn = self._get_metrics_db_connection()
+        if not conn:
+            return {}
+
+        try:
+            cursor = conn.cursor()
+
+            node_filter = ""
+            params = [start_time, end_time]
+            if node_ips:
+                placeholders = ','.join(['?' for _ in node_ips])
+                node_filter = f"AND node_ip IN ({placeholders})"
+                params.extend(node_ips)
+
+            # Escape curly braces by doubling them: {{ and }}
+            query = f"""
+                SELECT epoch_time, node_ip,
+                    json_extract(substr(message, instr(message, '{{')), '$.w.-.n') as failures
+                FROM device_logs
+                WHERE message_type = 'METRIC'
+                AND epoch_time BETWEEN ? AND ?
+                {node_filter}
+                AND json_extract(substr(message, instr(message, '{{')), '$.w.-.n') > 0
+                ORDER BY epoch_time ASC
+            """
+
+            cursor.execute(query, params)
+            rows = cursor.fetchall()
+
+            self._log_message(f"WiFi failures query returned {len(rows)} rows")
+
+            result = {}
+            for row in rows:
+                epoch_time, node_ip, failures = row
+                if failures is not None and failures > 0:
+                    if node_ip not in result:
+                        result[node_ip] = []
+                    result[node_ip].append([epoch_time * 1000, failures])
+
+            total_points = sum(len(v) for v in result.values())
+            self._log_message(f"WiFi failures: {total_points} points from {len(result)} nodes")
+            return result
+
+        except Exception as e:
+            self._log_message(f"Error querying WiFi failures: {e}")
+            return {}
+        finally:
+            conn.close()
+
+    async def handle_api_graph_nodes(self, request):
+        """Get list of nodes that have graph data available"""
+        if not self.graphs_enabled:
+            return web.json_response({'nodes': [], 'error': 'Graphs disabled'})
+
+        # Just return the nodes from the controller - much faster!
+        nodes = []
+        for name, node in self.nodes.items():
+            if node.ip:  # Only include nodes that have an IP
+                nodes.append({'ip': node.ip, 'name': name})
+
+        self._log_message(f"Returning {len(nodes)} nodes from controller config")
+        return web.json_response({'nodes': nodes})
+
+    async def handle_api_graph_time_range(self, request):
+        """Get available time range in the database"""
+        if not self.graphs_enabled:
+            return web.json_response({'min_time': None, 'max_time': None, 'error': 'Graphs disabled'})
+
+        conn = self._get_metrics_db_connection()
+        if not conn:
+            return web.json_response({'min_time': None, 'max_time': None})
+
+        try:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT MIN(epoch_time), MAX(epoch_time)
+                FROM device_logs
+                WHERE message_type = 'METRIC'
+                OR message LIKE '%disconnect%'
+            """)
+            row = cursor.fetchone()
+            return web.json_response({
+                'min_time': row[0] if row[0] else None,
+                'max_time': row[1] if row[1] else None
+            })
+        except Exception as e:
+            self._log_message(f"Error querying time range: {e}")
+            return web.json_response({'min_time': None, 'max_time': None})
+        finally:
+            conn.close()
+
     def start_web(self):
         """Start the web server"""
         self.web_app = web.Application()
@@ -1462,6 +1691,13 @@ class WebController(Controller):
         self.web_app.router.add_post('/api/reorder', self.handle_api_reorder)
         self.web_app.router.add_post('/api/node/data', self.handle_api_node_data)
         self.web_app.router.add_post('/api/node/html', self.handle_api_node_html)
+        if self.graphs_enabled:
+            self.web_app.router.add_post('/api/graph/data', self.handle_api_graph_data)
+            self.web_app.router.add_get('/api/graph/nodes', self.handle_api_graph_nodes)
+            self.web_app.router.add_get('/api/graph/time_range', self.handle_api_graph_time_range)
+            self._log_message(f"Graph endpoints enabled")
+        else:
+            self._log_message(f"Graph endpoints disabled (use --db-path to enable)")
 
         # Event to signal the web thread to stop
         self.web_stop_event = threading.Event()
@@ -1510,12 +1746,21 @@ class WebController(Controller):
         if not super().start():
             return False
         self.start_web()
+
+        # Log graph status
+        if self.graphs_enabled:
+            print(f"📈 Graphs enabled: {self.db_path}")
+        else:
+            print(f"📈 Graphs disabled (use --db-path to enable)")
+
         return True
 
     def stop(self) -> None:
         """Stop the controller and web server"""
         self._stop_journal_reader()
         self.stop_web()
+        if hasattr(self, 'db_executor'):
+            self.db_executor.shutdown(wait=True)
         super().stop()
 
     def _get_html_template(self) -> str:
@@ -1554,9 +1799,9 @@ class WebController(Controller):
             display: flex;
             justify-content: space-between;
             align-items: center;
-            margin-bottom: 15px;
+            margin-bottom: 20px;
             flex-wrap: wrap;
-            gap: 6px;
+            gap: 15px;
             flex-shrink: 0;
         }
         .title-section h1 { margin: 0; }
@@ -2529,6 +2774,177 @@ class WebController(Controller):
             min-height: auto !important;
         }
 
+        /* View selector buttons */
+        .view-btn {
+            padding: 4px 16px;
+            font-size: 12px;
+            border: 1px solid #ddd;
+            border-radius: 20px;
+            background: white;
+            cursor: pointer;
+            transition: all 0.2s;
+            white-space: nowrap;
+        }
+        .view-btn:hover {
+            background: #e3f2fd;
+            border-color: #2196f3;
+        }
+        .view-btn.active {
+            background: #2196f3;
+            color: white;
+            border-color: #2196f3;
+        }
+
+        /* Graph view container */
+        .graph-view {
+            background: white;
+            border-radius: 8px;
+            padding: 15px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+            margin-top: 10px;
+        }
+
+        .graph-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+
+        .graph-tool-btn {
+            background: none;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            padding: 2px 6px;
+            font-size: 12px;
+            cursor: pointer;
+            width: auto;
+        }
+
+        .graph-tool-btn:hover {
+            background: #f0f0f0;
+            border-color: #999;
+        }
+
+        .time-range-selector {
+            display: flex;
+            gap: 5px;
+            flex-wrap: wrap;
+        }
+
+        .time-btn {
+            padding: 4px 10px;
+            font-size: 11px;
+            border: 1px solid #ddd;
+            border-radius: 15px;
+            background: white;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .time-btn:hover {
+            background: #e3f2fd;
+        }
+
+        .time-btn.active {
+            background: #2196f3;
+            color: white;
+            border-color: #2196f3;
+        }
+
+        .node-filter {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 11px;
+        }
+
+        .node-filter select {
+            padding: 4px 8px;
+            border-radius: 4px;
+            border: 1px solid #ddd;
+            font-size: 11px;
+        }
+
+        .node-filter-select[size] {
+            font-family: monospace;
+            min-width: 200px;
+        }
+
+        .node-filter-select option {
+            padding: 3px 6px;
+            font-size: 10px;
+        }
+
+        .node-filter-select[size="5"] {
+            height: auto;
+            max-height: 150px;
+        }
+
+        .graph-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 20px;
+        }
+
+        .graph-card {
+            background: #fafafa;
+            border-radius: 8px;
+            padding: 12px;
+            border: 1px solid #e0e0e0;
+            transition: all 0.2s;
+            cursor: pointer;
+        }
+
+        .graph-card.expanded {
+            grid-column: 1 / -1;
+            cursor: default;
+        }
+
+        .graph-card:hover:not(.expanded) {
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            border-color: #2196f3;
+        }
+
+        .graph-title {
+            font-size: 14px;
+            font-weight: bold;
+            margin-bottom: 10px;
+            color: #333;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .graph-expand-hint {
+            font-size: 10px;
+            color: #999;
+            font-weight: normal;
+        }
+
+        .graph-container {
+            height: 320px;
+            width: 100%;
+        }
+
+        .graph-card.expanded .graph-container {
+            height: 550px;
+        }
+
+        .graph-loading, .no-data-message {
+            text-align: center;
+            padding: 40px;
+            color: #999;
+        }
+
+        @media (max-width: 1000px) {
+            .graph-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
     </style>
 </head>
 <body>
@@ -2544,6 +2960,7 @@ class WebController(Controller):
                 <div class="status-details">Waiting for nodes</div>
             </div>
         </div>
+        <!-- View selector will be inserted here by JavaScript -->
     </div>
 
     <div class="grid-wrapper">
@@ -2622,6 +3039,9 @@ class WebController(Controller):
         let dragAutoScrollTimer = null;
         let isDragging = false;
         let dragSourceNode = null;
+
+        // Graph data request ID
+        let currentRequestId = 0;
 
         // Log level names
         const logLevelNames = ['DEBUG', 'INFO', 'WARN', 'ERROR'];
@@ -4308,6 +4728,716 @@ class WebController(Controller):
 
         setupFilterListeners();
 
+        // ============ GRAPH VIEW CODE ============
+        let currentView = 'grid';
+        let expandedGraph = null;
+        let graphCharts = {};
+
+        const GRAPH_CONFIG = {
+            rssi: {
+                title: 'WiFi RSSI (dBm)',
+                yAxisLabel: 'RSSI (dBm)',
+                valueFormatter: (v) => v + ' dBm'
+            },
+            wifi_failures: {
+                title: 'WiFi Connection Failures',
+                yAxisLabel: 'Failures',
+                yAxisMin: 0,
+                valueFormatter: (v) => v + ' failure' + (v !== 1 ? 's' : ''),
+                isEvent: true
+            }
+        };
+
+        const TIME_RANGES = [
+            { label: 'Last Hour', hours: 1 },
+            { label: 'Last 6 Hours', hours: 6 },
+            { label: 'Last 24 Hours', hours: 24 },
+            { label: 'Last 3 Days', hours: 72 },
+            { label: 'Last 7 Days', hours: 168 }
+        ];
+
+        let currentTimeRange = TIME_RANGES[0];
+        let customTimeRange = null;
+
+        function toggleView(view) {
+            currentView = view;
+            const gridWrapper = document.querySelector('.grid-wrapper');
+            const graphContainer = document.getElementById('graphViewContainer');
+
+            if (view === 'graphs') {
+                if (gridWrapper) gridWrapper.style.display = 'none';
+                if (graphContainer) {
+                    graphContainer.style.display = 'block';
+                    // Initialize graph components lazily
+                    if (!window._graphsInitialized) {
+                        initializeGraphComponents();
+                    }
+                    if (Object.keys(graphCharts).length === 0) {
+                        loadGraphs();
+                    }
+                }
+                updateViewSelector('graphs');
+            } else {
+                if (gridWrapper) gridWrapper.style.display = 'block';
+                if (graphContainer) graphContainer.style.display = 'none';
+                updateViewSelector('grid');
+                setTimeout(() => {
+                    if (typeof setupMetricsTicker === 'function') setupMetricsTicker();
+                }, 100);
+            }
+        }
+
+        function initializeGraphComponents() {
+            window._graphsInitialized = true;
+            // Fetch nodes and create selector only when needed
+            fetch('/api/graph/nodes')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.error) {
+                        console.log('Graphs not available:', data.error);
+                        return;
+                    }
+                    createViewSelector();  // This creates the buttons
+                    setupTimeRangeSelector();
+                    setupGraphEventListeners();
+                    loadAvailableNodes();  // <-- ADD THIS LINE to populate the dropdown
+                })
+                .catch(e => console.log('Graphs not available:', e));
+
+            // Load ECharts if needed
+            if (typeof echarts === 'undefined') {
+                const script = document.createElement('script');
+                script.src = 'https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js';
+                document.head.appendChild(script);
+            }
+        }
+
+        function updateViewSelector(activeView) {
+            let selector = document.getElementById('viewSelector');
+            if (!selector) return;
+
+            const btns = selector.querySelectorAll('.view-btn');
+            btns.forEach(btn => {
+                btn.classList.remove('active');
+                if ((btn.textContent.includes('Dashboard') && activeView === 'grid') ||
+                    (btn.textContent.includes('Metrics') && activeView === 'graphs')) {
+                    btn.classList.add('active');
+                }
+            });
+        }
+
+        function createViewSelector() {
+            if (document.getElementById('viewSelector')) return;
+
+            const header = document.querySelector('.header');
+            if (!header) return;
+
+            const selector = document.createElement('div');
+            selector.id = 'viewSelector';
+            selector.style.cssText = 'display: flex; gap: 8px; margin-left: auto;';
+            selector.innerHTML = `
+                <button class="view-btn ${currentView === 'grid' ? 'active' : ''}" onclick="toggleView('grid')">📊 Dashboard</button>
+                <button class="view-btn ${currentView === 'graphs' ? 'active' : ''}" onclick="toggleView('graphs')">📈 Graphs</button>
+            `;
+            header.appendChild(selector);
+        }
+
+        function createGraphViewContainer() {
+            let container = document.getElementById('graphViewContainer');
+            if (container) return container;
+
+            const gridWrapper = document.querySelector('.grid-wrapper');
+            if (!gridWrapper) return null;
+
+            container = document.createElement('div');
+            container.id = 'graphViewContainer';
+            container.style.display = 'none';
+            container.className = 'graph-view';
+            container.innerHTML = `
+                <div class="graph-header">
+                    <select id="timeRangeSelect" class="time-range-select">
+                        <option value="1">Last Hour</option>
+                        <option value="6">Last 6 Hours</option>
+                        <option value="24" selected>Last 24 Hours</option>
+                        <option value="72">Last 3 Days</option>
+                        <option value="168">Last 7 Days</option>
+                    </select>
+                    <div class="node-filter">
+                        <select id="graphNodeFilter" class="node-filter-select" multiple size="3" style="min-width: 200px;">
+                            <option value="all">All Nodes</option>
+                        </select>
+                        <button id="refreshGraphsBtn" style="padding: 4px 8px; font-size: 10px;">🔄 Refresh</button>
+                    </div>
+                </div>
+                <div class="graph-grid" id="graphGrid">
+                    <div class="graph-loading">Loading graphs...</div>
+                </div>
+            `;
+
+            gridWrapper.parentNode.insertBefore(container, gridWrapper.nextSibling);
+            return container;
+        }
+
+        let graphDataCache = {
+            lastParams: null,
+            data: null
+        };
+
+        async function loadGraphs(forceRefresh = false) {
+            const container = createGraphViewContainer();
+            if (!container) return;
+
+            const graphGrid = document.getElementById('graphGrid');
+            if (!graphGrid) return;
+
+            // Generate a new request ID for this invocation
+            const thisRequestId = ++currentRequestId;
+            console.log(`Request ${thisRequestId}: Starting for ${currentTimeRange.label}`);
+
+            const nodeFilter = document.getElementById('graphNodeFilter');
+            const selectedNodes = nodeFilter ? Array.from(nodeFilter.selectedOptions).map(opt => opt.value) : [];
+            const includeAllNodes = selectedNodes.includes('all') || selectedNodes.length === 0;
+
+            const actualSelectedNodes = includeAllNodes ? [] : selectedNodes.filter(n => n !== 'all');
+
+            const endTime = Math.floor(Date.now() / 1000);
+            let startTime = endTime - (currentTimeRange.hours * 3600);
+
+            // Round to hour boundaries for consistent cache keys
+            const roundedStart = Math.floor(startTime / 3600) * 3600;
+            const roundedEnd = Math.floor(endTime / 3600) * 3600;
+
+            const nodesKey = includeAllNodes ? 'all' : actualSelectedNodes.sort().join(',');
+            const cacheKey = `${roundedStart}_${roundedEnd}_${nodesKey}`;
+            const allCacheKey = `${roundedStart}_${roundedEnd}_all`;
+
+            // Check cache first
+            if (!forceRefresh && timeRangeCache[cacheKey]) {
+                console.log(`Request ${thisRequestId}: Cache HIT`);
+                renderGraphs(timeRangeCache[cacheKey]);
+                return;
+            }
+
+            // Try all-cache fallback
+            if (!forceRefresh && !includeAllNodes && timeRangeCache[allCacheKey]) {
+                console.log(`Request ${thisRequestId}: Using all-cache fallback`);
+                const allData = timeRangeCache[allCacheKey];
+                const filteredData = {
+                    rssi: {},
+                    wifi_failures: {},
+                    time_range: allData.time_range
+                };
+                for (const nodeIp of actualSelectedNodes) {
+                    if (allData.rssi && allData.rssi[nodeIp]) {
+                        filteredData.rssi[nodeIp] = allData.rssi[nodeIp];
+                    }
+                    if (allData.wifi_failures && allData.wifi_failures[nodeIp]) {
+                        filteredData.wifi_failures[nodeIp] = allData.wifi_failures[nodeIp];
+                    }
+                }
+                if (Object.keys(filteredData.rssi).length > 0 || Object.keys(filteredData.wifi_failures).length > 0) {
+                    timeRangeCache[cacheKey] = filteredData;
+                }
+                renderGraphs(filteredData);
+                return;
+            }
+
+            console.log(`Request ${thisRequestId}: Cache MISS, fetching fresh...`);
+            graphGrid.innerHTML = '<div class="graph-loading">📊 Loading graphs...</div>';
+
+            try {
+                const response = await fetch('/api/graph/data', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        start_time: startTime,
+                        end_time: endTime,
+                        nodes: includeAllNodes ? [] : actualSelectedNodes
+                    })
+                });
+                const data = await response.json();
+
+                // IMPORTANT: Check if this request is still the current one
+                if (thisRequestId !== currentRequestId) {
+                    console.log(`Request ${thisRequestId}: Ignoring stale response (newer request ${currentRequestId} exists)`);
+                    return;
+                }
+
+                if (data.error) {
+                    graphGrid.innerHTML = `<div class="no-data-message">⚠️ ${data.error}</div>`;
+                    return;
+                }
+
+                timeRangeCache[cacheKey] = data;
+                if (includeAllNodes) {
+                    timeRangeCache[allCacheKey] = data;
+                }
+
+                renderGraphs(data);
+
+            } catch (e) {
+                // Only show error if this is still the current request
+                if (thisRequestId === currentRequestId) {
+                    console.error('Error loading graphs:', e);
+                    graphGrid.innerHTML = `<div class="no-data-message">❌ Error loading graph data: ${e.message}</div>`;
+                }
+            }
+        }
+
+        async function loadAvailableNodes() {
+            try {
+                const response = await fetch('/api/graph/nodes');
+                const data = await response.json();
+
+                if (data.error) {
+                    console.warn('Graph nodes API error:', data.error);
+                    return;
+                }
+
+                const nodeFilter = document.getElementById('graphNodeFilter');
+                if (nodeFilter && data.nodes) {
+                    const currentValue = nodeFilter.value;
+                    nodeFilter.innerHTML = '<option value="all">All Nodes</option>';
+                    for (const node of data.nodes) {
+                        const displayName = node.name || node.ip;
+                        nodeFilter.innerHTML += `<option value="${node.ip}">${displayName} (${node.ip})</option>`;
+                    }
+                    // Set to "All Nodes" if no previous selection or if previous selection was 'all'
+                    if (currentValue === 'all' || !currentValue || !Array.from(nodeFilter.options).some(opt => opt.value === currentValue)) {
+                        nodeFilter.value = 'all';
+                    } else {
+                        nodeFilter.value = currentValue;
+                    }
+                }
+            } catch (e) {
+                console.error('Error loading nodes:', e);
+            }
+        }
+
+        function getNodeNameByIp(ip) {
+            for (const [name, node] of Object.entries(nodesData)) {
+                if (node.ip === ip) return name;
+            }
+            return ip;
+        }
+
+        function generateColors(count) {
+            const baseColors = ['#5470c6', '#fac858', '#ee6666', '#73c0de', '#3ba272', '#fc8452', '#9a60b4', '#ea7ccc'];
+            if (count <= baseColors.length) return baseColors.slice(0, count);
+            const colors = [...baseColors];
+            for (let i = baseColors.length; i < count; i++) {
+                const hue = (i * 137) % 360;
+                colors.push(`hsl(${hue}, 70%, 55%)`);
+            }
+            return colors;
+        }
+
+        function saveGraphAsImage(graphKey) {
+            const chart = graphCharts[graphKey];
+            if (chart) {
+                const url = chart.getDataURL({
+                    type: 'png',
+                    pixelRatio: 2,
+                    backgroundColor: '#fff'
+                });
+                const link = document.createElement('a');
+                link.download = `${graphKey}_chart.png`;
+                link.href = url;
+                link.click();
+            }
+        }
+
+        function resetGraphZoom(graphKey) {
+            const chart = graphCharts[graphKey];
+            if (chart) {
+                chart.dispatchAction({
+                    type: 'dataZoom',
+                    start: 0,
+                    end: 100
+                });
+            }
+        }
+
+        function renderGraphs(data) {
+            const graphGrid = document.getElementById('graphGrid');
+            if (!graphGrid) {
+                console.error('graphGrid not found');
+                return;
+            }
+
+            const graphs = ['rssi', 'wifi_failures'];
+            let html = '';
+
+            // Check if there's any data at all
+            const hasAnyData = (data.rssi && Object.keys(data.rssi).length > 0) ||
+                            (data.wifi_failures && Object.keys(data.wifi_failures).length > 0);
+
+            if (!hasAnyData) {
+                console.warn('No data in any graph');
+                graphGrid.innerHTML = '<div class="no-data-message">📭 No data available for this time range</div>';
+                return;
+            }
+
+            for (const graphKey of graphs) {
+                const config = GRAPH_CONFIG[graphKey];
+                const seriesData = data[graphKey] || {};
+                const nodeCount = Object.keys(seriesData).length;
+
+                if (nodeCount === 0) {
+                    html += `
+                        <div class="graph-card" data-graph="${graphKey}">
+                            <div class="graph-title">
+                                <span>${config.title}</span>
+                                <div style="display: flex; gap: 8px; align-items: center;">
+                                    <button class="graph-tool-btn" onclick="saveGraphAsImage('${graphKey}')" title="Save as Image">💾</button>
+                                    <button class="graph-tool-btn" onclick="resetGraphZoom('${graphKey}')" title="Reset Zoom">⟳</button>
+                                    <span class="graph-expand-hint">⤢ Double-click to expand</span>
+                                </div>
+                            </div>
+                            <div class="no-data-message" style="padding: 40px; text-align: center;">No data available</div>
+                        </div>
+                    `;
+                } else {
+                    html += `
+                        <div class="graph-card" data-graph="${graphKey}" ondblclick="toggleGraphExpand('${graphKey}')">
+                            <div class="graph-title">
+                                <span>${config.title}</span>
+                                <div style="display: flex; gap: 8px; align-items: center;">
+                                    <button class="graph-tool-btn" onclick="saveGraphAsImage('${graphKey}')" title="Save as Image">💾</button>
+                                    <button class="graph-tool-btn" onclick="resetGraphZoom('${graphKey}')" title="Reset Zoom">⟳</button>
+                                    <span class="graph-expand-hint">⤢ Double-click to expand</span>
+                                </div>
+                            </div>
+                            <div id="graph-${graphKey}" class="graph-container"></div>
+                        </div>
+                    `;
+                }
+            }
+
+            graphGrid.innerHTML = html;
+
+            for (const graphKey of graphs) {
+                const config = GRAPH_CONFIG[graphKey];
+                const seriesData = data[graphKey] || {};
+                const container = document.getElementById(`graph-${graphKey}`);
+
+                if (container && Object.keys(seriesData).length > 0) {
+                    const chart = initChart(container, graphKey, seriesData, config);
+                    if (chart) {
+                        graphCharts[graphKey] = chart;
+                        container.chart = chart;
+                    }
+                }
+            }
+        }
+
+        function initChart(container, graphKey, seriesData, config) {
+            if (typeof echarts === 'undefined') {
+                console.error('ECharts not loaded');
+                container.innerHTML = '<div class="no-data-message">Loading ECharts...</div>';
+                return null;
+            }
+
+            const series = [];
+            const colors = generateColors(Object.keys(seriesData).length);
+
+            // Sort nodes by last octet of IP address
+            const sortedNodes = Object.entries(seriesData).sort((a, b) => {
+                const lastOctetA = parseInt(a[0].split('.').pop());
+                const lastOctetB = parseInt(b[0].split('.').pop());
+                return lastOctetA - lastOctetB;
+            });
+
+            let colorIndex = 0;
+
+            for (const [nodeIp, points] of sortedNodes) {
+                if (!points || points.length === 0) {
+                    console.log(`No points for ${nodeIp}`);
+                    continue;
+                }
+                console.log(`${nodeIp}: ${points.length} points, first point:`, points[0]);
+
+                const nodeName = getNodeNameByIp(nodeIp);
+                const displayName = `${nodeName}\n(${nodeIp})`;
+                const seriesColor = colors[colorIndex % colors.length];
+
+                if (config.isEvent) {
+                    series.push({
+                        name: displayName,
+                        type: 'scatter',
+                        data: points,
+                        symbolSize: 8,
+                        symbol: 'circle',
+                        color: seriesColor,
+                        itemStyle: { color: seriesColor }
+                    });
+                } else {
+                    series.push({
+                        name: displayName,
+                        type: 'line',
+                        data: points,
+                        smooth: true,
+                        connectNulls: false,
+                        showSymbol: false,
+                        color: seriesColor,
+                        lineStyle: { width: 2, color: seriesColor }
+                    });
+                }
+                colorIndex++;
+            }
+
+            console.log(`Created ${series.length} series for ${graphKey}`);
+
+            if (series.length === 0) {
+                console.log(`No series created for ${graphKey}`);
+                container.innerHTML = '<div class="no-data-message">📭 No data available for this time range</div>';
+                return null;
+            }
+
+            // Auto-scale y-axis for RSSI based on actual data
+            let yMin = config.yAxisMin;
+            let yMax = config.yAxisMax;
+
+            if (graphKey === 'rssi') {
+                let dataMin = Infinity, dataMax = -Infinity;
+                for (const points of Object.values(seriesData)) {
+                    if (!points || points.length === 0) continue;
+                    for (const point of points) {
+                        const value = point[1];
+                        if (value < dataMin) dataMin = value;
+                        if (value > dataMax) dataMax = value;
+                    }
+                }
+                if (dataMin !== Infinity) {
+                    const range = dataMax - dataMin;
+                    const padding = range * 0.1;
+                    yMin = Math.floor(dataMin - padding);
+                    yMax = Math.ceil(dataMax + padding);
+                    console.log(`${graphKey} y-axis range: ${yMin} to ${yMax}`);
+                }
+            }
+
+            const option = {
+                tooltip: {
+                    trigger: 'axis',
+                    axisPointer: { type: 'cross' },
+                    formatter: function(params) {
+                        if (!params || params.length === 0) return '';
+                        const time = new Date(params[0].value[0]).toLocaleString();
+                        let html = `<strong>${time}</strong><br/>`;
+                        for (const p of params) {
+                            html += `<span style="color:${p.color}">●</span> ${p.seriesName}: ${config.valueFormatter(p.value[1])}<br/>`;
+                        }
+                        return html;
+                    }
+                },
+                xAxis: {
+                    type: 'time',
+                    name: '',
+                    axisLabel: {
+                        fontSize: 10,
+                        formatter: function(value) {
+                            const date = new Date(value);
+                            return `${date.getUTCHours().toString().padStart(2, '0')}:${date.getUTCMinutes().toString().padStart(2, '0')}`;
+                        }
+                    }
+                },
+                yAxis: {
+                    type: 'value',
+                    name: '',
+                    min: yMin,
+                    max: yMax,
+                    nameLocation: 'middle'
+                },
+                series: series,
+                legend: {
+                    type: 'scroll',
+                    orient: 'horizontal',
+                    bottom: 0,
+                    left: 'center',
+                    textStyle: { fontSize: 8, lineHeight: 10 },
+                    itemWidth: 20,
+                    itemHeight: 8,
+                    icon: 'roundRect'
+                },
+                grid: {
+                    left: '8%',
+                    right: '8%',
+                    top: '5%',
+                    bottom: '15%'
+                },
+                dataZoom: [{ type: 'inside', start: 0, end: 100 }]
+            };
+
+            const chart = echarts.init(container);
+            chart.setOption(option);
+            window.addEventListener('resize', () => chart.resize());
+            console.log(`Chart initialized for ${graphKey}`);
+            return chart;
+        }
+
+        function toggleGraphExpand(graphKey) {
+            const graphCard = document.querySelector(`.graph-card[data-graph="${graphKey}"]`);
+            if (!graphCard) return;
+
+            const isExpanded = graphCard.classList.contains('expanded');
+            document.querySelectorAll('.graph-card.expanded').forEach(card => card.classList.remove('expanded'));
+
+            if (!isExpanded) {
+                graphCard.classList.add('expanded');
+                expandedGraph = graphKey;
+            } else {
+                expandedGraph = null;
+            }
+
+            setTimeout(() => {
+                if (graphCharts[graphKey]) graphCharts[graphKey].resize();
+            }, 100);
+        }
+
+        function setupTimeRangeSelector() {
+            const selector = document.getElementById('timeRangeSelect');
+            if (!selector) return;
+
+            selector.value = currentTimeRange.hours;  // Set to current value
+
+            selector.onchange = () => {
+                const hours = parseInt(selector.value);
+                currentTimeRange = TIME_RANGES.find(r => r.hours === hours) || TIME_RANGES[2];
+                customTimeRange = null;
+                loadGraphs();
+            };
+        }
+
+        function setupGraphEventListeners() {
+            const refreshBtn = document.getElementById('refreshGraphsBtn');
+            if (refreshBtn) refreshBtn.onclick = () => loadGraphs();
+
+            const nodeFilter = document.getElementById('graphNodeFilter');
+            if (nodeFilter) nodeFilter.onchange = () => loadGraphs();
+        }
+
+        async function initGraphView() {
+            // Add styles (fast, synchronous)
+            const style = document.createElement('style');
+            style.textContent = `
+                .view-btn { padding: 4px 12px; font-size: 12px; border: 1px solid #ddd; border-radius: 20px; background: white; cursor: pointer; }
+                .view-btn:hover { background: #e3f2fd; }
+                .view-btn.active { background: #2196f3; color: white; border-color: #2196f3; }
+                .graph-view { background: white; border-radius: 8px; padding: 15px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-top: 10px; }
+                .graph-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; flex-wrap: wrap; gap: 10px; }
+                .time-range-selector { display: flex; gap: 5px; flex-wrap: wrap; }
+                .time-btn { padding: 4px 10px; font-size: 11px; border: 1px solid #ddd; border-radius: 15px; background: white; cursor: pointer; }
+                .time-btn:hover { background: #e3f2fd; }
+                .time-btn.active { background: #2196f3; color: white; }
+                .graph-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px; }
+                .graph-card { background: #fafafa; border-radius: 8px; padding: 12px; border: 1px solid #e0e0e0; cursor: pointer; }
+                .graph-card.expanded { grid-column: 1 / -1; cursor: default; }
+                .graph-card:hover:not(.expanded) { box-shadow: 0 2px 8px rgba(0,0,0,0.1); border-color: #2196f3; }
+                .graph-title { font-size: 14px; font-weight: bold; margin-bottom: 10px; color: #333; display: flex; justify-content: space-between; }
+                .graph-expand-hint { font-size: 10px; color: #999; font-weight: normal; }
+                .graph-container { height: 300px; width: 100%; }
+                .graph-card.expanded .graph-container { height: 500px; }
+                .graph-loading, .no-data-message { text-align: center; padding: 40px; color: #999; }
+                @media (max-width: 1000px) { .graph-grid { grid-template-columns: 1fr; } }
+            `;
+            document.head.appendChild(style);
+
+            createGraphViewContainer();
+
+            // Create the view selector buttons IMMEDIATELY (don't wait for API)
+            createViewSelector();
+
+            // Setup time range selector and event listeners (they'll work when graphs load)
+            setupTimeRangeSelector();
+            setupGraphEventListeners();
+            requestAnimationFrame(() => loadAvailableNodes());
+
+            // Load ECharts asynchronously and start pre-fetching
+            if (typeof echarts === 'undefined') {
+                const script = document.createElement('script');
+                script.src = 'https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js';
+                script.onload = () => {
+                    // Start background pre-fetching immediately
+                    preFetchGraphData();
+                };
+                document.head.appendChild(script);
+            } else {
+                console.log('ECharts already loaded');
+                preFetchGraphData();
+            }
+        }
+
+        // Cache for multiple time ranges
+        let timeRangeCache = {};
+
+        // Pre-fetch data for a specific time range
+        async function preFetchTimeRange(hours, label) {
+            const endTime = Math.floor(Date.now() / 1000);
+            const startTime = endTime - (hours);
+
+            // Use same rounding as loadGraphs
+            const roundedStart = Math.floor(startTime / 3600) * 3600;
+            const roundedEnd = Math.floor(endTime / 3600) * 3600;
+            const cacheKey = `${roundedStart}_${roundedEnd}_all`;
+
+            // Check if already cached
+            if (timeRangeCache[cacheKey]) {
+                console.log(`${label} already cached`);
+                return;
+            }
+
+            const start = Date.now();
+            console.log(`Background: Starting pre-fetch for ${label} at ${new Date().toLocaleTimeString()}`);
+
+            try {
+                // Use original times for the actual query
+                const response = await fetch('/api/graph/data', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        start_time: startTime,
+                        end_time: endTime,
+                        nodes: []
+                    })
+                });
+                const data = await response.json();
+
+                if (!data.error) {
+                    // Store using rounded key
+                    timeRangeCache[cacheKey] = data;
+                    const elapsed = ((Date.now() - start) / 1000).toFixed(1);
+                    console.log(`Background: ${label} cached successfully after ${elapsed} seconds`);
+                }
+            } catch (e) {
+                console.log(`Background: Failed to pre-fetch ${label}:`, e);
+            }
+        }
+
+        // Main pre-fetch function
+        async function preFetchGraphData() {
+            console.log('Background: Starting data pre-fetch...');
+
+            // Fetch Last Hour first (fastest, most likely to be viewed)
+            preFetchTimeRange(3600, 'Last Hour');
+
+            // Fetch Last 24 Hours immediately (no delay) but don't await it
+            // This runs in the background while user is looking at the page
+            preFetchTimeRange(86400, 'Last 24 Hours');
+
+            // Optionally fetch Last 6 Hours as well
+            preFetchTimeRange(21600, 'Last 6 Hours');
+        }
+
+        // Initialize graphs when DOM is ready
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', () => initGraphView());
+        } else {
+            initGraphView();
+        }
+
+        // ============ END GRAPH VIEW CODE ============
+
         </script>
 </body>
 </html>'''
@@ -4326,7 +5456,9 @@ def main():
     parser.add_argument("--log-level", type=str, default="INFO",
                         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
                         help="Logging level (default: INFO)")
-
+    parser.add_argument("--db-path", type=Path, default=None,
+                        help="Path to SQLite database for metrics graphs (e.g., /mnt/ssd/logs.db)."
+                        " If not provided, graph features will be disabled.")
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -4350,7 +5482,8 @@ def main():
         port=args.port,
         nodes_dir=args.nodes_dir,
         cfg_file=cfg_file,
-        http_port=args.http_port
+        http_port=args.http_port,
+        db_path=args.db_path
     )
 
     print(f"\n{'='*60}")

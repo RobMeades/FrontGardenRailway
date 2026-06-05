@@ -274,7 +274,7 @@ class HandleFirmware:
             </style>
         </head>
         <body>
-            <h1>FGT OTA Dashboard</h1>
+            <h1>FGR OTA Dashboard</h1>
             <p class="sub">Software version dashboard.</p>
             <table>
                 <thead>

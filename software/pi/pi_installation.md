@@ -67,6 +67,8 @@ For isolation, the Raspberry Pi should be installed on a VLAN of the home networ
 
 - Note: later you can use `log_viewer.py` to query the database.
 
+- You can do the same thing with `sudo nano /lib/systemd/system/web_controller.service`, i.e. add `--db-path /mnt/ssd/logs.db` to the end of the `ExecStart` line, do a `sudo systemctl daemon-reload` and then restart the `web_controller` service  with `sudo systemctl restart log_server` and it will now plot graphs using data from the database.
+
 - Since you now have a large writable SSD, you might want to move the `~/fw` directory to it, `sudo nano /lib/systemd/system/https_server.service` to point the working directory to the new location and then `sudo systemctl deamon-reload`, `sudo systemctl restart https_server`.
 
 - Now, assuming port 8060 is open, `log_server.py` can provide links that allow the local script `crash_decoder.py` to decode crash dumps (unfortunately there is no pre-compiled version of the Espressif tools for the Raspberry Pi Zero).  To enable this, `sudo nano /lib/systemd/system/log_server.service` and change the `ExecStart` line to something like:
