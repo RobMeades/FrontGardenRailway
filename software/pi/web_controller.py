@@ -5118,7 +5118,7 @@ class WebController(Controller):
                 isEvent: true
             },
             heap: {
-                title: 'Free Heap Memory (KB)',
+                title: 'Min Free Heap Memory (KB)',
                 yAxisLabel: '',
                 yAxisMin: 0,
                 valueFormatter: (v) => {
