@@ -272,163 +272,14 @@ class WebController(Controller):
         # Store metrics for each node
         self.node_metrics: Dict[str, Dict[str, Any]] = {}
 
+        # Create a thread pool for database queries
+        self.db_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+
         self.graph_cache = {}  # Simple in-memory cache
         self.graph_cache_timeout = 300  # 5 minutes
 
-        # Initialize metrics history table for fast queries
-        if self.graphs_enabled:
-            self._init_metrics_history()
-
         # Record start time
         self._start_time = time.time()
-
-    def _init_metrics_history(self):
-        """Initialize the metrics_history table for fast queries"""
-        print("_init_metrics_history: Starting...")
-
-        conn = self._get_metrics_db_connection()
-        if not conn:
-            print("_init_metrics_history: No database connection")
-            return
-
-        try:
-            cursor = conn.cursor()
-
-            # Create table
-            print("Creating metrics_history table if not exists...")
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS metrics_history (
-                    epoch_time INTEGER NOT NULL,
-                    node_ip TEXT NOT NULL,
-                    rssi INTEGER,
-                    heap INTEGER,
-                    wifi_failures INTEGER,
-                    panics INTEGER,
-                    ctrl_disconnects INTEGER,
-                    log_disconnects INTEGER,
-                    PRIMARY KEY (epoch_time, node_ip)
-                )
-            """)
-
-            # Get source count
-            cursor.execute("SELECT COUNT(*) FROM device_logs WHERE message_type = 'METRIC'")
-            source_count = cursor.fetchone()[0]
-            print(f"Source device_logs has {source_count} metric rows")
-
-            # Check current row count
-            cursor.execute("SELECT COUNT(*) FROM metrics_history")
-            current_count = cursor.fetchone()[0]
-            print(f"metrics_history has {current_count} rows")
-
-            # Backfill if missing more than 10% of data
-            if current_count < source_count * 0.9:
-                print(f"Starting backfill (have {current_count}, need {source_count})...")
-
-                # Clear the table first to avoid duplicates
-                cursor.execute("DELETE FROM metrics_history")
-                conn.commit()
-
-                # Insert in batches to avoid memory issues
-                batch_size = 50000
-                offset = 0
-
-                while offset < source_count:
-                    # Use INSERT OR REPLACE to handle duplicates, and take the latest values
-                    cursor.execute(f"""
-                        INSERT OR REPLACE INTO metrics_history (epoch_time, node_ip, rssi, heap, wifi_failures, panics, ctrl_disconnects, log_disconnects)
-                        SELECT
-                            epoch_time,
-                            node_ip,
-                            json_extract(substr(message, instr(message, '{{')), '$.dbm'),
-                            json_extract(substr(message, instr(message, '{{')), '$.heap'),
-                            json_extract(substr(message, instr(message, '{{')), '$.w.-.n'),
-                            json_extract(substr(message, instr(message, '{{')), '$.panic.n'),
-                            json_extract(substr(message, instr(message, '{{')), '$.cnt_c.-.n'),
-                            json_extract(substr(message, instr(message, '{{')), '$.log_c.-.n')
-                        FROM device_logs
-                        WHERE message_type = 'METRIC'
-                        GROUP BY epoch_time, node_ip
-                        LIMIT {batch_size} OFFSET {offset}
-                    """)
-                    conn.commit()
-                    offset += batch_size
-                    print(f"Backfilled {offset}/{source_count} rows")
-
-                print("Backfill complete")
-
-            # Create indexes (only if they don't exist)
-            print("Creating indexes...")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_history_epoch ON metrics_history(epoch_time)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_history_node_ip ON metrics_history(node_ip)")
-
-            # Create trigger for new inserts
-            print("Creating trigger...")
-            cursor.execute("""
-                CREATE TRIGGER IF NOT EXISTS update_metrics_history
-                AFTER INSERT ON device_logs
-                WHEN NEW.message_type = 'METRIC'
-                BEGIN
-                    INSERT OR REPLACE INTO metrics_history (
-                        epoch_time, node_ip, rssi, heap,
-                        wifi_failures, panics, ctrl_disconnects, log_disconnects
-                    ) VALUES (
-                        NEW.epoch_time,
-                        NEW.node_ip,
-                        json_extract(substr(NEW.message, instr(NEW.message, '{')), '$.dbm'),
-                        json_extract(substr(NEW.message, instr(NEW.message, '{')), '$.heap'),
-                        json_extract(substr(NEW.message, instr(NEW.message, '{')), '$.w.-.n'),
-                        json_extract(substr(NEW.message, instr(NEW.message, '{')), '$.panic.n'),
-                        json_extract(substr(NEW.message, instr(NEW.message, '{')), '$.cnt_c.-.n'),
-                        json_extract(substr(NEW.message, instr(NEW.message, '{')), '$.log_c.-.n')
-                    );
-                END
-            """)
-
-            # Verify final count
-            cursor.execute("SELECT COUNT(*) FROM metrics_history")
-            final_count = cursor.fetchone()[0]
-            print(f"metrics_history final count: {final_count} rows")
-
-            conn.commit()
-            print("_init_metrics_history: Complete")
-
-        except Exception as e:
-            print(f"Error initializing metrics_history: {e}")
-            import traceback
-            traceback.print_exc()
-        finally:
-            conn.close()
-
-    def _trim_metrics_history(self, days=30):
-        """Remove metrics older than specified days"""
-        conn = self._get_metrics_db_connection()
-        if not conn:
-            return
-
-        try:
-            cursor = conn.cursor()
-            cutoff = time.time() - (days * 86400)
-            cursor.execute("DELETE FROM metrics_history WHERE epoch_time < ?", (cutoff,))
-            conn.commit()
-            if cursor.rowcount > 0:
-                self._log_message(f"Trimmed {cursor.rowcount} rows from metrics_history older than {days} days")
-        except Exception as e:
-            self._log_message(f"Error trimming metrics_history: {e}")
-        finally:
-            conn.close()
-
-    def _start_metrics_trimmer(self):
-        """Start background thread to trim old metrics daily"""
-        def trimmer_loop():
-            while self.web_running:
-                # Trim once per day (86400 seconds)
-                time.sleep(86400)
-                if self.graphs_enabled:
-                    self._trim_metrics_history()
-
-        trimmer_thread = threading.Thread(target=trimmer_loop, daemon=True)
-        trimmer_thread.start()
-        self._log_message("Metrics trimmer started (runs daily)")
 
     def _load_node_grid_layout(self) -> Dict[str, Any]:
         """Load node grid layout from config file"""
@@ -1059,6 +910,11 @@ class WebController(Controller):
             'log_level_names': LOG_LEVEL_NAMES
         }
 
+    async def _run_db_query(self, query_func, *args):
+        """Run a database query in a thread pool to avoid blocking the event loop"""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(self.db_executor, query_func, *args)
+
     async def _broadcast_status(self):
         """Broadcast status updates to SSE clients"""
         last_status = None
@@ -1619,16 +1475,10 @@ class WebController(Controller):
         """Get connection to metrics database"""
         if not self.graphs_enabled or not self.db_path or not self.db_path.exists():
             return None
-        conn = sqlite3.connect(str(self.db_path))
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=5000")
-        return conn
+        return sqlite3.connect(str(self.db_path))
 
     async def handle_api_graph_data(self, request):
         """Get graph data for all metrics"""
-        import time as time_module
-        start_total = time_module.time()
-
         if not self.graphs_enabled:
             return web.json_response({'error': 'Graphs disabled'}, status=503)
 
@@ -1636,8 +1486,6 @@ class WebController(Controller):
         end_time = data.get('end_time', time.time())
         start_time = data.get('start_time', end_time - (24 * 3600))
         node_ips = data.get('nodes', [])
-
-        duration = end_time - start_time
 
         # Create cache key
         cache_key = f"{int(start_time/3600)}_{int(end_time/3600)}_{','.join(sorted(node_ips))}"
@@ -1648,18 +1496,15 @@ class WebController(Controller):
             if time.time() - cached_time < self.graph_cache_timeout:
                 return web.json_response(cached_data)
 
-        # Run each query in its own thread (not using a shared executor)
-        # This creates a new thread for each query, allowing true parallelism
-        results = await asyncio.gather(
-            asyncio.to_thread(self._query_rssi_data, start_time, end_time, node_ips),
-            asyncio.to_thread(self._query_wifi_failures, start_time, end_time, node_ips),
-            asyncio.to_thread(self._query_panics, start_time, end_time, node_ips),
-            asyncio.to_thread(self._query_ctrl_disconnects, start_time, end_time, node_ips),
-            asyncio.to_thread(self._query_log_disconnects, start_time, end_time, node_ips),
-            asyncio.to_thread(self._query_heap, start_time, end_time, node_ips),
-        )
+        loop = asyncio.get_event_loop()
 
-        rssi_data, wifi_failures_data, panics_data, ctrl_disconnects_data, log_disconnects_data, heap_data = results
+        # Query all metrics in parallel
+        rssi_data = await loop.run_in_executor(self.db_executor, self._query_rssi_data, start_time, end_time, node_ips)
+        wifi_failures_data = await loop.run_in_executor(self.db_executor, self._query_wifi_failures, start_time, end_time, node_ips)
+        panics_data = await loop.run_in_executor(self.db_executor, self._query_panics, start_time, end_time, node_ips)
+        ctrl_disconnects_data = await loop.run_in_executor(self.db_executor, self._query_ctrl_disconnects, start_time, end_time, node_ips)
+        log_disconnects_data = await loop.run_in_executor(self.db_executor, self._query_log_disconnects, start_time, end_time, node_ips)
+        heap_data = await loop.run_in_executor(self.db_executor, self._query_heap, start_time, end_time, node_ips)
 
         result = {
             'rssi': rssi_data,
@@ -1676,38 +1521,8 @@ class WebController(Controller):
 
         return web.json_response(result)
 
-
-    def _apply_downsampling(self, rows, start_time, end_time):
-        """Apply downsampling to query results based on time range duration"""
-        duration = end_time - start_time
-
-        # Calculate step based on duration
-        if duration > 432000:      # > 5 days
-            step = 30
-        elif duration > 259200:    # > 3 days
-            step = 20
-        elif duration > 172800:    # > 48 hours (2 days)
-            step = 12
-        elif duration > 86400:     # > 24 hours
-            step = 6
-        elif duration > 21600:     # > 6 hours
-            step = 2
-        else:                      # <= 6 hours
-            step = 1
-
-        if step == 1:
-            return rows
-
-        # Take every Nth row
-        downsampled = []
-        for i, row in enumerate(rows):
-            if i % step == 0:
-                downsampled.append(row)
-
-        return downsampled
-
     def _query_rssi_data(self, start_time, end_time, node_ips):
-        """Query RSSI values from metrics_history (fast path)"""
+        """Query RSSI values from metrics database"""
         conn = self._get_metrics_db_connection()
         if not conn:
             return {}
@@ -1722,20 +1537,22 @@ class WebController(Controller):
                 node_filter = f"AND node_ip IN ({placeholders})"
                 params.extend(node_ips)
 
+            # Escape curly braces by doubling them: {{ and }}
             query = f"""
-                SELECT epoch_time, node_ip, rssi
-                FROM metrics_history
-                WHERE rssi IS NOT NULL
+                SELECT epoch_time, node_ip,
+                    json_extract(substr(message, instr(message, '{{')), '$.dbm') as rssi
+                FROM device_logs
+                WHERE message_type = 'METRIC'
                 AND epoch_time BETWEEN ? AND ?
                 {node_filter}
+                AND json_extract(substr(message, instr(message, '{{')), '$.dbm') IS NOT NULL
                 ORDER BY epoch_time ASC
             """
 
             cursor.execute(query, params)
             rows = cursor.fetchall()
 
-            # Apply downsampling
-            rows = self._apply_downsampling(rows, start_time, end_time)
+            self._log_message(f"RSSI query returned {len(rows)} rows")
 
             result = {}
             for row in rows:
@@ -1745,17 +1562,29 @@ class WebController(Controller):
                         result[node_ip] = []
                     result[node_ip].append([epoch_time * 1000, rssi])
 
+            # Downsample if too many points
+            for node_ip in result:
+                points = result[node_ip]
+                if len(points) > 5000:
+                    step = max(1, len(points) // 3000)
+                    result[node_ip] = points[::step]
+                    self._log_message(f"Downsampled {node_ip}: {len(points)} -> {len(result[node_ip])} points")
+
             total_points = sum(len(v) for v in result.values())
+            self._log_message(f"RSSI: {total_points} points from {len(result)} nodes")
             return result
 
         except Exception as e:
             self._log_message(f"Error querying RSSI: {e}")
+            import traceback
+            self._log_message(traceback.format_exc())
             return {}
         finally:
             conn.close()
 
+
     def _query_wifi_failures(self, start_time, end_time, node_ips):
-        """Query WiFi connection failures from metrics_history (fast path)"""
+        """Query WiFi connection failures from metrics (w.-.n field)"""
         conn = self._get_metrics_db_connection()
         if not conn:
             return {}
@@ -1770,19 +1599,22 @@ class WebController(Controller):
                 node_filter = f"AND node_ip IN ({placeholders})"
                 params.extend(node_ips)
 
+            # Escape curly braces by doubling them: {{ and }}
             query = f"""
-                SELECT epoch_time, node_ip, wifi_failures
-                FROM metrics_history
-                WHERE wifi_failures IS NOT NULL AND wifi_failures > 0
+                SELECT epoch_time, node_ip,
+                    json_extract(substr(message, instr(message, '{{')), '$.w.-.n') as failures
+                FROM device_logs
+                WHERE message_type = 'METRIC'
                 AND epoch_time BETWEEN ? AND ?
                 {node_filter}
+                AND json_extract(substr(message, instr(message, '{{')), '$.w.-.n') > 0
                 ORDER BY epoch_time ASC
             """
 
             cursor.execute(query, params)
             rows = cursor.fetchall()
 
-            rows = self._apply_downsampling(rows, start_time, end_time)
+            self._log_message(f"WiFi failures query returned {len(rows)} rows")
 
             result = {}
             for row in rows:
@@ -1793,6 +1625,7 @@ class WebController(Controller):
                     result[node_ip].append([epoch_time * 1000, failures])
 
             total_points = sum(len(v) for v in result.values())
+            self._log_message(f"WiFi failures: {total_points} points from {len(result)} nodes")
             return result
 
         except Exception as e:
@@ -1802,7 +1635,7 @@ class WebController(Controller):
             conn.close()
 
     def _query_panics(self, start_time, end_time, node_ips):
-        """Query panic events from metrics_history (fast path)"""
+        """Query panic events from metrics (panic.n field)"""
         conn = self._get_metrics_db_connection()
         if not conn:
             return {}
@@ -1818,18 +1651,18 @@ class WebController(Controller):
                 params.extend(node_ips)
 
             query = f"""
-                SELECT epoch_time, node_ip, panics
-                FROM metrics_history
-                WHERE panics IS NOT NULL AND panics > 0
+                SELECT epoch_time, node_ip,
+                    json_extract(substr(message, instr(message, '{{')), '$.panic.n') as panics
+                FROM device_logs
+                WHERE message_type = 'METRIC'
                 AND epoch_time BETWEEN ? AND ?
                 {node_filter}
+                AND json_extract(substr(message, instr(message, '{{')), '$.panic.n') > 0
                 ORDER BY epoch_time ASC
             """
 
             cursor.execute(query, params)
             rows = cursor.fetchall()
-
-            rows = self._apply_downsampling(rows, start_time, end_time)
 
             result = {}
             for row in rows:
@@ -1839,7 +1672,7 @@ class WebController(Controller):
                         result[node_ip] = []
                     result[node_ip].append([epoch_time * 1000, panics])
 
-            total_points = sum(len(v) for v in result.values())
+            self._log_message(f"Panics: {sum(len(v) for v in result.values())} points from {len(result)} nodes")
             return result
 
         except Exception as e:
@@ -1848,8 +1681,9 @@ class WebController(Controller):
         finally:
             conn.close()
 
+
     def _query_ctrl_disconnects(self, start_time, end_time, node_ips):
-        """Query controller disconnection events from metrics_history (fast path)"""
+        """Query controller disconnection events (cnt_c.-.n field)"""
         conn = self._get_metrics_db_connection()
         if not conn:
             return {}
@@ -1865,18 +1699,18 @@ class WebController(Controller):
                 params.extend(node_ips)
 
             query = f"""
-                SELECT epoch_time, node_ip, ctrl_disconnects
-                FROM metrics_history
-                WHERE ctrl_disconnects IS NOT NULL AND ctrl_disconnects > 0
+                SELECT epoch_time, node_ip,
+                    json_extract(substr(message, instr(message, '{{')), '$.cnt_c.-.n') as disconnects
+                FROM device_logs
+                WHERE message_type = 'METRIC'
                 AND epoch_time BETWEEN ? AND ?
                 {node_filter}
+                AND json_extract(substr(message, instr(message, '{{')), '$.cnt_c.-.n') > 0
                 ORDER BY epoch_time ASC
             """
 
             cursor.execute(query, params)
             rows = cursor.fetchall()
-
-            rows = self._apply_downsampling(rows, start_time, end_time)
 
             result = {}
             for row in rows:
@@ -1886,7 +1720,7 @@ class WebController(Controller):
                         result[node_ip] = []
                     result[node_ip].append([epoch_time * 1000, disconnects])
 
-            total_points = sum(len(v) for v in result.values())
+            self._log_message(f"Controller disconnects: {sum(len(v) for v in result.values())} points from {len(result)} nodes")
             return result
 
         except Exception as e:
@@ -1895,8 +1729,9 @@ class WebController(Controller):
         finally:
             conn.close()
 
+
     def _query_log_disconnects(self, start_time, end_time, node_ips):
-        """Query log server disconnection events from metrics_history (fast path)"""
+        """Query log server disconnection events (log_c.-.n field)"""
         conn = self._get_metrics_db_connection()
         if not conn:
             return {}
@@ -1912,18 +1747,18 @@ class WebController(Controller):
                 params.extend(node_ips)
 
             query = f"""
-                SELECT epoch_time, node_ip, log_disconnects
-                FROM metrics_history
-                WHERE log_disconnects IS NOT NULL AND log_disconnects > 0
+                SELECT epoch_time, node_ip,
+                    json_extract(substr(message, instr(message, '{{')), '$.log_c.-.n') as disconnects
+                FROM device_logs
+                WHERE message_type = 'METRIC'
                 AND epoch_time BETWEEN ? AND ?
                 {node_filter}
+                AND json_extract(substr(message, instr(message, '{{')), '$.log_c.-.n') > 0
                 ORDER BY epoch_time ASC
             """
 
             cursor.execute(query, params)
             rows = cursor.fetchall()
-
-            rows = self._apply_downsampling(rows, start_time, end_time)
 
             result = {}
             for row in rows:
@@ -1933,7 +1768,7 @@ class WebController(Controller):
                         result[node_ip] = []
                     result[node_ip].append([epoch_time * 1000, disconnects])
 
-            total_points = sum(len(v) for v in result.values())
+            self._log_message(f"Log server disconnects: {sum(len(v) for v in result.values())} points from {len(result)} nodes")
             return result
 
         except Exception as e:
@@ -1942,8 +1777,9 @@ class WebController(Controller):
         finally:
             conn.close()
 
+
     def _query_heap(self, start_time, end_time, node_ips):
-        """Query heap free memory from metrics_history (fast path)"""
+        """Query heap free memory from metrics (heap field)"""
         conn = self._get_metrics_db_connection()
         if not conn:
             return {}
@@ -1959,18 +1795,18 @@ class WebController(Controller):
                 params.extend(node_ips)
 
             query = f"""
-                SELECT epoch_time, node_ip, heap
-                FROM metrics_history
-                WHERE heap IS NOT NULL
+                SELECT epoch_time, node_ip,
+                    json_extract(substr(message, instr(message, '{{')), '$.heap') as heap
+                FROM device_logs
+                WHERE message_type = 'METRIC'
                 AND epoch_time BETWEEN ? AND ?
                 {node_filter}
+                AND json_extract(substr(message, instr(message, '{{')), '$.heap') IS NOT NULL
                 ORDER BY epoch_time ASC
             """
 
             cursor.execute(query, params)
             rows = cursor.fetchall()
-
-            rows = self._apply_downsampling(rows, start_time, end_time)
 
             result = {}
             for row in rows:
@@ -1980,7 +1816,14 @@ class WebController(Controller):
                         result[node_ip] = []
                     result[node_ip].append([epoch_time * 1000, heap])
 
-            total_points = sum(len(v) for v in result.values())
+            # Downsample if too many points
+            for node_ip in result:
+                points = result[node_ip]
+                if len(points) > 5000:
+                    step = max(1, len(points) // 3000)
+                    result[node_ip] = points[::step]
+
+            self._log_message(f"Heap: {sum(len(v) for v in result.values())} points from {len(result)} nodes")
             return result
 
         except Exception as e:
@@ -2000,6 +1843,7 @@ class WebController(Controller):
             if node.ip:  # Only include nodes that have an IP
                 nodes.append({'ip': node.ip, 'name': name})
 
+        self._log_message(f"Returning {len(nodes)} nodes from controller config")
         return web.json_response({'nodes': nodes})
 
     async def handle_api_graph_time_range(self, request):
@@ -2096,10 +1940,6 @@ class WebController(Controller):
         if not hasattr(Node, 'last_seen'):
             Node.last_seen = 0.0
 
-        # Start background metrics trimmer
-        if self.graphs_enabled:
-            self._start_metrics_trimmer()
-
         if not super().start():
             return False
         self.start_web()
@@ -2116,6 +1956,8 @@ class WebController(Controller):
         """Stop the controller and web server"""
         self._stop_journal_reader()
         self.stop_web()
+        if hasattr(self, 'db_executor'):
+            self.db_executor.shutdown(wait=True)
         super().stop()
 
     def _get_html_template(self) -> str:
@@ -3194,16 +3036,8 @@ class WebController(Controller):
             flex: 1;
             width: 100%;
             min-height: 0;
-            position: relative;
         }
 
-        .graph-container canvas {
-            width: 100% !important;
-            height: 100% !important;
-            position: absolute;
-            top: 0;
-            left: 0;
-        }
         .graph-header {
             display: flex;
             justify-content: space-between;
@@ -3389,9 +3223,14 @@ class WebController(Controller):
         let isDragging = false;
         let dragSourceNode = null;
 
-        // Graphing data cache
-        let simpleCache = {};
-        let currentChartData = {};
+        let graphDataCache = {
+            lastParams: null,
+            data: null
+        };
+
+        // Cache for hourly metrics blocks for graphing:
+        let hourlyBlocks = {}; // Key: hour timestamp (aligned), Value: block data
+        let fetchingBlocks = new Set();
 
         // Log level names
         const logLevelNames = ['DEBUG', 'INFO', 'WARN', 'ERROR'];
@@ -5153,7 +4992,9 @@ class WebController(Controller):
                     if (!window._graphsInitialized) {
                         initializeGraphComponents();
                     }
-                    loadGraphs();
+                    if (Object.keys(graphCharts).length === 0) {
+                        loadGraphs();
+                    }
                 }
                 updateViewSelector('graphs');
                 // Change footer text for graph view
@@ -5187,7 +5028,7 @@ class WebController(Controller):
                     createViewSelector();  // This creates the buttons
                     setupTimeRangeSelector();
                     setupGraphEventListeners();
-                    loadAvailableNodes();
+                    loadAvailableNodes();  // <-- ADD THIS LINE to populate the dropdown
                 })
                 .catch(e => console.log('Graphs not available:', e));
 
@@ -5256,6 +5097,7 @@ class WebController(Controller):
                             <option value="all">All Nodes</option>
                         </select>
                         <button id="refreshGraphsBtn" style="padding: 4px 8px; font-size: 10px;">🔄 Refresh</button>
+                        <span class="multi-select-hint" style="font-size: 9px; color: #999;">⌘/Ctrl+Click</span>
                     </div>
                 </div>
                 <div class="graph-grid" id="graphGrid">
@@ -5267,36 +5109,123 @@ class WebController(Controller):
             return container;
         }
 
-        async function loadGraphs() {
-            const now = Math.floor(Date.now() / 1000);
-            const startTime = now - (currentTimeRange.hours * 3600);
-            const cacheKey = `${currentTimeRange.hours}_${Math.floor(startTime / 60)}`;
+        async function ensureBlockLoaded(hourTimestamp) {
+            const blockHour = Math.floor(hourTimestamp / 3600) * 3600;
+            if (hourlyBlocks[blockHour] || fetchingBlocks.has(blockHour)) return;
 
-            if (simpleCache[cacheKey]) {
-                renderGraphs(simpleCache[cacheKey]);
-                return;
-            }
-
-            const graphGrid = document.getElementById('graphGrid');
-            if (graphGrid) {
-                    graphGrid.innerHTML = `<div style="grid-column:1/-1;text-align:center;padding:40px;">📊 Loading data... (can take a while on a littul Pi Zero)</div>`;
-            }
+            fetchingBlocks.add(blockHour);
+            console.log(`Fetching block: ${new Date(blockHour*1000).toLocaleString()}`);
 
             try {
                 const response = await fetch('/api/graph/data', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        start_time: startTime,
-                        end_time: now,
+                        start_time: blockHour,
+                        end_time: blockHour + 3600,
                         nodes: []
                     })
                 });
                 const data = await response.json();
-                simpleCache[cacheKey] = data;
-                renderGraphs(data);
-            } catch (e) {
-                console.error('Error loading graphs:', e);
+                hourlyBlocks[blockHour] = data;
+
+                // Only refresh if this block overlaps the current sliding window
+                const now = Math.floor(Date.now() / 1000);
+                const startTime = now - (currentTimeRange.hours * 3600);
+                const blockEnd = blockHour + 3600;
+                const isRelevant = (blockEnd > startTime && blockHour < now);
+
+                if (isRelevant) {
+                    refreshCurrentView(false);
+                } else {
+                    console.log(`Block ${new Date(blockHour*1000).toLocaleString()} not relevant, skipping refresh`);
+                }
+            } catch(e) {
+                console.error(`Failed to load block ${blockHour}:`, e);
+            }
+        }
+
+        async function loadGraphs() {
+            const now = Math.floor(Date.now() / 1000);
+            const sevenDaysAgo = now - (7 * 86400);
+            const sevenDaysBlock = Math.floor(sevenDaysAgo / 3600) * 3600;
+            const endBlock = Math.floor(now / 3600) * 3600;
+
+            console.log(`Loading blocks from ${new Date(sevenDaysBlock*1000).toLocaleString()} to ${new Date(endBlock*1000).toLocaleString()}`);
+
+            // Fetch ALL blocks from 7 days ago to now, in REVERSE order (most recent first)
+            for (let block = endBlock; block >= sevenDaysBlock; block -= 3600) {
+                ensureBlockLoaded(block);
+            }
+
+            // Show loading indicator
+            refreshCurrentView(true);
+        }
+
+        function refreshCurrentView(showLoadingIfEmpty = false) {
+            const now = Math.floor(Date.now() / 1000);
+            const startTime = now - (currentTimeRange.hours * 3600);
+
+            // Get selected nodes from the dropdown
+            const nodeFilter = document.getElementById('graphNodeFilter');
+            const selectedNodes = nodeFilter ? Array.from(nodeFilter.selectedOptions).map(opt => opt.value) : [];
+            const includeAllNodes = selectedNodes.includes('all') || selectedNodes.length === 0;
+
+            console.log(`refreshCurrentView: hours=${currentTimeRange.hours}, startTime=${new Date(startTime*1000).toLocaleString()}, now=${new Date(now*1000).toLocaleString()}`);
+            console.log(`Selected nodes:`, selectedNodes, `include all:`, includeAllNodes);
+
+            const mergedData = {
+                rssi: {}, wifi_failures: {}, panics: {},
+                ctrl_disconnects: {}, log_disconnects: {}, heap: {}
+            };
+
+            let hasAnyData = false;
+
+            for (const [blockHour, blockData] of Object.entries(hourlyBlocks)) {
+                const blockStart = parseInt(blockHour);
+                const blockEnd = blockStart + 3600;
+
+                // Check if this block overlaps with our sliding window
+                const shouldInclude = (blockEnd > startTime && blockStart < now);
+
+                if (shouldInclude) {
+                    for (const metric of Object.keys(mergedData)) {
+                        for (const [nodeIp, points] of Object.entries(blockData[metric] || {})) {
+                            // Filter by selected nodes
+                            if (!includeAllNodes && !selectedNodes.includes(nodeIp)) {
+                                continue;  // Skip this node if not selected
+                            }
+
+                            // Filter points within the exact time window
+                            const filteredPoints = points.filter(point => point[0] >= startTime*1000 && point[0] <= now*1000);
+                            if (filteredPoints.length > 0) {
+                                if (!mergedData[metric][nodeIp]) mergedData[metric][nodeIp] = [];
+                                mergedData[metric][nodeIp].push(...filteredPoints);
+                                hasAnyData = true;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Sort points by time for each metric and node
+            for (const metric of Object.keys(mergedData)) {
+                for (const nodeIp of Object.keys(mergedData[metric])) {
+                    mergedData[metric][nodeIp].sort((a,b) => a[0] - b[0]);
+                }
+            }
+
+            if (hasAnyData) {
+                renderGraphs(mergedData);
+            } else if (showLoadingIfEmpty) {
+                const graphGrid = document.getElementById('graphGrid');
+                if (graphGrid) {
+                    graphGrid.innerHTML = `
+                        <div style="grid-column: 1/-1; display: flex; align-items: center; justify-content: center; min-height: 300px;">
+                            <div class="graph-loading">📊 Loading graphs...</div>
+                        </div>
+                    `;
+                }
             }
         }
 
@@ -5375,31 +5304,93 @@ class WebController(Controller):
         }
 
         function renderGraphs(data) {
+            console.log(`DEBUG renderGraphs called with time_range:`, data.time_range);
+            console.log(`DEBUG current view time range: ${currentTimeRange.label}`);
             const graphGrid = document.getElementById('graphGrid');
             if (!graphGrid) return;
 
+            // Define all graph keys in desired order (max 8 for 4x2 grid)
             const graphs = ['rssi', 'wifi_failures', 'panics', 'ctrl_disconnects', 'log_disconnects', 'heap'];
+
             let html = '';
 
-            for (const graphKey of graphs) {
-                const config = GRAPH_CONFIG[graphKey];
-                html += `
-                    <div class="graph-card" data-graph="${graphKey}" ondblclick="toggleGraphExpand('${graphKey}')">
-                        <div class="graph-title">
-                            <span>${config.title}</span>
-                            <div style="display: flex; gap: 8px; align-items: center;">
-                                <button class="graph-tool-btn" onclick="saveGraphAsImage('${graphKey}')" title="Save as Image">💾</button>
-                                <button class="graph-tool-btn" onclick="resetGraphZoom('${graphKey}')" title="Reset Zoom">⟳</button>
-                                <span class="graph-expand-hint" style="font-size: 9px;">⤢ Double-click</span>
+            // Check if there's any data at all
+            const hasAnyData = graphs.some(graphKey => {
+                const seriesData = data[graphKey] || {};
+                return Object.keys(seriesData).length > 0;
+            });
+
+            if (!hasAnyData) {
+                // No data to show - display message in each graph card
+                for (const graphKey of graphs) {
+                    const config = GRAPH_CONFIG[graphKey];
+                    html += `
+                        <div class="graph-card" data-graph="${graphKey}">
+                            <div class="graph-title">
+                                <span>${config.title}</span>
+                                <div style="display: flex; gap: 8px; align-items: center;">
+                                    <button class="graph-tool-btn" onclick="saveGraphAsImage('${graphKey}')" title="Save as Image">💾</button>
+                                    <button class="graph-tool-btn" onclick="resetGraphZoom('${graphKey}')" title="Reset Zoom">⟳</button>
+                                </div>
+                            </div>
+                            <div class="no-data-message" style="padding: 20px; text-align: center; font-size: 11px;">No data available</div>
+                        </div>
+                    `;
+                }
+                // Add empty placeholders
+                const emptySlots = 8 - graphs.length;
+                for (let i = 0; i < emptySlots; i++) {
+                    html += `
+                        <div class="graph-card" style="background: #f5f5f5; border: 1px dashed #ddd; display: flex; align-items: center; justify-content: center; cursor: default;">
+                            <div style="text-align: center; color: #999; font-size: 12px;">
+                                🔜 Future metric
                             </div>
                         </div>
-                        <div id="graph-${graphKey}" class="graph-container"></div>
-                    </div>
-                `;
+                    `;
+                }
+                graphGrid.innerHTML = html;
+                return;
             }
 
-            // Add empty placeholders
-            for (let i = 0; i < 2; i++) {
+            // Render actual graphs
+            for (const graphKey of graphs) {
+                const config = GRAPH_CONFIG[graphKey];
+                const seriesData = data[graphKey] || {};
+                const nodeCount = Object.keys(seriesData).length;
+
+                if (nodeCount === 0) {
+                    html += `
+                        <div class="graph-card" data-graph="${graphKey}">
+                            <div class="graph-title">
+                                <span>${config.title}</span>
+                                <div style="display: flex; gap: 8px; align-items: center;">
+                                    <button class="graph-tool-btn" onclick="saveGraphAsImage('${graphKey}')" title="Save as Image">💾</button>
+                                    <button class="graph-tool-btn" onclick="resetGraphZoom('${graphKey}')" title="Reset Zoom">⟳</button>
+                                </div>
+                            </div>
+                            <div class="no-data-message" style="padding: 20px; text-align: center; font-size: 11px;">No data available</div>
+                        </div>
+                    `;
+                } else {
+                    html += `
+                        <div class="graph-card" data-graph="${graphKey}" ondblclick="toggleGraphExpand('${graphKey}')">
+                            <div class="graph-title">
+                                <span>${config.title}</span>
+                                <div style="display: flex; gap: 8px; align-items: center;">
+                                    <button class="graph-tool-btn" onclick="saveGraphAsImage('${graphKey}')" title="Save as Image">💾</button>
+                                    <button class="graph-tool-btn" onclick="resetGraphZoom('${graphKey}')" title="Reset Zoom">⟳</button>
+                                    <span class="graph-expand-hint" style="font-size: 9px;">⤢ Double-click</span>
+                                </div>
+                            </div>
+                            <div id="graph-${graphKey}" class="graph-container"></div>
+                        </div>
+                    `;
+                }
+            }
+
+            // Add empty placeholder tiles to fill the 4x2 grid (8 total, we have 6 graphs, so add 2 empty)
+            const emptySlots = 8 - graphs.length;
+            for (let i = 0; i < emptySlots; i++) {
                 html += `
                     <div class="graph-card" style="background: #f5f5f5; border: 1px dashed #ddd; display: flex; align-items: center; justify-content: center; cursor: default;">
                         <div style="text-align: center; color: #999; font-size: 12px;">
@@ -5411,50 +5402,46 @@ class WebController(Controller):
 
             graphGrid.innerHTML = html;
 
-            // Small delay to let DOM render
-            setTimeout(() => {
-                const nodeFilter = document.getElementById('graphNodeFilter');
-                const selectedNodes = nodeFilter ? Array.from(nodeFilter.selectedOptions).map(opt => opt.value) : [];
-                const includeAllNodes = selectedNodes.includes('all') || selectedNodes.length === 0;
+            for (const graphKey of graphs) {
+                const config = GRAPH_CONFIG[graphKey];
+                const seriesData = data[graphKey] || {};
+                const container = document.getElementById(`graph-${graphKey}`);
 
-                for (const graphKey of graphs) {
-                    const config = GRAPH_CONFIG[graphKey];
-                    const seriesData = data[graphKey] || {};
-
-                    const filteredData = {};
-                    for (const [nodeIp, points] of Object.entries(seriesData)) {
-                        if (includeAllNodes || selectedNodes.includes(nodeIp)) {
-                            filteredData[nodeIp] = points;
-                        }
+                if (container && Object.keys(seriesData).length > 0) {
+                    const chart = initChart(container, graphKey, seriesData, config);
+                    if (chart) {
+                        graphCharts[graphKey] = chart;
+                        container.chart = chart;
                     }
-
-                    const container = document.getElementById(`graph-${graphKey}`);
-                    if (!container || Object.keys(filteredData).length === 0) continue;
-
-                    // Store the data for this graph for use in toggleGraphExpand
-                    currentChartData[graphKey] = filteredData;
-
-                    const chart = echarts.init(container);
-                    const option = buildChartOption(graphKey, filteredData, config);
-                    chart.setOption(option);
-                    graphCharts[graphKey] = chart;
                 }
-            }, 50);
+            }
         }
 
-        function buildChartOption(graphKey, seriesData, config) {
+        function initChart(container, graphKey, seriesData, config) {
+            if (typeof echarts === 'undefined') {
+                console.error('ECharts not loaded');
+                container.innerHTML = '<div class="no-data-message">Loading ECharts...</div>';
+                return null;
+            }
+
             const series = [];
             const colors = generateColors(Object.keys(seriesData).length);
-            let colorIndex = 0;
 
+            // Sort nodes by last octet of IP address
             const sortedNodes = Object.entries(seriesData).sort((a, b) => {
                 const lastOctetA = parseInt(a[0].split('.').pop());
                 const lastOctetB = parseInt(b[0].split('.').pop());
                 return lastOctetA - lastOctetB;
             });
 
+            let colorIndex = 0;
+
             for (const [nodeIp, points] of sortedNodes) {
-                if (!points || points.length === 0) continue;
+                if (!points || points.length === 0) {
+                    console.log(`No points for ${nodeIp}`);
+                    continue;
+                }
+                console.log(`${nodeIp}: ${points.length} points, first point:`, points[0]);
 
                 const nodeName = getNodeNameByIp(nodeIp);
                 const displayName = `${nodeName}\n(${nodeIp})`;
@@ -5485,37 +5472,38 @@ class WebController(Controller):
                 colorIndex++;
             }
 
-            // Calculate y-axis range
-            let yMin = Infinity, yMax = -Infinity;
-            for (const points of Object.values(seriesData)) {
-                for (const point of points) {
-                    const value = point[1];
-                    if (value < yMin) yMin = value;
-                    if (value > yMax) yMax = value;
+            console.log(`Created ${series.length} series for ${graphKey}`);
+
+            if (series.length === 0) {
+                console.log(`No series created for ${graphKey}`);
+                container.innerHTML = '<div class="no-data-message">📭 No data available for this time range</div>';
+                return null;
+            }
+
+            // Auto-scale y-axis for RSSI based on actual data
+            let yMin = config.yAxisMin;
+            let yMax = config.yAxisMax;
+
+            if (graphKey === 'rssi') {
+                let dataMin = Infinity, dataMax = -Infinity;
+                for (const points of Object.values(seriesData)) {
+                    if (!points || points.length === 0) continue;
+                    for (const point of points) {
+                        const value = point[1];
+                        if (value < dataMin) dataMin = value;
+                        if (value > dataMax) dataMax = value;
+                    }
+                }
+                if (dataMin !== Infinity) {
+                    const range = dataMax - dataMin;
+                    const padding = range * 0.1;
+                    yMin = Math.floor(dataMin - padding);
+                    yMax = Math.ceil(dataMax + padding);
+                    console.log(`${graphKey} y-axis range: ${yMin} to ${yMax}`);
                 }
             }
 
-            if (yMin !== Infinity) {
-                const range = yMax - yMin;
-                const padding = range * 0.1;
-                yMin = Math.floor(yMin - padding);
-                yMax = Math.ceil(yMax + padding);
-
-                if (graphKey === 'rssi') {
-                    yMin = Math.max(-100, yMin);
-                    yMax = Math.min(-30, yMax);
-                } else if (graphKey === 'heap') {
-                    yMin = Math.max(0, yMin);
-                } else if (graphKey === 'panics' || graphKey === 'ctrl_disconnects' ||
-                        graphKey === 'log_disconnects' || graphKey === 'wifi_failures') {
-                    yMin = Math.max(0, yMin);
-                }
-            }
-
-            const now = Date.now();
-            const requestedStart = now - (currentTimeRange.hours * 3600 * 1000);
-
-            return {
+            const option = {
                 tooltip: {
                     trigger: 'axis',
                     axisPointer: { type: 'cross' },
@@ -5532,19 +5520,24 @@ class WebController(Controller):
                 xAxis: {
                     type: 'time',
                     name: '',
-                    min: requestedStart,
-                    max: now,
                     axisLabel: {
                         fontSize: 8,
                         margin: 4,
-                        formatter: function(value, index) {
+                        formatter: function(value) {
                             const date = new Date(value);
                             const hours = date.getHours().toString().padStart(2, '0');
                             const minutes = date.getMinutes().toString().padStart(2, '0');
-                            const result = `${hours}:${minutes}`;
-                            return result;
+
+                            // For time ranges > 24 hours, also show month/day
+                            const timeRangeHours = currentTimeRange?.hours || 24;
+                            if (timeRangeHours >= 48) {
+                                const month = date.getMonth() + 1;
+                                const day = date.getDate();
+                                return `${month}/${day} ${hours}:${minutes}`;
+                            }
+                            return `${hours}:${minutes}`;
                         }
-                    },
+                    }
                 },
                 yAxis: {
                     type: 'value',
@@ -5553,11 +5546,13 @@ class WebController(Controller):
                     max: yMax,
                     nameLocation: 'middle',
                     axisLabel: {
-                        fontSize: 10,
                         formatter: function(value) {
-                            if (graphKey === 'heap') return Math.round(value / 1024);
-                            if (graphKey === 'panics' || graphKey === 'ctrl_disconnects' ||
-                                graphKey === 'log_disconnects' || graphKey === 'wifi_failures') {
+                            // For heap, show in KB
+                            if (graphKey === 'heap') {
+                                return Math.round(value / 1024);
+                            }
+                            // For event-based graphs, show integers only
+                            if (graphKey === 'panics' || graphKey === 'ctrl_disconnects' || graphKey === 'log_disconnects' || graphKey === 'wifi_failures') {
                                 return Math.floor(value) === value ? value : '';
                             }
                             return value;
@@ -5565,7 +5560,13 @@ class WebController(Controller):
                     }
                 },
                 series: series,
-                grid: { left: '5%', right: '5%', top: '8%', bottom: '15%', containLabel: true },
+                grid: {
+                    left: '5%',
+                    right: '5%',
+                    top: '8%',
+                    bottom: '15%',
+                    containLabel: true
+                },
                 legend: {
                     type: 'scroll',
                     orient: 'horizontal',
@@ -5578,23 +5579,14 @@ class WebController(Controller):
                     backgroundColor: 'transparent',
                     itemGap: 2
                 },
-                // Responsive media queries - auto-adjust fonts when container is large
-                media: [
-                    {
-                        query: { minWidth: 800, minHeight: 500 },
-                        option: {
-                            xAxis: { axisLabel: { fontSize: 14 } },
-                            yAxis: { axisLabel: { fontSize: 12 } },
-                            legend: {
-                                textStyle: { fontSize: 12, lineHeight: 16 },
-                                itemWidth: 20,
-                                itemHeight: 8
-                            }
-                        }
-                    }
-                ],
                 dataZoom: [{ type: 'inside', start: 0, end: 100 }]
             };
+
+            const chart = echarts.init(container);
+            chart.setOption(option);
+            window.addEventListener('resize', () => chart.resize());
+            console.log(`Chart initialized for ${graphKey}`);
+            return chart;
         }
 
         function toggleGraphExpand(graphKey) {
@@ -5602,30 +5594,18 @@ class WebController(Controller):
             if (!graphCard) return;
 
             const isExpanded = graphCard.classList.contains('expanded');
-            const container = document.getElementById(`graph-${graphKey}`);
-            if (!container || !currentChartData[graphKey]) return;
-
-            const config = GRAPH_CONFIG[graphKey];
-            const data = currentChartData[graphKey];
-
-            // Completely destroy the old chart
-            if (graphCharts[graphKey]) {
-                graphCharts[graphKey].dispose();
-                delete graphCharts[graphKey];
-            }
-
-            // Clear the container
-            container.innerHTML = '';
 
             if (isExpanded) {
                 // Collapse
                 graphCard.classList.remove('expanded');
                 const overlay = document.getElementById('graph-overlay');
                 if (overlay) overlay.remove();
+                // Remove escape handler
                 if (window._escapeHandler) {
                     document.removeEventListener('keydown', window._escapeHandler);
                     window._escapeHandler = null;
                 }
+                // Restore card styles
                 graphCard.style.position = '';
                 graphCard.style.top = '';
                 graphCard.style.left = '';
@@ -5633,27 +5613,17 @@ class WebController(Controller):
                 graphCard.style.zIndex = '';
                 graphCard.style.width = '';
                 graphCard.style.height = '';
-
-                // Create NEW chart with small fonts
-                const option = buildChartOption(graphKey, data, config);
-                // Force small fonts
-                if (option.xAxis) option.xAxis.axisLabel = { fontSize: 8, margin: 4 };
-                if (option.yAxis) option.yAxis.axisLabel = { fontSize: 10 };
-                if (option.legend) {
-                    option.legend.textStyle = { fontSize: 7, lineHeight: 9 };
-                    option.legend.itemWidth = 10;
-                    option.legend.itemHeight = 4;
-                }
-                delete option.media;
-
-                const chart = echarts.init(container);
-                chart.setOption(option);
-                graphCharts[graphKey] = chart;
-
+                // Resize chart back to normal
+                setTimeout(() => {
+                    if (graphCharts[graphKey]) {
+                        graphCharts[graphKey].resize();
+                    }
+                }, 100);
             } else {
                 // Expand
                 graphCard.classList.add('expanded');
 
+                // Add overlay
                 const overlay = document.createElement('div');
                 overlay.id = 'graph-overlay';
                 overlay.style.cssText = `
@@ -5668,6 +5638,7 @@ class WebController(Controller):
                 overlay.onclick = () => toggleGraphExpand(graphKey);
                 document.body.appendChild(overlay);
 
+                // Style the expanded card
                 graphCard.style.position = 'fixed';
                 graphCard.style.top = '50%';
                 graphCard.style.left = '50%';
@@ -5676,6 +5647,7 @@ class WebController(Controller):
                 graphCard.style.width = '80vw';
                 graphCard.style.height = '80vh';
 
+                // Add escape key handler
                 const escapeHandler = (e) => {
                     if (e.key === 'Escape') {
                         toggleGraphExpand(graphKey);
@@ -5684,60 +5656,23 @@ class WebController(Controller):
                 document.addEventListener('keydown', escapeHandler);
                 window._escapeHandler = escapeHandler;
 
-                // Create NEW chart with large fonts
-                const option = buildChartOption(graphKey, data, config);
-                // Force large fonts
-                if (option.xAxis) option.xAxis.axisLabel = { fontSize: 14, margin: 8 };
-                if (option.yAxis) option.yAxis.axisLabel = { fontSize: 12 };
-                if (option.legend) {
-                    option.legend.textStyle = { fontSize: 12, lineHeight: 16 };
-                    option.legend.itemWidth = 20;
-                    option.legend.itemHeight = 8;
-                }
-                delete option.media;
-
-                const chart = echarts.init(container);
-                chart.setOption(option);
-                graphCharts[graphKey] = chart;
+                // Resize chart to fit new size
+                setTimeout(() => {
+                    if (graphCharts[graphKey]) {
+                        graphCharts[graphKey].resize();
+                    }
+                }, 100);
             }
-
-            // Force a final resize
-            setTimeout(() => {
-                if (graphCharts[graphKey]) {
-                    graphCharts[graphKey].resize();
-                }
-            }, 50);
         }
 
         function setupGraphEventListeners() {
             const refreshBtn = document.getElementById('refreshGraphsBtn');
-            if (refreshBtn) {
-                refreshBtn.onclick = () => {
-                    // Clear the simple cache for current range to force re-fetch
-                    const now = Math.floor(Date.now() / 1000);
-                    const startTime = now - (currentTimeRange.hours * 3600);
-                    const cacheKey = `${currentTimeRange.hours}_${Math.floor(startTime / 60)}`;
-                    delete simpleCache[cacheKey];
-                    loadGraphs();
-                    refreshBtn.style.background = '#28a745';
-                    setTimeout(() => {
-                        refreshBtn.style.background = '';
-                    }, 200);
-                };
-            }
+            if (refreshBtn) refreshBtn.onclick = () => loadGraphs();
 
             const nodeFilter = document.getElementById('graphNodeFilter');
             if (nodeFilter) {
                 nodeFilter.onchange = () => {
-                    // Find current cache key and re-render
-                    const now = Math.floor(Date.now() / 1000);
-                    const startTime = now - (currentTimeRange.hours * 3600);
-                    const cacheKey = `${currentTimeRange.hours}_${Math.floor(startTime / 60)}`;
-                    if (simpleCache[cacheKey]) {
-                        renderGraphs(simpleCache[cacheKey]);
-                    } else {
-                        loadGraphs();
-                    }
+                    refreshCurrentView(true);  // Just refresh the view, don't reload blocks
                 };
             }
         }
@@ -5751,29 +5686,56 @@ class WebController(Controller):
             selector.onchange = () => {
                 const hours = parseInt(selector.value);
                 currentTimeRange = TIME_RANGES.find(r => r.hours === hours) || TIME_RANGES[2];
-                // Just load new range (cache will handle it)
-                loadGraphs();
+
+                // Just refresh the view with existing cached blocks
+                refreshCurrentView(true);
+
+                // Only load graphs if we don't have the blocks for 7 days yet
+                const now = Math.floor(Date.now() / 1000);
+                const sevenDaysAgo = now - (7 * 86400);
+                const sevenDaysBlock = Math.floor(sevenDaysAgo / 3600) * 3600;
+                const endBlock = Math.floor(now / 3600) * 3600;
+
+                // Check if we have all blocks from 7 days ago to now
+                let haveAllBlocks = true;
+                for (let block = sevenDaysBlock; block <= endBlock; block += 3600) {
+                    if (!hourlyBlocks[block]) {
+                        haveAllBlocks = false;
+                        break;
+                    }
+                }
+
+                if (!haveAllBlocks) {
+                    loadGraphs();  // Only fetch missing blocks
+                }
             };
         }
 
         async function initGraphView() {
+            console.log('initGraphView: starting');
             createGraphViewContainer();
-            createViewSelector();
+            createViewSelector();  // This creates the buttons
             setupTimeRangeSelector();
             setupGraphEventListeners();
             requestAnimationFrame(() => loadAvailableNodes());
 
+            // Load ECharts asynchronously (but don't pre-fetch)
             if (typeof echarts === 'undefined') {
                 const script = document.createElement('script');
                 script.src = 'https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js';
                 script.onload = () => {
                     console.log('ECharts loaded');
-                    loadGraphs();
+                    // Only load graphs if already in graph view
+                    if (currentView === 'graphs') {
+                        loadGraphs();
+                    }
                 };
                 document.head.appendChild(script);
             } else {
                 console.log('ECharts already loaded');
-                loadGraphs();
+                if (currentView === 'graphs') {
+                    loadGraphs();
+                }
             }
         }
 
