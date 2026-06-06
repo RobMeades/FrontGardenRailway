@@ -42,7 +42,6 @@ import signal
 import re
 import logging
 import sqlite3
-import concurrent.futures
 from pathlib import Path
 from datetime import datetime
 from pathlib import Path
@@ -91,8 +90,6 @@ NODES_PER_PAGE = 8
 # Log level names
 LOG_LEVEL_NAMES = ['DEBUG', 'INFO', 'WARN', 'ERROR']
 
-
-# Metrics display configuration
 # Metrics display configuration
 METRICS_CONFIG = {
     'lrb':     {'type': 'event', 'importance_condition': 'value > 0', 'order': 1, 'display_format': 'hex'},
@@ -212,6 +209,23 @@ def linkify_log_line(text):
     url_pattern = r'(http://[\d\.]+:[\d]+/\d+_[0-9\.]+)'
 
     return re.sub(url_pattern, r'<a href="\1" target="_blank">\1</a>', text)
+
+def bucket_events_per_node(df, timestamp_col='Timestamp (UTC)', bucket_size='1h'):
+    """
+    Convert sparse event data into hourly bucket counts per node.
+    Each non-blank value becomes 1 (respecting "at most once per minute" rule).
+    """
+    df_bucketed = df.copy()
+    df_bucketed[timestamp_col] = pd.to_datetime(df_bucketed[timestamp_col])
+    df_bucketed.set_index(timestamp_col, inplace=True)
+
+    # Convert any non-null value to 1 (event present)
+    event_df = df_bucketed.notna().astype(int)
+
+    # Resample to specified bucket size, summing per node
+    bucketed_per_node = event_df.resample(bucket_size).sum()
+
+    return bucketed_per_node
 
 class WebController(Controller):
     """Web-enabled FGR Controller with journal log reading"""
@@ -1706,6 +1720,114 @@ class WebController(Controller):
 
         return downsampled
 
+    def _query_bucketed_metric(self, metric_column, start_time, end_time, node_ips, bucket_seconds=3600):
+        """
+        Query a cumulative metric and return deltas (new events) per bucket.
+        """
+        # Convert string bucket spec to seconds if needed
+        if isinstance(bucket_seconds, str):
+            bucket_str = bucket_seconds.lower()
+            if bucket_str.endswith('h'):
+                bucket_seconds = int(bucket_str[:-1]) * 3600
+            elif bucket_str.endswith('m'):
+                bucket_seconds = int(bucket_str[:-1]) * 60
+            elif bucket_str.endswith('s'):
+                bucket_seconds = int(bucket_str[:-1])
+            else:
+                bucket_seconds = int(bucket_seconds)
+
+        conn = self._get_metrics_db_connection()
+        if not conn:
+            return {}
+
+        try:
+            cursor = conn.cursor()
+
+            node_filter = ""
+            params = [start_time, end_time]
+            if node_ips:
+                placeholders = ','.join(['?' for _ in node_ips])
+                node_filter = f"AND node_ip IN ({placeholders})"
+                params.extend(node_ips)
+
+            # Get raw cumulative values with ordering
+            query = f"""
+                SELECT
+                    epoch_time,
+                    node_ip,
+                    {metric_column}
+                FROM metrics_history
+                WHERE {metric_column} IS NOT NULL
+                AND epoch_time BETWEEN ? AND ?
+                {node_filter}
+                ORDER BY node_ip, epoch_time ASC
+            """
+
+            cursor.execute(query, params)
+            rows = cursor.fetchall()
+
+            if not rows:
+                return {}
+
+            # Calculate deltas per node
+            node_last_values = {}
+            delta_points = []  # (bucket_start, node_ip, delta)
+
+            for row in rows:
+                epoch_time, node_ip, cumulative_value = row
+
+                last_value = node_last_values.get(node_ip)
+
+                if last_value is not None:
+                    # Calculate delta since last reading
+                    delta = cumulative_value - last_value
+                    if delta > 0:
+                        # Calculate which bucket this belongs to
+                        bucket_start = (epoch_time // bucket_seconds) * bucket_seconds
+                        delta_points.append((bucket_start, node_ip, delta))
+
+                node_last_values[node_ip] = cumulative_value
+
+            if not delta_points:
+                return {}
+
+            # Aggregate deltas by bucket and node
+            result = {}
+            for bucket_start, node_ip, delta in delta_points:
+                if node_ips and node_ip not in node_ips:
+                    continue
+
+                if node_ip not in result:
+                    result[node_ip] = []
+
+                # Check if we already have this bucket for this node
+                existing = None
+                for point in result[node_ip]:
+                    if point[0] == bucket_start * 1000:
+                        existing = point
+                        break
+
+                if existing:
+                    existing[1] += delta  # Sum multiple deltas in same bucket
+                else:
+                    result[node_ip].append([bucket_start * 1000, delta])
+
+            # Sort timestamps for each node
+            for node_ip in result:
+                result[node_ip].sort(key=lambda x: x[0])
+
+            total_points = sum(len(v) for v in result.values())
+            self._log_message(f"{metric_column} (deltas): {total_points} event points from {len(result)} nodes")
+            return result
+
+        except Exception as e:
+            self._log_message(f"Error querying {metric_column}: {e}")
+            import traceback
+            traceback.print_exc()
+            return {}
+        finally:
+            conn.close()
+
     def _query_rssi_data(self, start_time, end_time, node_ips):
         """Query RSSI values from metrics_history (fast path)"""
         conn = self._get_metrics_db_connection()
@@ -1755,192 +1877,16 @@ class WebController(Controller):
             conn.close()
 
     def _query_wifi_failures(self, start_time, end_time, node_ips):
-        """Query WiFi connection failures from metrics_history (fast path)"""
-        conn = self._get_metrics_db_connection()
-        if not conn:
-            return {}
-
-        try:
-            cursor = conn.cursor()
-
-            node_filter = ""
-            params = [start_time, end_time]
-            if node_ips:
-                placeholders = ','.join(['?' for _ in node_ips])
-                node_filter = f"AND node_ip IN ({placeholders})"
-                params.extend(node_ips)
-
-            query = f"""
-                SELECT epoch_time, node_ip, wifi_failures
-                FROM metrics_history
-                WHERE wifi_failures IS NOT NULL AND wifi_failures > 0
-                AND epoch_time BETWEEN ? AND ?
-                {node_filter}
-                ORDER BY epoch_time ASC
-            """
-
-            cursor.execute(query, params)
-            rows = cursor.fetchall()
-
-            rows = self._apply_downsampling(rows, start_time, end_time)
-
-            result = {}
-            for row in rows:
-                epoch_time, node_ip, failures = row
-                if failures is not None and failures > 0:
-                    if node_ip not in result:
-                        result[node_ip] = []
-                    result[node_ip].append([epoch_time * 1000, failures])
-
-            total_points = sum(len(v) for v in result.values())
-            return result
-
-        except Exception as e:
-            self._log_message(f"Error querying WiFi failures: {e}")
-            return {}
-        finally:
-            conn.close()
+        return self._query_bucketed_metric('wifi_failures', start_time, end_time, node_ips, 3600)
 
     def _query_panics(self, start_time, end_time, node_ips):
-        """Query panic events from metrics_history (fast path)"""
-        conn = self._get_metrics_db_connection()
-        if not conn:
-            return {}
-
-        try:
-            cursor = conn.cursor()
-
-            node_filter = ""
-            params = [start_time, end_time]
-            if node_ips:
-                placeholders = ','.join(['?' for _ in node_ips])
-                node_filter = f"AND node_ip IN ({placeholders})"
-                params.extend(node_ips)
-
-            query = f"""
-                SELECT epoch_time, node_ip, panics
-                FROM metrics_history
-                WHERE panics IS NOT NULL AND panics > 0
-                AND epoch_time BETWEEN ? AND ?
-                {node_filter}
-                ORDER BY epoch_time ASC
-            """
-
-            cursor.execute(query, params)
-            rows = cursor.fetchall()
-
-            rows = self._apply_downsampling(rows, start_time, end_time)
-
-            result = {}
-            for row in rows:
-                epoch_time, node_ip, panics = row
-                if panics is not None and panics > 0:
-                    if node_ip not in result:
-                        result[node_ip] = []
-                    result[node_ip].append([epoch_time * 1000, panics])
-
-            total_points = sum(len(v) for v in result.values())
-            return result
-
-        except Exception as e:
-            self._log_message(f"Error querying panics: {e}")
-            return {}
-        finally:
-            conn.close()
+        return self._query_bucketed_metric('panics', start_time, end_time, node_ips, 3600)
 
     def _query_ctrl_disconnects(self, start_time, end_time, node_ips):
-        """Query controller disconnection events from metrics_history (fast path)"""
-        conn = self._get_metrics_db_connection()
-        if not conn:
-            return {}
-
-        try:
-            cursor = conn.cursor()
-
-            node_filter = ""
-            params = [start_time, end_time]
-            if node_ips:
-                placeholders = ','.join(['?' for _ in node_ips])
-                node_filter = f"AND node_ip IN ({placeholders})"
-                params.extend(node_ips)
-
-            query = f"""
-                SELECT epoch_time, node_ip, ctrl_disconnects
-                FROM metrics_history
-                WHERE ctrl_disconnects IS NOT NULL AND ctrl_disconnects > 0
-                AND epoch_time BETWEEN ? AND ?
-                {node_filter}
-                ORDER BY epoch_time ASC
-            """
-
-            cursor.execute(query, params)
-            rows = cursor.fetchall()
-
-            rows = self._apply_downsampling(rows, start_time, end_time)
-
-            result = {}
-            for row in rows:
-                epoch_time, node_ip, disconnects = row
-                if disconnects is not None and disconnects > 0:
-                    if node_ip not in result:
-                        result[node_ip] = []
-                    result[node_ip].append([epoch_time * 1000, disconnects])
-
-            total_points = sum(len(v) for v in result.values())
-            return result
-
-        except Exception as e:
-            self._log_message(f"Error querying controller disconnects: {e}")
-            return {}
-        finally:
-            conn.close()
+        return self._query_bucketed_metric('ctrl_disconnects', start_time, end_time, node_ips, 3600)
 
     def _query_log_disconnects(self, start_time, end_time, node_ips):
-        """Query log server disconnection events from metrics_history (fast path)"""
-        conn = self._get_metrics_db_connection()
-        if not conn:
-            return {}
-
-        try:
-            cursor = conn.cursor()
-
-            node_filter = ""
-            params = [start_time, end_time]
-            if node_ips:
-                placeholders = ','.join(['?' for _ in node_ips])
-                node_filter = f"AND node_ip IN ({placeholders})"
-                params.extend(node_ips)
-
-            query = f"""
-                SELECT epoch_time, node_ip, log_disconnects
-                FROM metrics_history
-                WHERE log_disconnects IS NOT NULL AND log_disconnects > 0
-                AND epoch_time BETWEEN ? AND ?
-                {node_filter}
-                ORDER BY epoch_time ASC
-            """
-
-            cursor.execute(query, params)
-            rows = cursor.fetchall()
-
-            rows = self._apply_downsampling(rows, start_time, end_time)
-
-            result = {}
-            for row in rows:
-                epoch_time, node_ip, disconnects = row
-                if disconnects is not None and disconnects > 0:
-                    if node_ip not in result:
-                        result[node_ip] = []
-                    result[node_ip].append([epoch_time * 1000, disconnects])
-
-            total_points = sum(len(v) for v in result.values())
-            return result
-
-        except Exception as e:
-            self._log_message(f"Error querying log server disconnects: {e}")
-            return {}
-        finally:
-            conn.close()
+        return self._query_bucketed_metric('log_disconnects', start_time, end_time, node_ips, 3600)
 
     def _query_heap(self, start_time, end_time, node_ips):
         """Query heap free memory from metrics_history (fast path)"""
@@ -3389,9 +3335,10 @@ class WebController(Controller):
         let isDragging = false;
         let dragSourceNode = null;
 
-        // Graphing data cache
+        // Graphing stuff
         let simpleCache = {};
         let currentChartData = {};
+        let rawGraphData = {};
 
         // Log level names
         const logLevelNames = ['DEBUG', 'INFO', 'WARN', 'ERROR'];
@@ -5086,33 +5033,33 @@ class WebController(Controller):
         const GRAPH_CONFIG = {
             rssi: {
                 title: 'WiFi RSSI (dBm)',
-                yAxisLabel: 'RSSI (dBm)',
+                yAxisLabel: '',
                 valueFormatter: (v) => v + ' dBm'
             },
             wifi_failures: {
-                title: 'WiFi Connection Failures',
-                yAxisLabel: 'Failures',
+                title: 'WiFi Connection Failures (per hour)',
+                yAxisLabel: '',
                 yAxisMin: 0,
                 valueFormatter: (v) => v + ' failure' + (v !== 1 ? 's' : ''),
                 isEvent: true
             },
             panics: {
-                title: 'Software Panics',
-                yAxisLabel: 'Panic Events',
+                title: 'Software Panics (per hour)',
+                yAxisLabel: '',
                 yAxisMin: 0,
                 valueFormatter: (v) => v + ' panic' + (v !== 1 ? 's' : ''),
                 isEvent: true
             },
             ctrl_disconnects: {
-                title: 'Controller Disconnections',
-                yAxisLabel: 'Disconnections',
+                title: 'Controller Disconnections (per hour)',
+                yAxisLabel: '',
                 yAxisMin: 0,
                 valueFormatter: (v) => v + ' disconnect' + (v !== 1 ? 's' : ''),
                 isEvent: true
             },
             log_disconnects: {
-                title: 'Log Server Disconnections',
-                yAxisLabel: 'Disconnections',
+                title: 'Log Server Disconnections (per hour)',
+                yAxisLabel: '',
                 yAxisMin: 0,
                 valueFormatter: (v) => v + ' disconnect' + (v !== 1 ? 's' : ''),
                 isEvent: true
@@ -5348,6 +5295,72 @@ class WebController(Controller):
             return colors;
         }
 
+        function exportGraphCSV(graphKey) {
+            const seriesData = rawGraphData[graphKey];
+
+            if (!seriesData || Object.keys(seriesData).length === 0) {
+                console.error('No data found for', graphKey);
+                return;
+            }
+
+            // Collect all unique timestamps
+            const allTimestamps = new Set();
+            for (const [nodeIp, points] of Object.entries(seriesData)) {
+                for (const point of points) {
+                    allTimestamps.add(point[0]);
+                }
+            }
+
+            const timestamps = Array.from(allTimestamps).sort((a, b) => a - b);
+
+            // Build headers
+            let headers = ['Timestamp (UTC)'];
+            const nodePoints = [];
+
+            for (const [nodeIp, points] of Object.entries(seriesData)) {
+                const nodeName = getNodeNameByIp(nodeIp);
+                headers.push(`${nodeName} (${nodeIp})`);
+                nodePoints.push(points);
+            }
+
+            // Build CSV rows as array of strings
+            const csvRows = [];
+            csvRows.push(headers.join(','));
+
+            for (const timestamp of timestamps) {
+                const dateStr = new Date(timestamp).toISOString();
+                const row = [dateStr];
+
+                for (let i = 0; i < nodePoints.length; i++) {
+                    const points = nodePoints[i];
+                    let value = '';
+                    for (const point of points) {
+                        if (point[0] === timestamp) {
+                            value = point[1];
+                            break;
+                        }
+                    }
+                    row.push(value);
+                }
+
+                csvRows.push(row.join(','));
+            }
+
+            // Use String.fromCharCode(10) for newline - this is the fix that works
+            const csvString = csvRows.join(String.fromCharCode(10));
+
+            // Create blob and download
+            const blob = new Blob([csvString], { type: 'text/csv;charset=utf-8' });
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.setAttribute('download', `${graphKey}_data.csv`);
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            URL.revokeObjectURL(url);
+        }
+
         function saveGraphAsImage(graphKey) {
             const chart = graphCharts[graphKey];
             if (chart) {
@@ -5388,6 +5401,7 @@ class WebController(Controller):
                         <div class="graph-title">
                             <span>${config.title}</span>
                             <div style="display: flex; gap: 8px; align-items: center;">
+                                <button class="graph-tool-btn" onclick="exportGraphCSV('${graphKey}')" title="Export as CSV">📊 CSV</button>
                                 <button class="graph-tool-btn" onclick="saveGraphAsImage('${graphKey}')" title="Save as Image">💾</button>
                                 <button class="graph-tool-btn" onclick="resetGraphZoom('${graphKey}')" title="Reset Zoom">⟳</button>
                                 <span class="graph-expand-hint" style="font-size: 9px;">⤢ Double-click</span>
@@ -5398,20 +5412,8 @@ class WebController(Controller):
                 `;
             }
 
-            // Add empty placeholders
-            for (let i = 0; i < 2; i++) {
-                html += `
-                    <div class="graph-card" style="background: #f5f5f5; border: 1px dashed #ddd; display: flex; align-items: center; justify-content: center; cursor: default;">
-                        <div style="text-align: center; color: #999; font-size: 12px;">
-                            🔜 Future metric
-                        </div>
-                    </div>
-                `;
-            }
-
             graphGrid.innerHTML = html;
 
-            // Small delay to let DOM render
             setTimeout(() => {
                 const nodeFilter = document.getElementById('graphNodeFilter');
                 const selectedNodes = nodeFilter ? Array.from(nodeFilter.selectedOptions).map(opt => opt.value) : [];
@@ -5429,10 +5431,28 @@ class WebController(Controller):
                     }
 
                     const container = document.getElementById(`graph-${graphKey}`);
-                    if (!container || Object.keys(filteredData).length === 0) continue;
+                    if (!container) continue;
 
-                    // Store the data for this graph for use in toggleGraphExpand
+                    // Store the RAW data for export (before any chart stacking)
+                    rawGraphData[graphKey] = filteredData;
+
+                    // Also store for toggleGraphExpand if needed
                     currentChartData[graphKey] = filteredData;
+
+                    if (Object.keys(filteredData).length === 0) {
+                        const chart = echarts.init(container);
+                        chart.setOption({
+                            title: {
+                                show: true,
+                                text: 'None',
+                                left: 'center',
+                                top: 'center',
+                                textStyle: { color: '#999', fontSize: 12 }
+                            }
+                        });
+                        graphCharts[graphKey] = chart;
+                        continue;
+                    }
 
                     const chart = echarts.init(container);
                     const option = buildChartOption(graphKey, filteredData, config);
@@ -5463,14 +5483,14 @@ class WebController(Controller):
                 if (config.isEvent) {
                     series.push({
                         name: displayName,
-                        type: 'scatter',
+                        type: 'bar',
                         data: points,
-                        symbolSize: 8,
-                        symbol: 'circle',
-                        color: seriesColor,
-                        itemStyle: { color: seriesColor }
+                        barGap: '10%',  // Space between bars of different nodes
+                        barCategoryGap: '20%',  // Space between time groups
+                        // No 'stack' property
                     });
                 } else {
+                    // Line chart for continuous metrics (RSSI, heap)
                     series.push({
                         name: displayName,
                         type: 'line',
@@ -5509,24 +5529,69 @@ class WebController(Controller):
                 } else if (graphKey === 'panics' || graphKey === 'ctrl_disconnects' ||
                         graphKey === 'log_disconnects' || graphKey === 'wifi_failures') {
                     yMin = Math.max(0, yMin);
+                    yMax = yMax + 1;  // Add a little headroom
                 }
             }
 
             const now = Date.now();
             const requestedStart = now - (currentTimeRange.hours * 3600 * 1000);
 
+            // Build enhanced tooltip formatter
+            const tooltipFormatter = function(params) {
+                if (!params || params.length === 0) return '';
+
+                // For bar charts (stacked), extract the time from the first series
+                let time = '';
+                let totalValue = 0;
+                const items = [];
+
+                for (const p of params) {
+                    if (p.value && p.value[0]) {
+                        time = new Date(p.value[0]).toLocaleString();
+                    } else if (p.data && p.data[0]) {
+                        time = new Date(p.data[0]).toLocaleString();
+                    }
+                    const value = p.value ? p.value[1] : (p.data ? p.data[1] : 0);
+                    totalValue += value;
+                    items.push({
+                        name: p.seriesName,
+                        value: value,
+                        color: p.color,
+                        marker: p.marker
+                    });
+                }
+
+                // Sort by value descending
+                items.sort((a, b) => b.value - a.value);
+
+                let html = `<strong>${time}</strong><br/>`;
+                html += `<hr style="margin: 4px 0; border-color: #ddd;"/>`;
+
+                for (const item of items) {
+                    if (item.value > 0) {
+                        html += `<span style="color:${item.color}">●</span> ${item.name}: ${config.valueFormatter(item.value)}<br/>`;
+                    }
+                }
+
+                if (config.isEvent && totalValue > 0) {
+                    html += `<hr style="margin: 4px 0; border-color: #ddd;"/>`;
+                    html += `<strong>Total: ${config.valueFormatter(totalValue)}</strong>`;
+                }
+
+                return html;
+            };
+
             return {
                 tooltip: {
                     trigger: 'axis',
-                    axisPointer: { type: 'cross' },
-                    formatter: function(params) {
-                        if (!params || params.length === 0) return '';
-                        const time = new Date(params[0].value[0]).toLocaleString();
-                        let html = `<strong>${time}</strong><br/>`;
-                        for (const p of params) {
-                            html += `<span style="color:${p.color}">●</span> ${p.seriesName}: ${config.valueFormatter(p.value[1])}<br/>`;
-                        }
-                        return html;
+                    axisPointer: { type: config.isEvent ? 'shadow' : 'cross' },
+                    formatter: tooltipFormatter,
+                    backgroundColor: 'rgba(50,50,50,0.95)',
+                    borderColor: '#333',
+                    borderWidth: 1,
+                    textStyle: {
+                        color: '#fff',
+                        fontSize: 11
                     }
                 },
                 xAxis: {
@@ -5541,17 +5606,18 @@ class WebController(Controller):
                             const date = new Date(value);
                             const hours = date.getHours().toString().padStart(2, '0');
                             const minutes = date.getMinutes().toString().padStart(2, '0');
-                            const result = `${hours}:${minutes}`;
-                            return result;
+                            return `${hours}:${minutes}`;
                         }
                     },
+                    axisLine: { lineStyle: { color: '#888' } }
                 },
                 yAxis: {
                     type: 'value',
-                    name: '',
+                    name: config.yAxisLabel || '',
                     min: yMin,
                     max: yMax,
                     nameLocation: 'middle',
+                    nameGap: 35,
                     axisLabel: {
                         fontSize: 10,
                         formatter: function(value) {
@@ -5562,22 +5628,48 @@ class WebController(Controller):
                             }
                             return value;
                         }
+                    },
+                    splitLine: {
+                        lineStyle: { type: 'dashed', color: '#e0e0e0' }
                     }
                 },
                 series: series,
-                grid: { left: '5%', right: '5%', top: '8%', bottom: '15%', containLabel: true },
+                grid: {
+                    left: '8%',
+                    right: '5%',
+                    top: '8%',
+                    bottom: '18%',
+                    containLabel: true,
+                    backgroundColor: '#fafafa'
+                },
                 legend: {
                     type: 'scroll',
                     orient: 'horizontal',
                     bottom: 0,
                     left: 'center',
                     textStyle: { fontSize: 7, lineHeight: 9 },
-                    itemWidth: 10,
+                    itemWidth: 12,
                     itemHeight: 4,
-                    icon: 'roundRect',
+                    icon: config.isEvent ? 'roundRect' : 'circle',  // roundRect for bars (matches bar shape), circle for lines
                     backgroundColor: 'transparent',
-                    itemGap: 2
+                    itemGap: 4,
+                    pageIconColor: '#666',
+                    pageTextStyle: { color: '#666' },
+                    formatter: function(name) {
+                        // Truncate long names to save space
+                        if (name.length > 30) {
+                            return name.substring(0, 27) + '...';
+                        }
+                        return name;
+                    }
                 },
+                dataZoom: [{
+                    type: 'inside',
+                    start: 0,
+                    end: 100,
+                    zoomOnMouseWheel: true,
+                    moveOnMouseMove: true
+                }],
                 // Responsive media queries - auto-adjust fonts when container is large
                 media: [
                     {
@@ -5589,11 +5681,11 @@ class WebController(Controller):
                                 textStyle: { fontSize: 12, lineHeight: 16 },
                                 itemWidth: 20,
                                 itemHeight: 8
-                            }
+                            },
+                            grid: { bottom: 30 }
                         }
                     }
-                ],
-                dataZoom: [{ type: 'inside', start: 0, end: 100 }]
+                ]
             };
         }
 
