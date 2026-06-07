@@ -203,7 +203,7 @@ All credit goes to Chris Dzombak and those who helped him compile the guide.  Th
   tmpfs  /var/spool/rsyslog  tmpfs  defaults,noatime,nosuid,nodev,noexec,size=25m  0  0
   ```
 
-- Add another `tmpfs` to `/etc/fstab` for the `/var/log` folder:
+- Add another `tmpfs` to `/etc/fstab` for the `/var/log` folder [note: later I added an SSD to grab detailed long term metrics and moved the logs there ]:
 
  `tmpfs  /var/log  tmpfs  defaults,noatime,nosuid,nodev,noexec,size=50m  0  0`
 

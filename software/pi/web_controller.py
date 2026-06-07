@@ -42,10 +42,10 @@ import signal
 import re
 import logging
 import sqlite3
-from datetime import datetime
+import calendar
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
-from collections import deque
 print("Importing aiohttp: may take some time...", flush=True)
 from aiohttp import web
 
@@ -498,9 +498,17 @@ class WebController(Controller):
 
     def _stop_journal_reader(self):
         """Stop the journal reader thread"""
+        self._log_message("Stopping journal reader...")
         self.journal_running = False
-        if self.journal_thread:
-            self.journal_thread.join(timeout=2)
+
+        # Give the thread time to notice the flag and exit
+        if self.journal_thread and self.journal_thread.is_alive():
+            self._log_message("Waiting for journal reader thread to exit...")
+            self.journal_thread.join(timeout=1.0)
+            if self.journal_thread.is_alive():
+                self._log_message("Journal reader thread still alive (daemon will kill it)")
+            else:
+                self._log_message("Journal reader thread exited cleanly")
 
     def _journal_reader_loop(self):
         """Background thread to read logs from systemd journal"""
@@ -523,10 +531,11 @@ class WebController(Controller):
 
             existing_logs = []
             for entry in j:
+                if not self.journal_running:
+                    break
                 message = entry.get('MESSAGE', '')
                 if message:
                     message = message.rstrip()
-
                     self._add_node_log(message)
 
                     # Parse metrics from new logs
@@ -534,10 +543,6 @@ class WebController(Controller):
                     if metrics_result:
                         node_ip, metrics_data = metrics_result
                         self._update_node_metrics(node_ip, metrics_data)
-
-            # Add existing logs (newest first, reverse to oldest first)
-            for msg in reversed(existing_logs):
-                self._add_node_log(msg)
 
             if existing_logs:
                 self._log_message(f"Loaded {len(existing_logs)} existing node logs")
@@ -547,16 +552,22 @@ class WebController(Controller):
                 j.seek_cursor(last_cursor)
                 j.get_next(1)
 
+            # Use a short timeout to allow checking the running flag frequently
             while self.journal_running:
-                # Wait for new entries (1 second timeout)
-                ret = j.wait(1000000)
+                # Use a very short timeout (100ms) to be responsive to stop signal
+                # wait() takes microseconds: 100,000 microseconds = 0.1 seconds
+                ret = j.wait(100000)  # 0.1 second timeout
 
-                if ret > 0:  # New entries available
+                if not self.journal_running:
+                    break
+
+                if ret == journal.APPEND:  # New entries available
                     for entry in j:
+                        if not self.journal_running:
+                            break
                         message = entry.get('MESSAGE', '')
                         if message:
                             message = message.rstrip()
-
                             self._add_node_log(message)
 
                             # Parse metrics from new logs
@@ -564,12 +575,11 @@ class WebController(Controller):
                             if metrics_result:
                                 node_ip, metrics_data = metrics_result
                                 self._update_node_metrics(node_ip, metrics_data)
-                            else:
-                                if 'metrics:' in message:
-                                    self._log_message(f"WARNING: Failed to parse metrics from message")
 
         except Exception as e:
             self._log_message(f"Journal reader error: {e}")
+        finally:
+            self._log_message("Journal reader stopped")
 
     def _get_node_name_by_ip(self, ip: str) -> Optional[str]:
         """Get node name from IP address"""
@@ -1180,6 +1190,415 @@ class WebController(Controller):
             self._log_message(f"Log stream error: {e}")
 
         return response
+
+    async def handle_api_journal_test(self, request):
+        """Test endpoint to verify journal access and show sample logs"""
+        if not HAS_SYSTEMD:
+            return web.json_response({'error': 'Journal not available'}, status=503)
+
+        direction = request.query.get('direction', 'tail')
+        limit = int(request.query.get('limit', '20'))
+
+        def _get_logs():
+            from datetime import datetime, timezone
+
+            j = journal.Reader()
+            j.add_match(SYSLOG_IDENTIFIER=JOURNAL_IDENTIFIER)
+
+            logs = []
+
+            if direction == 'head':
+                # Get earliest logs
+                j.seek_head()
+                count = 0
+                for entry in j:
+                    if count >= limit:
+                        break
+                    message = entry.get('MESSAGE', '')
+                    if message:
+                        ts = entry.get('__REALTIME_TIMESTAMP')
+                        logs.append({
+                            'timestamp': ts.timestamp() if ts else None,
+                            'message': message.rstrip()[:200]
+                        })
+                        count += 1
+            else:
+                # Get latest logs - simpler: seek to tail and read backwards
+                j.seek_tail()
+                # Get the last entry
+                j.get_previous()
+                # Now collect going backwards
+                temp = []
+                count = 0
+                for entry in j:
+                    if count >= limit:
+                        break
+                    message = entry.get('MESSAGE', '')
+                    if message:
+                        ts = entry.get('__REALTIME_TIMESTAMP')
+                        temp.append({
+                            'timestamp': ts.timestamp() if ts else None,
+                            'message': message.rstrip()[:200]
+                        })
+                        count += 1
+                # Reverse to chronological order
+                logs = list(reversed(temp))
+
+            return logs
+
+        try:
+            logs = await asyncio.to_thread(_get_logs)
+            return web.json_response({
+                'status': 'ok',
+                'identifier_filter': JOURNAL_IDENTIFIER,
+                'direction': direction,
+                'limit': limit,
+                'logs': logs,
+                'count': len(logs)
+            })
+        except Exception as e:
+            import traceback
+            return web.json_response({'error': str(e), 'traceback': traceback.format_exc()}, status=500)
+
+    async def handle_api_journal_time_range(self, request):
+        """Get the earliest and latest timestamps available in the journal (UTC)"""
+        self._log_message("[JOURNAL RANGE] Starting request...")
+
+        if not HAS_SYSTEMD:
+            self._log_message("[JOURNAL RANGE] ERROR: systemd module not available")
+            return web.json_response({'error': 'Journal not available'}, status=503)
+
+        try:
+            def _get_range():
+                self._log_message("[JOURNAL RANGE] _get_range: Opening journal...")
+                j = journal.Reader()
+                j.add_match(SYSLOG_IDENTIFIER=JOURNAL_IDENTIFIER)
+
+                # Get earliest timestamp
+                self._log_message("[JOURNAL RANGE] Seeking to head...")
+                j.seek_head()
+                earliest = None
+                earliest_count = 0
+                for entry in j:
+                    earliest_count += 1
+                    if entry.get('SYSLOG_IDENTIFIER') == JOURNAL_IDENTIFIER:
+                        earliest_ts = entry.get('__REALTIME_TIMESTAMP')
+                        if earliest_ts:
+                            earliest = earliest_ts.timestamp()  # UTC timestamp
+                        self._log_message(f"[JOURNAL RANGE] Found earliest at entry {earliest_count}: {earliest} (UTC)")
+                        break
+                    if earliest_count > 10000:
+                        self._log_message("[JOURNAL RANGE] Stopping earliest search after 10000 entries")
+                        break
+
+                # Get latest timestamp
+                self._log_message("[JOURNAL RANGE] Getting latest timestamp...")
+                j.seek_tail()
+                latest = None
+                latest_count = 0
+                # Read backwards until we find a match
+                for entry in j:
+                    latest_count += 1
+                    if entry.get('SYSLOG_IDENTIFIER') == JOURNAL_IDENTIFIER:
+                        latest_ts = entry.get('__REALTIME_TIMESTAMP')
+                        if latest_ts:
+                            latest = latest_ts.timestamp()  # UTC timestamp
+                        self._log_message(f"[JOURNAL RANGE] Found latest at position {latest_count} from tail: {latest} (UTC)")
+                        break
+                    if latest_count > 1000:
+                        self._log_message("[JOURNAL RANGE] Stopping latest search after 1000 entries")
+                        break
+
+                self._log_message(f"[JOURNAL RANGE] Returning earliest={earliest}, latest={latest}")
+                return earliest, latest
+
+            earliest, latest = await asyncio.to_thread(_get_range)
+
+            self._log_message(f"[JOURNAL RANGE] Response: earliest={earliest}, latest={latest}")
+            return web.json_response({
+                'earliest': earliest if earliest else None,
+                'latest': latest if latest else None
+            })
+
+        except Exception as e:
+            self._log_message(f"[JOURNAL RANGE] Exception: {e}")
+            import traceback
+            traceback.print_exc()
+            return web.json_response({'error': str(e)}, status=500)
+
+    async def handle_api_journal_fetch(self, request):
+        """Fetch journal logs - returning objects with message field to match frontend expectations"""
+
+        if not HAS_SYSTEMD:
+            return web.json_response({'error': 'Journal not available'}, status=503)
+
+        data = await request.json() if request.body_exists else {}
+        before_timestamp = data.get('before')
+        after_timestamp = data.get('after')
+        limit = data.get('limit', 100)
+
+        print(f"[JOURNAL FETCH] RAW: before={before_timestamp}, after={after_timestamp}, limit={limit}")
+
+        if before_timestamp is None and after_timestamp is None:
+            print(f"[JOURNAL FETCH] ERROR: No before or after timestamp provided")
+            return web.json_response({'status': 'ok', 'logs': [], 'has_more': False})
+
+        def _format_log_entry(entry):
+            """Format journal entry to match stream format and return as object with message field"""
+            from datetime import datetime
+
+            ts = entry.get('__REALTIME_TIMESTAMP')
+            if ts:
+                dt = datetime.fromtimestamp(ts.timestamp())
+                time_str = dt.strftime('%H:%M:%S')
+            else:
+                time_str = '00:00:00'
+
+            syslog_id = entry.get('SYSLOG_IDENTIFIER', '')
+            message = entry.get('MESSAGE', '')
+
+            if syslog_id == 'fgr-log-server':
+                formatted_message = f"[{time_str}] [NODE] {message}"
+            else:
+                formatted_message = f"[{time_str}] [CTRL] {message}"
+
+            # Return object with message field (and timestamp for potential use)
+            return {
+                'message': formatted_message,
+                'timestamp': ts.timestamp() if ts else None
+            }
+
+        def _fetch_logs():
+            from datetime import datetime, timezone
+            import time
+
+            start_time = time.time()
+
+            print(f"[JOURNAL FETCH] Opening journal...")
+            j = journal.Reader()
+            j.add_match(SYSLOG_IDENTIFIER=JOURNAL_IDENTIFIER)
+
+            logs = []
+
+            if after_timestamp is not None:
+                print(f"[JOURNAL FETCH] FORWARD query after {after_timestamp}")
+                target_dt = datetime.fromtimestamp(after_timestamp, tz=timezone.utc)
+                j.seek_realtime(target_dt)
+
+                count = 0
+                for entry in j:
+                    if count >= limit:
+                        break
+                    ts = entry.get('__REALTIME_TIMESTAMP')
+                    if ts and ts.timestamp() > after_timestamp:
+                        formatted = _format_log_entry(entry)
+                        logs.append(formatted)
+                        count += 1
+                        if count == 1:
+                            print(f"[JOURNAL FETCH] First forward log: {formatted['message'][:80]}...")
+
+                print(f"[JOURNAL FETCH] Forward query found {len(logs)} logs")
+                return logs, len(logs) >= limit
+
+            elif before_timestamp is not None:
+                print(f"[JOURNAL FETCH] BACKWARD query before {before_timestamp}")
+                target_dt = datetime.fromtimestamp(before_timestamp, tz=timezone.utc)
+                j.seek_realtime(target_dt)
+
+                entry = j.get_previous()
+
+                if entry is None:
+                    print(f"[JOURNAL FETCH] No entries before target")
+                    return [], False
+
+                print(f"[JOURNAL FETCH] get_previous() returned type: {type(entry)}")
+                if isinstance(entry, dict):
+                    print(f"[JOURNAL FETCH] It's a dict with keys: {list(entry.keys())[:10]}")
+                    sample_msg = entry.get('MESSAGE', 'NO MESSAGE')
+                    print(f"[JOURNAL FETCH] Sample MESSAGE: {sample_msg[:100]}...")
+
+                temp_logs = []
+                iteration = 0
+
+                while entry and len(temp_logs) < limit:
+                    iteration += 1
+                    if iteration % 10 == 0:
+                        print(f"[JOURNAL FETCH] Iteration {iteration}, collected {len(temp_logs)} logs")
+
+                    if isinstance(entry, dict):
+                        ts = entry.get('__REALTIME_TIMESTAMP')
+                        if ts and ts.timestamp() < before_timestamp:
+                            formatted = _format_log_entry(entry)
+                            temp_logs.append(formatted)
+                            if len(temp_logs) == 1:
+                                print(f"[JOURNAL FETCH] First log: ts={ts.timestamp()}, msg={formatted['message'][:80]}...")
+
+                    entry = j.get_previous()
+
+                elapsed = time.time() - start_time
+                print(f"[JOURNAL FETCH] Backward query: {len(temp_logs)} logs in {elapsed:.2f}s, iterations={iteration}")
+
+                # Reverse to chronological order
+                logs = list(reversed(temp_logs))
+                return logs, len(logs) >= limit
+
+        try:
+            logs, has_more = await asyncio.to_thread(_fetch_logs)
+            print(f"[JOURNAL FETCH] Returning {len(logs)} logs, has_more={has_more}")
+            return web.json_response({'status': 'ok', 'logs': logs, 'has_more': has_more})
+        except Exception as e:
+            print(f"[JOURNAL FETCH] Exception: {e}")
+            import traceback
+            traceback.print_exc()
+            return web.json_response({'error': str(e)}, status=500)
+
+    async def handle_api_journal_scroll(self, request):
+        """Fetch journal logs around a specific timestamp - with FULL DEBUG"""
+
+        if not HAS_SYSTEMD:
+            return web.json_response({'error': 'Journal not available'}, status=503)
+
+        data = await request.json() if request.body_exists else {}
+        target_timestamp = data.get('timestamp')
+        before_count = data.get('before', 50)
+        after_count = data.get('after', 50)
+
+        print(f"[JOURNAL SCROLL] ========== START ==========")
+        print(f"[JOURNAL SCROLL] target={target_timestamp}, before={before_count}, after={after_count}")
+
+        if not target_timestamp:
+            print(f"[JOURNAL SCROLL] ERROR: Missing timestamp")
+            return web.json_response({'error': 'Missing timestamp'}, status=400)
+
+        def _format_log_entry(entry):
+            """Format journal entry to match stream format"""
+            from datetime import datetime
+
+            ts = entry.get('__REALTIME_TIMESTAMP')
+            if ts:
+                dt = datetime.fromtimestamp(ts.timestamp())
+                time_str = dt.strftime('%H:%M:%S')
+            else:
+                time_str = '00:00:00'
+
+            syslog_id = entry.get('SYSLOG_IDENTIFIER', '')
+            message = entry.get('MESSAGE', '')
+
+            if syslog_id == 'fgr-log-server':
+                formatted_message = f"[{time_str}] [NODE] {message}"
+            else:
+                formatted_message = f"[{time_str}] [CTRL] {message}"
+
+            return {
+                'message': formatted_message,
+                'timestamp': ts.timestamp() if ts else None
+            }
+
+        def _scroll_logs():
+            from datetime import datetime, timezone
+            import time
+
+            start_time = time.time()
+
+            print(f"[JOURNAL SCROLL] Opening journal...")
+            j = journal.Reader()
+            j.add_match(SYSLOG_IDENTIFIER=JOURNAL_IDENTIFIER)
+
+            target_dt = datetime.fromtimestamp(target_timestamp, tz=timezone.utc)
+            print(f"[JOURNAL SCROLL] Target datetime: {target_dt}")
+
+            # Seek to target timestamp
+            print(f"[JOURNAL SCROLL] Calling seek_realtime({target_dt})...")
+            j.seek_realtime(target_dt)
+            print(f"[JOURNAL SCROLL] seek_realtime complete")
+
+            # Get logs BEFORE target (using get_previous)
+            print(f"[JOURNAL SCROLL] Getting up to {before_count} logs BEFORE target...")
+            before_logs = []
+            before_iter = 0
+            entry = j.get_previous()
+            print(f"[JOURNAL SCROLL] First get_previous() returned: {type(entry)}")
+
+            while entry and len(before_logs) < before_count:
+                before_iter += 1
+                if before_iter % 10 == 0:
+                    print(f"[JOURNAL SCROLL] Before iteration {before_iter}, collected {len(before_logs)} logs")
+
+                ts = entry.get('__REALTIME_TIMESTAMP')
+                if ts:
+                    ts_utc = ts.timestamp()
+                    if ts_utc < target_timestamp:
+                        formatted = _format_log_entry(entry)
+                        before_logs.append(formatted)
+                        if len(before_logs) == 1:
+                            print(f"[JOURNAL SCROLL] First BEFORE log: ts={ts_utc}, msg={formatted['message'][:80]}...")
+                    else:
+                        print(f"[JOURNAL SCROLL] Skipping BEFORE entry with ts={ts_utc} >= {target_timestamp}")
+                else:
+                    print(f"[JOURNAL SCROLL] BEFORE entry has no timestamp")
+
+                entry = j.get_previous()
+
+            print(f"[JOURNAL SCROLL] Collected {len(before_logs)} BEFORE logs after {before_iter} iterations")
+
+            # Reverse before_logs to chronological order
+            before_logs.reverse()
+
+            # Get logs AFTER target (using get_next)
+            print(f"[JOURNAL SCROLL] Getting up to {after_count} logs AFTER target...")
+            # Need to seek back to target first
+            print(f"[JOURNAL SCROLL] Re-seeking to target for AFTER logs...")
+            j.seek_realtime(target_dt)
+            after_logs = []
+            after_iter = 0
+            entry = j.get_next()
+            print(f"[JOURNAL SCROLL] First get_next() returned: {type(entry)}")
+
+            while entry and len(after_logs) < after_count:
+                after_iter += 1
+                if after_iter % 10 == 0:
+                    print(f"[JOURNAL SCROLL] After iteration {after_iter}, collected {len(after_logs)} logs")
+
+                ts = entry.get('__REALTIME_TIMESTAMP')
+                if ts:
+                    ts_utc = ts.timestamp()
+                    if ts_utc >= target_timestamp:
+                        formatted = _format_log_entry(entry)
+                        after_logs.append(formatted)
+                        if len(after_logs) == 1:
+                            print(f"[JOURNAL SCROLL] First AFTER log: ts={ts_utc}, msg={formatted['message'][:80]}...")
+                    else:
+                        print(f"[JOURNAL SCROLL] Skipping AFTER entry with ts={ts_utc} < {target_timestamp}")
+                else:
+                    print(f"[JOURNAL SCROLL] AFTER entry has no timestamp")
+
+                entry = j.get_next()
+
+            print(f"[JOURNAL SCROLL] Collected {len(after_logs)} AFTER logs after {after_iter} iterations")
+
+            # Combine: before_logs + after_logs
+            all_logs = before_logs + after_logs
+            target_index = len(before_logs)  # The first after_log is the target or first after
+
+            elapsed = time.time() - start_time
+            print(f"[JOURNAL SCROLL] Total: {len(all_logs)} logs in {elapsed:.2f}s, target_index={target_index}")
+            print(f"[JOURNAL SCROLL] ========== END ==========")
+
+            return all_logs, target_index
+
+        try:
+            logs, target_index = await asyncio.to_thread(_scroll_logs)
+            print(f"[JOURNAL SCROLL] Returning {len(logs)} logs with target_index={target_index}")
+            return web.json_response({
+                'status': 'ok',
+                'logs': logs,
+                'target_index': target_index
+            })
+        except Exception as e:
+            print(f"[JOURNAL SCROLL] Exception: {e}")
+            import traceback
+            traceback.print_exc()
+            return web.json_response({'error': str(e)}, status=500)
 
     async def handle_api_command(self, request):
         """Handle command requests to nodes"""
@@ -2079,11 +2498,17 @@ class WebController(Controller):
         self.web_app.router.add_post('/api/reorder', self.handle_api_reorder)
         self.web_app.router.add_post('/api/node/data', self.handle_api_node_data)
         self.web_app.router.add_post('/api/node/html', self.handle_api_node_html)
+        if HAS_SYSTEMD:
+            self.web_app.router.add_post('/api/journal/fetch', self.handle_api_journal_fetch)
+            self.web_app.router.add_get('/api/journal/range', self.handle_api_journal_time_range)
+            self.web_app.router.add_post('/api/journal/scroll', self.handle_api_journal_scroll)
+            self._log_message("Journal API endpoints enabled")
         if self.graphs_enabled:
             self.web_app.router.add_post('/api/graph/data', self.handle_api_graph_data)
             self.web_app.router.add_post('/api/graph/raw_minute_data', self.handle_api_raw_minute_data)
             self.web_app.router.add_get('/api/graph/nodes', self.handle_api_graph_nodes)
             self.web_app.router.add_get('/api/graph/time_range', self.handle_api_graph_time_range)
+            self.web_app.router.add_get('/api/journal/test', self.handle_api_journal_test)
             self._log_message(f"Graph endpoints enabled")
         else:
             self._log_message(f"Graph endpoints disabled (use --db-path to enable)")
@@ -3518,14 +3943,22 @@ class WebController(Controller):
                         <option value="4" selected>No filter</option>
                     </select>
                 </div>
+                <div class="filter-input-group">
+                    <span class="filter-label">Go to time</span>
+                    <input type="datetime-local" id="gotoTimeInput" class="filter-textbox" style="width: 160px;">
+                    <button id="gotoTimeBtn" class="debug-toggle-btn" style="padding: 2px 6px; font-size: 10px;">Go</button>
+                </div>
             </div>
             <div class="debug-buttons">
+                <button id="scrollLockBtn" style="background:#17a2b8;color:white;" title="Auto-scroll lock">🔒 Auto-scroll</button>
                 <button onclick="selectAllLogs()" style="background:#17a2b8;color:white;">📋 Select All</button>
                 <button onclick="copyLogsToClipboard(event)" style="background:#28a745;color:white;">📋 Copy</button>
                 <button onclick="clearLogs()" style="background:#6c757d;color:white;">🗑️ Clear</button>
             </div>
         </div>
-        <div id="debugWindow" class="debug-window">Waiting for logs...</div>
+        <div id="debugWindow" class="debug-window">
+            <div class="loading-indicator" style="text-align:center;padding:20px;">Loading logs...</div>
+        </div>
     </div>
 
     <div class="footer">FGR Controller - Drag ⋮⋮ to reorder nodes | Double-click card to expand | Drag blue bar above debug panel to resize | 📌 Dock returns to default size | Click header to collapse/expand</div>
@@ -3551,7 +3984,6 @@ class WebController(Controller):
         let statusSource = null;
         let logsSource = null;
         let autoScrollEnabled = true;
-        let logBuffer = [];
         let scrollTimeout = null;
         let nodeOrder = [];
         let nodesData = {};  // Store node data for reference
@@ -3581,6 +4013,20 @@ class WebController(Controller):
 
         // Log level names
         const logLevelNames = ['DEBUG', 'INFO', 'WARN', 'ERROR'];
+
+        // Debug window
+        let debugWindow = null;
+        let logBuffer = [];             // Stores {timestamp, message} objects
+        let logElements = [];           // DOM elements for each log
+        let logTexts = [];              // Raw text for each log
+        let logTimestamps = [];         // Timestamps for each log
+        let isAtBottom = true;          // Whether we're scrolled to bottom
+        let autoScrollLocked = false;   // Whether auto-scroll is locked (disabled)
+        let isLoading = false;          // Whether we're currently loading more logs
+        let hasMoreUp = true;           // Whether there are more logs above
+        let hasMoreDown = true;         // Whether there are more logs below
+        let journalRange = { earliest: null, latest: null };  // Available journal range
+        let currentScrollAnchor = null;  // Timestamp to anchor scrolling after loading
 
         // Set CSS variables from server data if needed
         function updateCSSVariables(status) {
@@ -3858,21 +4304,6 @@ class WebController(Controller):
             renderCurrentPage();
         }
 
-        function setupDebugWindow() {
-            const debugWindow = document.getElementById('debugWindow');
-            if (!debugWindow) return;
-            debugWindow.addEventListener('scroll', function() {
-                const isAtBottom = debugWindow.scrollHeight - debugWindow.scrollTop - debugWindow.clientHeight < 10;
-                if (isAtBottom) {
-                    autoScrollEnabled = true;
-                } else {
-                    autoScrollEnabled = false;
-                    if (scrollTimeout) clearTimeout(scrollTimeout);
-                    scrollTimeout = setTimeout(() => { autoScrollEnabled = true; }, 10000);
-                }
-            });
-        }
-
         // Setup floating debug panel with resize, collapse, and dock
         function setupResizableDebugPanel() {
             const debugPanel = document.querySelector('.debug-panel');
@@ -4088,19 +4519,6 @@ class WebController(Controller):
             alert('Copied to clipboard');
         }
 
-        function clearLogs() {
-            const debugWindow = document.getElementById('debugWindow');
-            if (debugWindow) {
-                debugWindow.innerHTML = 'Logs cleared...';
-            }
-            logBuffer = [];
-            logElements = [];
-            logTexts = [];
-            fetch('/api/logs/clear', {method: 'POST'})
-                .then(() => setupLogsStream())
-                .catch(e => console.error('Error clearing logs:', e));
-        }
-
         // Filter state
         let filterExcludeCtrl = false;
         let filterIncludeNodes = new Set();  // Set of node IP last octets to include (empty means all)
@@ -4175,10 +4593,6 @@ class WebController(Controller):
             }
             return logLine;
         }
-
-        // Store all log DOM elements for efficient filtering
-        let logElements = [];  // Store references to DOM elements
-        let logTexts = [];     // Store raw text for each log
 
         function refilterAndRenderLogs() {
             const debugWindow = document.getElementById('debugWindow');
@@ -4297,57 +4711,6 @@ class WebController(Controller):
                 if (highlightInput) {
                     highlightInput.placeholder = `e.g., 1,2,3 (${controllerIpPrefix}.X)`;
                 }
-            }
-        }
-
-        function appendLogsFiltered(newLogs) {
-            const debugWindow = document.getElementById('debugWindow');
-            if (!debugWindow) return;
-
-            if (newLogs.length === 0) return;
-
-            // Remove empty message if present
-            const emptyMsg = document.getElementById('filter-empty-message');
-            if (emptyMsg) emptyMsg.remove();
-
-            // Clear "Waiting" message
-            if (debugWindow.innerHTML === 'Waiting for logs...') {
-                debugWindow.innerHTML = '';
-                logElements = [];
-                logTexts = [];
-            }
-
-            const wasAtBottom = debugWindow.scrollHeight - debugWindow.scrollTop - debugWindow.clientHeight < 10;
-
-            // Add new logs to buffer and DOM
-            for (const log of newLogs) {
-                logBuffer.push(log);
-                logTexts.push(log);
-
-                const shouldShow = shouldDisplayLog(log);
-                const className = log.includes('[CTRL]') ? 'log-ctrl' : 'log-node';
-                const logDiv = document.createElement('div');
-                logDiv.className = className;
-
-                if (shouldShow) {
-                    const highlightedContent = applyHighlighting(log);
-                    if (highlightedContent !== log) {
-                        logDiv.innerHTML = highlightedContent;
-                    } else {
-                        logDiv.innerHTML = log;
-                    }
-                    logDiv.style.display = '';
-                } else {
-                    logDiv.innerHTML = log;
-                    logDiv.style.setProperty('display', 'none', 'important');
-                }
-
-                debugWindow.appendChild(logDiv);
-                logElements.push(logDiv);
-            }
-
-            if (wasAtBottom && autoScrollEnabled) {
-                debugWindow.scrollTop = debugWindow.scrollHeight;
             }
         }
 
@@ -5229,11 +5592,6 @@ class WebController(Controller):
             logsSource = source;
         }
 
-        setupDebugWindow();
-        setupResizableDebugPanel();
-        setupStatusStream();
-        setupLogsStream();
-
         // Setup filter event listeners
         function setupFilterListeners() {
             const excludeCheckbox = document.getElementById('filterExcludeCtrl');
@@ -5262,7 +5620,586 @@ class WebController(Controller):
             }
         }
 
-        setupFilterListeners();
+        // ============ DEBUG WINDOW ============
+
+        // Initialize debug window with scroll loading
+        function initDebugWindow() {
+            debugWindow = document.getElementById('debugWindow');
+            if (!debugWindow) {
+                console.error('[DEBUG] debugWindow not found!');
+                return;
+            }
+            console.log('[DEBUG] initDebugWindow: found debugWindow, setting up scroll listener');
+
+            // Set up scroll event listener for infinite scroll
+            debugWindow.addEventListener('scroll', handleDebugScroll);
+            console.log('[DEBUG] Scroll listener attached');
+
+            // Load journal range info
+            loadJournalRange();
+
+            // Initial load: get recent logs from stream, then historical above
+            setTimeout(() => {
+                console.log('[DEBUG] Initial load timeout, calling loadHistoricalLogsAbove');
+                loadHistoricalLogsAbove();
+            }, 1000);
+        }
+
+        // Load available journal time range
+        async function loadJournalRange() {
+            try {
+                const response = await fetch('/api/journal/range');
+                const data = await response.json();
+                if (!data.error) {
+                    journalRange.earliest = data.earliest;
+                    journalRange.latest = data.latest;
+                    console.log(`Journal range: ${new Date(journalRange.earliest * 1000)} to ${new Date(journalRange.latest * 1000)}`);
+
+                    // Set min/max for datetime picker
+                    const gotoInput = document.getElementById('gotoTimeInput');
+                    if (gotoInput && journalRange.earliest && journalRange.latest) {
+                        gotoInput.min = new Date(journalRange.earliest * 1000).toISOString().slice(0, 16);
+                        gotoInput.max = new Date(journalRange.latest * 1000).toISOString().slice(0, 16);
+                    }
+                }
+            } catch (e) {
+                console.error('Failed to load journal range:', e);
+            }
+        }
+
+        // Load historical logs above current view (scrolling up)
+        async function loadHistoricalLogsAbove() {
+            console.log('[DEBUG] loadHistoricalLogsAbove START, hasMoreUp=', hasMoreUp, 'isLoading=', isLoading);
+
+            if (isLoading) {
+                console.log('[DEBUG] loadHistoricalLogsAbove: isLoading is true, returning');
+                return;
+            }
+            if (!hasMoreUp) {
+                console.log('[DEBUG] loadHistoricalLogsAbove: hasMoreUp is false, returning');
+                return;
+            }
+
+            // Get the earliest log we currently have
+            const earliestLog = logBuffer.length > 0 ? logBuffer[0] : null;
+            const beforeTimestamp = earliestLog ? earliestLog.timestamp : null;
+            console.log('[DEBUG] loadHistoricalLogsAbove: logBuffer.length=', logBuffer.length, 'earliestLog=', earliestLog, 'beforeTimestamp=', beforeTimestamp);
+
+            // If we have no logs, use latest journal time as reference
+            if (!beforeTimestamp && journalRange.latest) {
+                console.log('[DEBUG] loadHistoricalLogsAbove: No logs, fetching from journalRange.latest=', journalRange.latest);
+                isLoading = true;
+                try {
+                    const response = await fetch('/api/journal/scroll', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            timestamp: journalRange.latest,
+                            before: 100,
+                            after: 20
+                        })
+                    });
+                    const data = await response.json();
+                    console.log('[DEBUG] loadHistoricalLogsAbove: scroll response status=', data.status, 'logs count=', data.logs?.length);
+                    if (data.status === 'ok' && data.logs && data.logs.length > 0) {
+                        currentScrollAnchor = data.logs[data.target_index]?.timestamp;
+                        addHistoricalLogs(data.logs);
+                    } else {
+                        console.log('[DEBUG] loadHistoricalLogsAbove: No logs from scroll endpoint');
+                    }
+                } catch (e) {
+                    console.error('[DEBUG] loadHistoricalLogsAbove: error=', e);
+                }
+                isLoading = false;
+                return;
+            }
+
+            if (!beforeTimestamp) {
+                console.log('[DEBUG] loadHistoricalLogsAbove: No beforeTimestamp and no journalRange.latest, returning');
+                return;
+            }
+
+            // Check if we're near the top of the scroll area
+            if (debugWindow.scrollTop > 20) {
+                console.log('[DEBUG] loadHistoricalLogsAbove: scrollTop=' + debugWindow.scrollTop + ' > 20, returning');
+                return;
+            }
+
+            console.log('[DEBUG] loadHistoricalLogsAbove: Fetching logs before timestamp', beforeTimestamp);
+            isLoading = true;
+
+            try {
+                const response = await fetch('/api/journal/fetch', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        before: beforeTimestamp,
+                        limit: 100
+                    })
+                });
+                const data = await response.json();
+                console.log('[DEBUG] loadHistoricalLogsAbove: fetch response status=', data.status, 'logs count=', data.logs?.length, 'has_more=', data.has_more);
+
+                if (data.status === 'ok' && data.logs && data.logs.length > 0) {
+                    const oldScrollHeight = debugWindow.scrollHeight;
+                    const oldScrollTop = debugWindow.scrollTop;
+
+                    addHistoricalLogsAbove(data.logs);
+
+                    const newScrollHeight = debugWindow.scrollHeight;
+                    debugWindow.scrollTop = oldScrollTop + (newScrollHeight - oldScrollHeight);
+                    console.log('[DEBUG] loadHistoricalLogsAbove: Added', data.logs.length, 'logs, adjusted scroll from', oldScrollTop, 'to', debugWindow.scrollTop);
+                } else {
+                    console.log('[DEBUG] loadHistoricalLogsAbove: No logs in response or error');
+                }
+
+                hasMoreUp = data.has_more !== false;
+                console.log('[DEBUG] loadHistoricalLogsAbove: hasMoreUp set to', hasMoreUp);
+
+            } catch (e) {
+                console.error('[DEBUG] loadHistoricalLogsAbove: fetch error=', e);
+            }
+
+            isLoading = false;
+            console.log('[DEBUG] loadHistoricalLogsAbove END');
+        }
+
+        // Load more logs below (when scrolling down near bottom)
+        async function loadMoreLogsBelow() {
+            if (isLoading || !hasMoreDown || autoScrollLocked) return;
+
+            // Check if we're near the bottom
+            const distanceToBottom = debugWindow.scrollHeight - debugWindow.scrollTop - debugWindow.clientHeight;
+            if (distanceToBottom > 50) return;
+
+            // Get the latest log we currently have
+            const latestLog = logBuffer.length > 0 ? logBuffer[logBuffer.length - 1] : null;
+            const afterTimestamp = latestLog ? latestLog.timestamp : null;
+
+            if (!afterTimestamp) return;
+
+            isLoading = true;
+
+            try {
+                const response = await fetch('/api/journal/fetch', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        after: afterTimestamp,
+                        limit: 100
+                    })
+                });
+                const data = await response.json();
+
+                if (data.status === 'ok' && data.logs.length > 0) {
+                    addHistoricalLogsBelow(data.logs);
+                }
+
+                hasMoreDown = data.has_more !== false;
+
+            } catch (e) {
+                console.error('Failed to load more logs:', e);
+            }
+
+            isLoading = false;
+        }
+
+        // Handle scroll events for infinite loading
+        function handleDebugScroll() {
+            if (!debugWindow) return;
+
+            const distanceToBottom = debugWindow.scrollHeight - debugWindow.scrollTop - debugWindow.clientHeight;
+            const atBottom = distanceToBottom < 10;
+
+            console.log('[DEBUG] Scroll: scrollTop=' + debugWindow.scrollTop + ', distanceToBottom=' + distanceToBottom + ', atBottom=' + atBottom + ', autoScrollLocked=' + autoScrollLocked);
+
+            // Update auto-scroll state
+            if (!autoScrollLocked && atBottom && !isAtBottom) {
+                isAtBottom = true;
+            } else if (!autoScrollLocked && !atBottom) {
+                isAtBottom = false;
+            }
+
+            // Check if we should load more
+            console.log('[DEBUG] Checking load conditions: scrollTop < 50 = ' + (debugWindow.scrollTop < 50) + ', distanceToBottom < 100 = ' + (distanceToBottom < 100));
+
+            if (debugWindow.scrollTop < 50) {
+                console.log('[DEBUG] Triggering loadHistoricalLogsAbove');
+                loadHistoricalLogsAbove();
+            } else if (distanceToBottom < 100 && !autoScrollLocked) {
+                console.log('[DEBUG] Triggering loadMoreLogsBelow');
+                loadMoreLogsBelow();
+            }
+        }
+
+        // Add historical logs above existing logs
+        function addHistoricalLogsAbove(newLogs) {
+            if (!newLogs.length) return;
+
+            // Convert to internal format and filter
+            const filteredLogs = newLogs.filter(log => shouldDisplayLog(log.message));
+
+            // Add to beginning of buffer
+            for (let i = filteredLogs.length - 1; i >= 0; i--) {
+                const log = filteredLogs[i];
+                logBuffer.unshift({
+                    timestamp: log.timestamp,
+                    message: log.message
+                });
+            }
+
+            // Rebuild display (inefficient but simple - we could do smarter DOM insertion)
+            rebuildDebugDisplay();
+        }
+
+        // Add historical logs below existing logs
+        function addHistoricalLogsBelow(newLogs) {
+            if (!newLogs.length) return;
+
+            // Convert to internal format and filter
+            for (const log of newLogs) {
+                if (shouldDisplayLog(log.message)) {
+                    logBuffer.push({
+                        timestamp: log.timestamp,
+                        message: log.message
+                    });
+                }
+            }
+
+            // Rebuild display
+            rebuildDebugDisplay();
+        }
+
+        // Add a single new log (from stream)
+        function addNewLog(message) {
+            const timestamp = Date.now() / 1000;
+
+            // Check if we already have this exact message (prevent duplicates)
+            // Use message + recent timestamp as duplicate detection
+            const isDuplicate = logBuffer.some(log =>
+                log.message === message && Math.abs(log.timestamp - timestamp) < 2
+            );
+            if (isDuplicate) {
+                return;
+            }
+
+            // Add to buffer
+            logBuffer.push({
+                timestamp: timestamp,
+                message: message
+            });
+
+            // Trim buffer if too large (keep last 2000)
+            while (logBuffer.length > 2000) {
+                logBuffer.shift();
+            }
+
+            // Add to DOM efficiently (append only)
+            if (shouldDisplayLog(message)) {
+                const shouldScroll = !autoScrollLocked && isAtBottom;
+                const className = message.includes('[CTRL]') ? 'log-ctrl' : 'log-node';
+                const logDiv = document.createElement('div');
+                logDiv.className = className;
+
+                const highlightedContent = applyHighlighting(message);
+                if (highlightedContent !== message) {
+                    logDiv.innerHTML = highlightedContent;
+                } else {
+                    logDiv.textContent = message;
+                }
+
+                debugWindow.appendChild(logDiv);
+                logElements.push(logDiv);
+                logTexts.push(message);
+                logTimestamps.push(timestamp);
+
+                if (shouldScroll) {
+                    debugWindow.scrollTop = debugWindow.scrollHeight;
+                }
+            }
+        }
+
+        // Rebuild entire debug display (used after bulk adds)
+        function rebuildDebugDisplay() {
+            if (!debugWindow) return;
+
+            const shouldScrollToBottom = !autoScrollLocked && isAtBottom;
+            const oldScrollHeight = debugWindow.scrollHeight;
+            const oldScrollTop = debugWindow.scrollTop;
+
+            debugWindow.innerHTML = '';
+            logElements = [];
+            logTexts = [];
+            logTimestamps = [];
+
+            let visibleCount = 0;
+
+            for (const log of logBuffer) {
+                if (shouldDisplayLog(log.message)) {
+                    const className = log.message.includes('[CTRL]') ? 'log-ctrl' : 'log-node';
+                    const logDiv = document.createElement('div');
+                    logDiv.className = className;
+
+                    const highlightedContent = applyHighlighting(log.message);
+                    if (highlightedContent !== log.message) {
+                        logDiv.innerHTML = highlightedContent;
+                    } else {
+                        logDiv.textContent = log.message;
+                    }
+
+                    debugWindow.appendChild(logDiv);
+                    logElements.push(logDiv);
+                    logTexts.push(log.message);
+                    logTimestamps.push(log.timestamp);
+                    visibleCount++;
+                }
+            }
+
+            // Restore or adjust scroll position
+            if (shouldScrollToBottom) {
+                debugWindow.scrollTop = debugWindow.scrollHeight;
+            } else if (currentScrollAnchor) {
+                // Find the element with matching timestamp and scroll to it
+                for (let i = 0; i < logTimestamps.length; i++) {
+                    if (Math.abs(logTimestamps[i] - currentScrollAnchor) < 0.1) {
+                        const targetElement = logElements[i];
+                        if (targetElement) {
+                            targetElement.scrollIntoView({ block: 'center' });
+                            targetElement.style.backgroundColor = '#ffff99';
+                            setTimeout(() => {
+                                targetElement.style.backgroundColor = '';
+                            }, 2000);
+                            break;
+                        }
+                    }
+                }
+                currentScrollAnchor = null;
+            } else if (oldScrollTop > 0 && oldScrollHeight > 0) {
+                // Try to maintain relative scroll position
+                const ratio = oldScrollTop / oldScrollHeight;
+                debugWindow.scrollTop = ratio * debugWindow.scrollHeight;
+            }
+
+            // Show empty message if needed
+            if (visibleCount === 0 && logBuffer.length > 0) {
+                const emptyMsg = document.createElement('div');
+                emptyMsg.className = 'log-ctrl';
+                emptyMsg.textContent = 'No logs match current filters...';
+                debugWindow.appendChild(emptyMsg);
+            }
+        }
+
+        // Scroll to a specific timestamp
+        async function scrollToTimestamp(timestamp) {
+            if (!timestamp) {
+                console.log('[DEBUG] scrollToTimestamp: No timestamp provided');
+                return;
+            }
+
+            console.log('[DEBUG] scrollToTimestamp: target=', timestamp, '(', new Date(timestamp * 1000).toLocaleString(), ')');
+
+            // Check if we already have logs around this time in buffer
+            let closestIndex = -1;
+            let closestDistance = Infinity;
+
+            for (let i = 0; i < logTimestamps.length; i++) {
+                const distance = Math.abs(logTimestamps[i] - timestamp);
+                if (distance < closestDistance) {
+                    closestDistance = distance;
+                    closestIndex = i;
+                }
+            }
+
+            // If we have logs within 60 seconds, just scroll to that point
+            if (closestIndex !== -1 && closestDistance < 60) {
+                console.log('[DEBUG] scrollToTimestamp: Found nearby log in buffer, distance=', closestDistance);
+                const targetElement = logElements[closestIndex];
+                if (targetElement) {
+                    targetElement.scrollIntoView({ block: 'center', behavior: 'smooth' });
+                    targetElement.style.backgroundColor = '#ffff99';
+                    setTimeout(() => {
+                        targetElement.style.backgroundColor = '';
+                    }, 3000);
+                    return;
+                }
+            }
+
+            // Fetch logs around this timestamp from journal
+            console.log('[DEBUG] scrollToTimestamp: Fetching logs from server...');
+            isLoading = true;
+
+            try {
+                const response = await fetch('/api/journal/scroll', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        timestamp: timestamp,
+                        before: 100,
+                        after: 100
+                    })
+                });
+                const data = await response.json();
+
+                console.log('[DEBUG] scrollToTimestamp: Server returned', data.logs?.length, 'logs, target_index=', data.target_index);
+
+                if (data.status === 'ok' && data.logs && data.logs.length > 0) {
+                    // Get timestamps of new logs
+                    const newLogs = data.logs;
+                    const newTimestamps = new Set(newLogs.map(log => log.timestamp));
+
+                    // Remove existing logs that overlap with new ones (by timestamp)
+                    const filteredBuffer = logBuffer.filter(log => !newTimestamps.has(log.timestamp));
+
+                    // Merge and sort by timestamp
+                    logBuffer = [...filteredBuffer, ...newLogs];
+                    logBuffer.sort((a, b) => a.timestamp - b.timestamp);
+
+                    console.log('[DEBUG] scrollToTimestamp: Merged buffer now has', logBuffer.length, 'logs');
+
+                    // Rebuild display with new merged buffer
+                    rebuildDebugDisplay();
+
+                    // Find and highlight the target log
+                    const targetLog = newLogs[data.target_index];
+                    if (targetLog) {
+                        console.log('[DEBUG] scrollToTimestamp: Looking for target log with timestamp=', targetLog.timestamp);
+                        // Find the element with matching timestamp
+                        for (let i = 0; i < logTimestamps.length; i++) {
+                            if (Math.abs(logTimestamps[i] - targetLog.timestamp) < 0.001) {
+                                const targetElement = logElements[i];
+                                if (targetElement) {
+                                    console.log('[DEBUG] scrollToTimestamp: Found target element, scrolling to it');
+                                    targetElement.scrollIntoView({ block: 'center', behavior: 'smooth' });
+                                    targetElement.style.backgroundColor = '#ffff99';
+                                    setTimeout(() => {
+                                        targetElement.style.backgroundColor = '';
+                                    }, 3000);
+                                    break;
+                                }
+                            }
+                        }
+                    } else {
+                        console.log('[DEBUG] scrollToTimestamp: No target log found in response');
+                        // Just scroll to the first returned log
+                        if (logElements.length > 0) {
+                            logElements[0].scrollIntoView({ block: 'center', behavior: 'smooth' });
+                        }
+                    }
+                } else {
+                    console.log('[DEBUG] scrollToTimestamp: No logs returned from server');
+                    // Show notification that no logs available for this time
+                    const notification = document.createElement('div');
+                    notification.style.cssText = 'position:fixed; bottom:100px; right:20px; background:#f44336; color:white; padding:10px; border-radius:5px; z-index:10000;';
+                    notification.textContent = `No logs available for ${new Date(timestamp * 1000).toLocaleString()}`;
+                    document.body.appendChild(notification);
+                    setTimeout(() => notification.remove(), 3000);
+                }
+            } catch (e) {
+                console.error('[DEBUG] scrollToTimestamp: Error=', e);
+            } finally {
+                isLoading = false;
+            }
+        }
+
+        // Go to time from datetime picker
+        function gotoTime() {
+            const input = document.getElementById('gotoTimeInput');
+            if (!input || !input.value) return;
+
+            // The input value is in local time (YYYY-MM-DDThh:mm)
+            // Parse it as local time, not UTC
+            const localString = input.value;
+            const [year, month, day, hour, minute] = localString.split(/[-T:]/).map(Number);
+
+            // Create a date in local time (months are 0-indexed in JS)
+            const localDate = new Date(year, month - 1, day, hour, minute, 0, 0);
+            const timestamp = localDate.getTime() / 1000;
+
+            console.log('[DEBUG] gotoTime: localString=', localString, 'timestamp=', timestamp);
+            scrollToTimestamp(timestamp);
+        }
+
+        // Toggle auto-scroll lock
+        function toggleAutoScrollLock() {
+            autoScrollLocked = !autoScrollLocked;
+            const btn = document.getElementById('scrollLockBtn');
+            if (btn) {
+                if (autoScrollLocked) {
+                    btn.innerHTML = '🔓 Auto-scroll';
+                    btn.style.background = '#dc3545';
+                } else {
+                    btn.innerHTML = '🔒 Auto-scroll';
+                    btn.style.background = '#17a2b8';
+                    // Scroll to bottom when re-enabling
+                    if (debugWindow) {
+                        debugWindow.scrollTop = debugWindow.scrollHeight;
+                    }
+                }
+            }
+        }
+
+        // Override existing appendLogsFiltered function
+        function appendLogsFiltered(newLogs) {
+            if (!newLogs || newLogs.length === 0) return;
+
+            for (const log of newLogs) {
+                addNewLog(log);
+            }
+        }
+
+        // Override clearLogs to reset buffer properly
+        function clearLogs() {
+            logBuffer = [];
+            logElements = [];
+            logTexts = [];
+            logTimestamps = [];
+            if (debugWindow) {
+                debugWindow.innerHTML = 'Logs cleared...';
+            }
+            hasMoreUp = true;
+            hasMoreDown = true;
+            fetch('/api/logs/clear', {method: 'POST'})
+                .then(() => {
+                    setTimeout(() => loadHistoricalLogsAbove(), 100);
+                })
+                .catch(e => console.error('Error clearing logs:', e));
+        }
+
+        // Override setupDebugWindow to also handle auto-scroll toggle
+        function setupDebugWindow() {
+            debugWindow = document.getElementById('debugWindow');
+            if (!debugWindow) return;
+
+            // Setup auto-scroll toggle button
+            const scrollLockBtn = document.getElementById('scrollLockBtn');
+            if (scrollLockBtn) {
+                scrollLockBtn.onclick = toggleAutoScrollLock;
+            }
+
+            // Setup goto time button
+            const gotoBtn = document.getElementById('gotoTimeBtn');
+            if (gotoBtn) {
+                gotoBtn.onclick = gotoTime;
+            }
+
+            // Set up initial datetime picker default to now
+            const gotoInput = document.getElementById('gotoTimeInput');
+            if (gotoInput) {
+                const now = new Date();
+                now.setSeconds(0, 0);
+
+                // Get local timezone offset in minutes
+                const tzOffset = now.getTimezoneOffset();
+                const localNow = new Date(now.getTime() - tzOffset * 60000);
+                gotoInput.value = localNow.toISOString().slice(0, 16);
+            }
+        }
+
+        // Initialize everything
+        function initDebugWindowSystem() {
+            setupDebugWindow();
+            initDebugWindow();
+        }
 
         // ============ GRAPH VIEW CODE ============
         let currentView = 'grid';
@@ -6716,7 +7653,6 @@ class WebController(Controller):
             }
         }
 
-        // ============ INITIALIZATION ============
         function waitForHeader() {
             console.log('waitForHeader: checking for header...');
             if (document.querySelector('.header')) {
@@ -6728,7 +7664,19 @@ class WebController(Controller):
             }
         }
 
-        // Start everything when DOM is ready
+        // ============ INITIALIZATION ============
+
+        setupResizableDebugPanel();
+        setupStatusStream();
+        setupLogsStream();
+        setupFilterListeners();
+        // Debug window
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', initDebugWindowSystem);
+        } else {
+            initDebugWindowSystem();
+        }
+        // Graphs
         if (document.readyState === 'loading') {
             document.addEventListener('DOMContentLoaded', () => {
                 console.log('DOMContentLoaded fired');
@@ -6738,8 +7686,6 @@ class WebController(Controller):
             console.log('DOM already loaded, starting immediately');
             waitForHeader();
         }
-
-        // ============ END GRAPH VIEW CODE ============
 
         </script>
 </body>

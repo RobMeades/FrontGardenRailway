@@ -40,7 +40,7 @@ For isolation, the Raspberry Pi should be installed on a VLAN of the home networ
 
 - Verify that the change is working by running `ntpq -p`: you should see the configured NTP server IP address in the list, and it should eventually show a `*` next to it, indicating it is the source that NTP on the Pi is syncing to, but this might take many many minutes.
 
-- If you intend to log to a database, plug an SSD into the Raspberry Pi, check with `lsblk` and, if it for instance appears as `/dev/sda`, mount it and check that it as mounted with:
+- If you intend to log to a database, plug an SSD that MUST HAVE BEEN EXT4 formatted (if you are to use it for `journal` storage, which is advisable into the Raspberry Pi, check with `lsblk` and, if it for instance appears as `/dev/sda`, mount it and check that it as mounted with:
 
   ```
   sudo mkdir -p /mnt/ssd
@@ -51,7 +51,7 @@ For isolation, the Raspberry Pi should be installed on a VLAN of the home networ
   ...then make the mount persistent by getting the `PARTUUID` of the partition with `sudo blkid /dev/sda1` and then `sudo nano /etc/fstab` and add a line as follows, adding no spurious spaces at the start:
   
   ```
-  PARTUUID=3e4d6a20-01 /mnt/ssd vfat defaults,auto,users,rw,nofail,umask=000 0 0
+  PARTUUID=3e4d6a20-01 /mnt/ssd ext4 defaults,noatime,nofail 0 2
   ```
 
   ...(obviously replacing `PARTUUID` with the `PARTUUID` for your SSD) then check that you got that write by confirming the mount with:
@@ -67,7 +67,60 @@ For isolation, the Raspberry Pi should be installed on a VLAN of the home networ
 
 - Note: later you can use `log_viewer.py` to query the database.
 
-- You can do the same thing with `sudo nano /lib/systemd/system/web_controller.service`, i.e. add `--db-path /mnt/ssd/logs.db` to the end of the `ExecStart` line, do a `sudo systemctl daemon-reload` and then restart the `web_controller` service  with `sudo systemctl restart log_server` and it will now plot graphs using data from the database.
+- You can do the same thing with `sudo nano /lib/systemd/system/web_controller.service`, i.e. add `--db-path /mnt/ssd/logs.db` to the end of the `ExecStart` line, do a `sudo systemctl daemon-reload` and then restart the `web_controller` service  with `sudo systemctl restart web_controller` and it will now plot graphs using data from the database.
+
+- The graph feature does "click to time", which will take you to the log entry for a time on the graph, but this is only really useful with longer term journal storage than one gets with the journal files in RAM; since you now have that SSD, the journal can be moved there with:
+
+  ```
+  sudo systemctl stop systemd-journald
+  sudo rm -rf /var/log/journal
+  sudo mkdir -p /mnt/ssd/journal
+  sudo chown root:systemd-journal /mnt/ssd/journal
+  sudo chmod 2755 /mnt/ssd/journal
+  sudo mkdir -p /var/log/journal
+  sudo mount --bind /mnt/ssd/journal /var/log/journal
+  ````
+
+  Note: ignore the message about triggering units when you stop `system-journald`, it is harmless.
+
+  ...then `sudo nano /etc/fstab`, remove the line referring to `var/log` (leave `/var/lib/logrotate` where it is) then add:
+  
+  `/mnt/ssd/journal /var/log/journal none bind 0 0`
+
+  ...then `sudo nano /etc/systemd/journald.conf` and make it something like:
+  
+  ```
+  [Journal]
+    Storage=persistent
+    SystemMaxUse=2G
+    SystemMaxFileSize=100M
+    MaxRetentionSec=7day
+  ```
+
+  ...then workaround the Trixie `40-rpi-volatile-storage.conf` `journald` configuration file with `sudo nano /usr/lib/systemd/journald.conf.d/90-rpi-persistent-storage.conf` and give it contents:
+  
+  ```
+  [Journal]
+  Storage=persistent
+  ```
+
+  ...then:
+
+  ```
+  sudo systemctl daemon-reload
+  sudo systemctl start systemd-journald
+  sudo journalctl --flush
+  ```
+
+  ...and finally check with:
+  
+  ```
+  mount | grep journal
+  df -h /var/log/journal
+  systemctl status systemd-journald
+  journalctl -n 5
+  journalctl --disk-usage
+  ```
 
 - Since you now have a large writable SSD, you might want to move the `~/fw` directory to it, `sudo nano /lib/systemd/system/https_server.service` to point the working directory to the new location and then `sudo systemctl deamon-reload`, `sudo systemctl restart https_server`.
 
