@@ -97,7 +97,7 @@ For isolation, the Raspberry Pi should be installed on a VLAN of the home networ
     MaxRetentionSec=7day
   ```
 
-  ...then workaround the Trixie `40-rpi-volatile-storage.conf` `journald` configuration file with `sudo nano /usr/lib/systemd/journald.conf.d/90-rpi-persistent-storage.conf` and give it contents:
+  ...then workaround the Trixie (in more ways than one) `40-rpi-volatile-storage.conf` `journald` configuration file with `sudo nano /usr/lib/systemd/journald.conf.d/90-rpi-persistent-storage.conf` and give it contents:
   
   ```
   [Journal]
@@ -210,6 +210,6 @@ For details of the JSON configuration file, which is primarily used by [`nodes_e
 
   The revised line points `https_server.py` at the `~/fw` directory as its working directory (you will have already populated this using [`nodes_esp32_deploy.py`](../esp32/nodes_esp32_deploy.py)), putting it into differentiated mode, and points it at [`nodes_esp32_deploy.json`](../esp32/nodes_esp32_deploy.json) for node configuration information.
 
-- In this mode `https_server.py` has a dashboard running at the URL `https://<pi IP address>:8070/dashboard`: in order to stop your browser objecting that it uses a self-signed certificate, on Windows copy `ca_cert.pem` to your PC, rename it to `ca_cert.crt`, double-click on it and `Install Certificate...` -> `Local Machine`, browse to `Trusted Root Certification Authorities` and place the certificate there, or on Linux copy `ca_cert.pem` to `/usr/local/share/ca-certificates/ca_fgr.crt` and run `sudo update-ca-certificates`.
+- In this mode `https_server.py` has a dashboard running at the URL `https://<pi IP address>:8070/dashboard`: in order to stop your browser objecting that it uses a self-signed certificate, on Windows copy `ca_cert.pem` to your PC, rename it to `ca_cert.crt`, double-click on it and `Install Certificate...` -> `Local Machine`, browse to `Trusted Root Certification Authorities` and place the certificate there, or on Linux copy `ca_cert.pem` to `/usr/local/share/ca-certificates/ca_fgr.crt` and run `sudo update-ca-certificates` (if you ever find you need to update the certificate, replace the old with the new and add `--fresh` to the command-line).
 
 - Enter `ro` again to make the file system of the Raspberry Pi read-only once more.

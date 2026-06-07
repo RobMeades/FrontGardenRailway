@@ -3881,6 +3881,15 @@ class WebController(Controller):
             color: #999;
         }
 
+        .clickable-row:hover {
+            background-color: #e3f2fd !important;
+            cursor: pointer;
+        }
+
+        .clickable-row {
+            transition: background-color 0.1s ease;
+        }
+
         .loading {
             text-align: center;
             padding: 40px;
@@ -5626,21 +5635,18 @@ class WebController(Controller):
         function initDebugWindow() {
             debugWindow = document.getElementById('debugWindow');
             if (!debugWindow) {
-                console.error('[DEBUG] debugWindow not found!');
+                console.error('debugWindow not found!');
                 return;
             }
-            console.log('[DEBUG] initDebugWindow: found debugWindow, setting up scroll listener');
 
             // Set up scroll event listener for infinite scroll
             debugWindow.addEventListener('scroll', handleDebugScroll);
-            console.log('[DEBUG] Scroll listener attached');
 
             // Load journal range info
             loadJournalRange();
 
             // Initial load: get recent logs from stream, then historical above
             setTimeout(() => {
-                console.log('[DEBUG] Initial load timeout, calling loadHistoricalLogsAbove');
                 loadHistoricalLogsAbove();
             }, 1000);
         }
@@ -5653,8 +5659,6 @@ class WebController(Controller):
                 if (!data.error) {
                     journalRange.earliest = data.earliest;
                     journalRange.latest = data.latest;
-                    console.log(`Journal range: ${new Date(journalRange.earliest * 1000)} to ${new Date(journalRange.latest * 1000)}`);
-
                     // Set min/max for datetime picker
                     const gotoInput = document.getElementById('gotoTimeInput');
                     if (gotoInput && journalRange.earliest && journalRange.latest) {
@@ -5669,25 +5673,12 @@ class WebController(Controller):
 
         // Load historical logs above current view (scrolling up)
         async function loadHistoricalLogsAbove() {
-            console.log('[DEBUG] loadHistoricalLogsAbove START, hasMoreUp=', hasMoreUp, 'isLoading=', isLoading);
-
-            if (isLoading) {
-                console.log('[DEBUG] loadHistoricalLogsAbove: isLoading is true, returning');
-                return;
-            }
-            if (!hasMoreUp) {
-                console.log('[DEBUG] loadHistoricalLogsAbove: hasMoreUp is false, returning');
-                return;
-            }
-
             // Get the earliest log we currently have
             const earliestLog = logBuffer.length > 0 ? logBuffer[0] : null;
             const beforeTimestamp = earliestLog ? earliestLog.timestamp : null;
-            console.log('[DEBUG] loadHistoricalLogsAbove: logBuffer.length=', logBuffer.length, 'earliestLog=', earliestLog, 'beforeTimestamp=', beforeTimestamp);
 
             // If we have no logs, use latest journal time as reference
             if (!beforeTimestamp && journalRange.latest) {
-                console.log('[DEBUG] loadHistoricalLogsAbove: No logs, fetching from journalRange.latest=', journalRange.latest);
                 isLoading = true;
                 try {
                     const response = await fetch('/api/journal/scroll', {
@@ -5700,32 +5691,26 @@ class WebController(Controller):
                         })
                     });
                     const data = await response.json();
-                    console.log('[DEBUG] loadHistoricalLogsAbove: scroll response status=', data.status, 'logs count=', data.logs?.length);
                     if (data.status === 'ok' && data.logs && data.logs.length > 0) {
                         currentScrollAnchor = data.logs[data.target_index]?.timestamp;
                         addHistoricalLogs(data.logs);
-                    } else {
-                        console.log('[DEBUG] loadHistoricalLogsAbove: No logs from scroll endpoint');
                     }
                 } catch (e) {
-                    console.error('[DEBUG] loadHistoricalLogsAbove: error=', e);
+                    console.error('loadHistoricalLogsAbove: error=', e);
                 }
                 isLoading = false;
                 return;
             }
 
             if (!beforeTimestamp) {
-                console.log('[DEBUG] loadHistoricalLogsAbove: No beforeTimestamp and no journalRange.latest, returning');
                 return;
             }
 
             // Check if we're near the top of the scroll area
             if (debugWindow.scrollTop > 20) {
-                console.log('[DEBUG] loadHistoricalLogsAbove: scrollTop=' + debugWindow.scrollTop + ' > 20, returning');
                 return;
             }
 
-            console.log('[DEBUG] loadHistoricalLogsAbove: Fetching logs before timestamp', beforeTimestamp);
             isLoading = true;
 
             try {
@@ -5738,7 +5723,6 @@ class WebController(Controller):
                     })
                 });
                 const data = await response.json();
-                console.log('[DEBUG] loadHistoricalLogsAbove: fetch response status=', data.status, 'logs count=', data.logs?.length, 'has_more=', data.has_more);
 
                 if (data.status === 'ok' && data.logs && data.logs.length > 0) {
                     const oldScrollHeight = debugWindow.scrollHeight;
@@ -5748,20 +5732,14 @@ class WebController(Controller):
 
                     const newScrollHeight = debugWindow.scrollHeight;
                     debugWindow.scrollTop = oldScrollTop + (newScrollHeight - oldScrollHeight);
-                    console.log('[DEBUG] loadHistoricalLogsAbove: Added', data.logs.length, 'logs, adjusted scroll from', oldScrollTop, 'to', debugWindow.scrollTop);
-                } else {
-                    console.log('[DEBUG] loadHistoricalLogsAbove: No logs in response or error');
                 }
 
                 hasMoreUp = data.has_more !== false;
-                console.log('[DEBUG] loadHistoricalLogsAbove: hasMoreUp set to', hasMoreUp);
-
             } catch (e) {
-                console.error('[DEBUG] loadHistoricalLogsAbove: fetch error=', e);
+                console.error('loadHistoricalLogsAbove: fetch error=', e);
             }
 
             isLoading = false;
-            console.log('[DEBUG] loadHistoricalLogsAbove END');
         }
 
         // Load more logs below (when scrolling down near bottom)
@@ -5811,8 +5789,6 @@ class WebController(Controller):
             const distanceToBottom = debugWindow.scrollHeight - debugWindow.scrollTop - debugWindow.clientHeight;
             const atBottom = distanceToBottom < 10;
 
-            console.log('[DEBUG] Scroll: scrollTop=' + debugWindow.scrollTop + ', distanceToBottom=' + distanceToBottom + ', atBottom=' + atBottom + ', autoScrollLocked=' + autoScrollLocked);
-
             // Update auto-scroll state
             if (!autoScrollLocked && atBottom && !isAtBottom) {
                 isAtBottom = true;
@@ -5821,13 +5797,9 @@ class WebController(Controller):
             }
 
             // Check if we should load more
-            console.log('[DEBUG] Checking load conditions: scrollTop < 50 = ' + (debugWindow.scrollTop < 50) + ', distanceToBottom < 100 = ' + (distanceToBottom < 100));
-
             if (debugWindow.scrollTop < 50) {
-                console.log('[DEBUG] Triggering loadHistoricalLogsAbove');
                 loadHistoricalLogsAbove();
             } else if (distanceToBottom < 100 && !autoScrollLocked) {
-                console.log('[DEBUG] Triggering loadMoreLogsBelow');
                 loadMoreLogsBelow();
             }
         }
@@ -5992,11 +5964,9 @@ class WebController(Controller):
         // Scroll to a specific timestamp
         async function scrollToTimestamp(timestamp) {
             if (!timestamp) {
-                console.log('[DEBUG] scrollToTimestamp: No timestamp provided');
+                console.error('scrollToTimestamp: No timestamp provided');
                 return;
             }
-
-            console.log('[DEBUG] scrollToTimestamp: target=', timestamp, '(', new Date(timestamp * 1000).toLocaleString(), ')');
 
             // Check if we already have logs around this time in buffer
             let closestIndex = -1;
@@ -6012,11 +5982,10 @@ class WebController(Controller):
 
             // If we have logs within 60 seconds, just scroll to that point
             if (closestIndex !== -1 && closestDistance < 60) {
-                console.log('[DEBUG] scrollToTimestamp: Found nearby log in buffer, distance=', closestDistance);
                 const targetElement = logElements[closestIndex];
                 if (targetElement) {
                     targetElement.scrollIntoView({ block: 'center', behavior: 'smooth' });
-                    targetElement.style.backgroundColor = '#ffff99';
+                    targetElement.style.backgroundColor = '#4a4a4a';
                     setTimeout(() => {
                         targetElement.style.backgroundColor = '';
                     }, 3000);
@@ -6025,7 +5994,6 @@ class WebController(Controller):
             }
 
             // Fetch logs around this timestamp from journal
-            console.log('[DEBUG] scrollToTimestamp: Fetching logs from server...');
             isLoading = true;
 
             try {
@@ -6040,8 +6008,6 @@ class WebController(Controller):
                 });
                 const data = await response.json();
 
-                console.log('[DEBUG] scrollToTimestamp: Server returned', data.logs?.length, 'logs, target_index=', data.target_index);
-
                 if (data.status === 'ok' && data.logs && data.logs.length > 0) {
                     // Get timestamps of new logs
                     const newLogs = data.logs;
@@ -6054,23 +6020,19 @@ class WebController(Controller):
                     logBuffer = [...filteredBuffer, ...newLogs];
                     logBuffer.sort((a, b) => a.timestamp - b.timestamp);
 
-                    console.log('[DEBUG] scrollToTimestamp: Merged buffer now has', logBuffer.length, 'logs');
-
                     // Rebuild display with new merged buffer
                     rebuildDebugDisplay();
 
                     // Find and highlight the target log
                     const targetLog = newLogs[data.target_index];
                     if (targetLog) {
-                        console.log('[DEBUG] scrollToTimestamp: Looking for target log with timestamp=', targetLog.timestamp);
                         // Find the element with matching timestamp
                         for (let i = 0; i < logTimestamps.length; i++) {
                             if (Math.abs(logTimestamps[i] - targetLog.timestamp) < 0.001) {
                                 const targetElement = logElements[i];
                                 if (targetElement) {
-                                    console.log('[DEBUG] scrollToTimestamp: Found target element, scrolling to it');
                                     targetElement.scrollIntoView({ block: 'center', behavior: 'smooth' });
-                                    targetElement.style.backgroundColor = '#ffff99';
+                                    targetElement.style.backgroundColor = '#4a4a4a';
                                     setTimeout(() => {
                                         targetElement.style.backgroundColor = '';
                                     }, 3000);
@@ -6079,14 +6041,12 @@ class WebController(Controller):
                             }
                         }
                     } else {
-                        console.log('[DEBUG] scrollToTimestamp: No target log found in response');
                         // Just scroll to the first returned log
                         if (logElements.length > 0) {
                             logElements[0].scrollIntoView({ block: 'center', behavior: 'smooth' });
                         }
                     }
                 } else {
-                    console.log('[DEBUG] scrollToTimestamp: No logs returned from server');
                     // Show notification that no logs available for this time
                     const notification = document.createElement('div');
                     notification.style.cssText = 'position:fixed; bottom:100px; right:20px; background:#f44336; color:white; padding:10px; border-radius:5px; z-index:10000;';
@@ -6095,7 +6055,7 @@ class WebController(Controller):
                     setTimeout(() => notification.remove(), 3000);
                 }
             } catch (e) {
-                console.error('[DEBUG] scrollToTimestamp: Error=', e);
+                console.error('scrollToTimestamp: Error=', e);
             } finally {
                 isLoading = false;
             }
@@ -6115,7 +6075,6 @@ class WebController(Controller):
             const localDate = new Date(year, month - 1, day, hour, minute, 0, 0);
             const timestamp = localDate.getTime() / 1000;
 
-            console.log('[DEBUG] gotoTime: localString=', localString, 'timestamp=', timestamp);
             scrollToTimestamp(timestamp);
         }
 
@@ -6302,7 +6261,7 @@ class WebController(Controller):
                 .then(response => response.json())
                 .then(data => {
                     if (data.error) {
-                        console.log('Graphs not available:', data.error);
+                        console.error('Graphs not available:', data.error);
                         return;
                     }
                     createViewSelector();  // This creates the buttons
@@ -6310,7 +6269,7 @@ class WebController(Controller):
                     setupGraphEventListeners();
                     loadAvailableNodes();
                 })
-                .catch(e => console.log('Graphs not available:', e));
+                .catch(e => console.error('Graphs not available:', e));
 
             // Load ECharts if needed
             if (typeof echarts === 'undefined') {
@@ -6527,8 +6486,9 @@ class WebController(Controller):
 
                         // Only include rows where something happened
                         if (isEvent) {
+                            const pointTimestamp = point[0] / 1000; // Convert to seconds for scrollToTimestamp
                             eventsHtml += `
-                                <tr>
+                                <tr class="clickable-row" data-timestamp="${pointTimestamp}" style="cursor: pointer;">
                                     <td style="white-space: nowrap;">${timeStr}</td>
                                     <td>${value}</td>
                                     <td>${delta}</td>
@@ -6570,6 +6530,18 @@ class WebController(Controller):
                     body.innerHTML = '<div class="minute-no-data">No events detected for any node this hour</div>';
                 } else {
                     body.innerHTML = html;
+
+                    // Add click handlers to all rows
+                    document.querySelectorAll('.clickable-row').forEach(row => {
+                        row.addEventListener('click', (e) => {
+                            e.stopPropagation();
+                            const timestamp = parseFloat(row.getAttribute('data-timestamp'));
+                            if (timestamp) {
+                                modal.style.display = 'none';
+                                scrollToTimestamp(timestamp);
+                            }
+                        });
+                    });
                 }
 
                 // Attach copy button handler
@@ -6992,11 +6964,6 @@ class WebController(Controller):
                             maxTs = Math.max(maxTs, point[0]);
                         }
                     }
-                    if (minTs !== Infinity) {
-                        console.log(`${graphKey} filtered range: ${new Date(minTs).toLocaleString()} to ${new Date(maxTs).toLocaleString()}`);
-                    } else {
-                        console.log(`${graphKey}: no data after filtering`);
-                    }
 
                     const container = document.getElementById(`graph-${graphKey}`);
                     if (!container) continue;
@@ -7023,48 +6990,64 @@ class WebController(Controller):
                     const chart = echarts.init(container);
                     const option = buildChartOption(graphKey, filteredData, config);
                     chart.setOption(option);
+                    chart.option = option;
 
                     // Store timestamps on the chart for drill-down (needed for category axis)
                     chart.timestamps = graphTimestamps;
 
                     graphCharts[graphKey] = chart;
 
-                    // Single-click for drill-down
-                    chart.off('click');
-                    chart.on('click', function(params) {
-                        if (params.componentType !== 'series') return;
-
-                        let timestamp = null;
-
-                        if (config.isEvent) {
-                            // For category axis, use the stored timestamps array
+                    if (config.isEvent) {
+                        // Bar chart (event data) - show drill-down modal on click
+                        chart.off('click');
+                        chart.on('click', function(params) {
                             if (params.dataIndex !== undefined && chart.timestamps && chart.timestamps[params.dataIndex]) {
-                                timestamp = chart.timestamps[params.dataIndex];
-                            }
-                        } else {
-                            // For time axis, extract from data point
-                            if (params.data && params.data[0]) {
-                                timestamp = params.data[0];
-                            } else if (params.value && params.value[0]) {
-                                timestamp = params.value[0];
-                            }
-                        }
+                                const timestamp = chart.timestamps[params.dataIndex];
+                                chart.dispatchAction({
+                                    type: 'showTip',
+                                    seriesIndex: params.seriesIndex,
+                                    dataIndex: params.dataIndex
+                                });
+                                setTimeout(() => {
+                                    chart.dispatchAction({ type: 'hideTip' });
+                                }, 800);
 
-                        if (timestamp) {
-                            chart.dispatchAction({
-                                type: 'showTip',
-                                seriesIndex: params.seriesIndex,
-                                dataIndex: params.dataIndex
-                            });
-                            setTimeout(() => {
-                                chart.dispatchAction({ type: 'hideTip' });
-                            }, 800);
+                                const nodeFilter = document.getElementById('graphNodeFilter');
+                                const selectedNodes = nodeFilter ? Array.from(nodeFilter.selectedOptions).map(opt => opt.value) : ['all'];
+                                showMinuteDrillDown(graphKey, timestamp, selectedNodes);
+                            }
+                        });
+                    } else {
+                        // Line chart (RSSI, Heap) - use direct canvas click handler
+                        setTimeout(() => {
+                            const canvas = container.querySelector('canvas');
+                            if (canvas) {
+                                if (canvas._clickHandler) {
+                                    canvas.removeEventListener('click', canvas._clickHandler);
+                                }
 
-                            const nodeFilter = document.getElementById('graphNodeFilter');
-                            const selectedNodes = nodeFilter ? Array.from(nodeFilter.selectedOptions).map(opt => opt.value) : ['all'];
-                            showMinuteDrillDown(graphKey, timestamp, selectedNodes);
-                        }
-                    });
+                                canvas._clickHandler = function(e) {
+                                    e.stopPropagation();
+
+                                    const rect = canvas.getBoundingClientRect();
+                                    const scaleX = canvas.width / rect.width;
+                                    const scaleY = canvas.height / rect.height;
+                                    const canvasX = (e.clientX - rect.left) * scaleX;
+                                    const canvasY = (e.clientY - rect.top) * scaleY;
+
+                                    const pointInGrid = chart.convertFromPixel({ seriesIndex: 0 }, [canvasX, canvasY]);
+
+                                    if (pointInGrid && pointInGrid[0]) {
+                                        const timestamp = pointInGrid[0];
+                                        const timestampSeconds = timestamp / 1000;
+                                        scrollToTimestamp(timestampSeconds);
+                                    }
+                                };
+
+                                canvas.addEventListener('click', canvas._clickHandler);
+                            }
+                        }, 200);
+                    }
 
                     // Double-click on graph card for expand
                     const graphCard = container.closest('.graph-card');
@@ -7161,7 +7144,7 @@ class WebController(Controller):
             }
 
             if (config.isEvent) {
-                // Category axis for event charts
+                // Category axis for event charts - UNCHANGED
                 let yMax = 0;
                 for (const s of series) {
                     const maxVal = Math.max(...s.data);
@@ -7207,7 +7190,6 @@ class WebController(Controller):
                             const month = date.getMonth() + 1;
                             const rangeHours = currentTimeRange ? currentTimeRange.hours : 24;
 
-                            // Always return a formatted label, interval will control visibility
                             if (rangeHours >= 72) {
                                 if (hours === '00' && minutes === '00') {
                                     return `${day}/${month}`;
@@ -7239,14 +7221,11 @@ class WebController(Controller):
                                 const hours = date.getHours();
 
                                 if (rangeHours >= 72) {
-                                    // Show only at midnight (0:00)
                                     return hours === 0;
                                 }
                                 if (rangeHours > 24) {
-                                    // Show every 6 hours (0, 6, 12, 18)
                                     return hours % 6 === 0;
                                 }
-                                // Show all labels for shorter ranges
                                 return true;
                             }
                         },
@@ -7297,7 +7276,7 @@ class WebController(Controller):
                     ]
                 };
             } else {
-                // Time axis for line charts (rssi, heap)
+                // Time axis for line charts (rssi, heap) - MODIFIED with axisPointer
                 const now = Date.now();
                 const requestedStart = now - (currentTimeRange.hours * 3600 * 1000);
 
@@ -7325,7 +7304,16 @@ class WebController(Controller):
                 return {
                     tooltip: {
                         trigger: 'axis',
-                        axisPointer: { type: 'cross' },
+                        axisPointer: {
+                            type: 'line',
+                            snap: true,
+                            label: {
+                                show: true,
+                                formatter: function(params) {
+                                    return new Date(params.value).toLocaleTimeString();
+                                }
+                            }
+                        },
                         formatter: function(params) {
                             if (!params || params.length === 0) return '';
                             const time = new Date(params[0].value[0]).toLocaleString();
@@ -7347,6 +7335,18 @@ class WebController(Controller):
                         max: Number(now),
                         boundaryGap: false,
                         scale: false,
+                        axisPointer: {
+                            show: true,
+                            type: 'line',
+                            snap: true,
+                            label: {
+                                show: true,
+                                formatter: function(params) {
+                                    const date = new Date(params.value);
+                                    return date.toLocaleTimeString();
+                                }
+                            }
+                        },
                         axisLabel: {
                             fontSize: 8,
                             margin: 4,
@@ -7480,6 +7480,7 @@ class WebController(Controller):
 
                 const chart = echarts.init(container);
                 chart.setOption(option);
+                chart.option = option;
                 graphCharts[graphKey] = chart;
 
                 // Re-attach click handler
@@ -7547,6 +7548,7 @@ class WebController(Controller):
 
                 const chart = echarts.init(container);
                 chart.setOption(option);
+                chart.option = option;
                 graphCharts[graphKey] = chart;
 
                 // Re-attach click handler
