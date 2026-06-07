@@ -42,6 +42,7 @@ import signal
 import re
 import logging
 import sqlite3
+from pathlib import Path
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
@@ -208,6 +209,23 @@ def linkify_log_line(text):
     url_pattern = r'(http://[\d\.]+:[\d]+/\d+_[0-9\.]+)'
 
     return re.sub(url_pattern, r'<a href="\1" target="_blank">\1</a>', text)
+
+def bucket_events_per_node(df, timestamp_col='Timestamp (UTC)', bucket_size='1h'):
+    """
+    Convert sparse event data into hourly bucket counts per node.
+    Each non-blank value becomes 1 (respecting "at most once per minute" rule).
+    """
+    df_bucketed = df.copy()
+    df_bucketed[timestamp_col] = pd.to_datetime(df_bucketed[timestamp_col])
+    df_bucketed.set_index(timestamp_col, inplace=True)
+
+    # Convert any non-null value to 1 (event present)
+    event_df = df_bucketed.notna().astype(int)
+
+    # Resample to specified bucket size, summing per node
+    bucketed_per_node = event_df.resample(bucket_size).sum()
+
+    return bucketed_per_node
 
 class WebController(Controller):
     """Web-enabled FGR Controller with journal log reading"""
@@ -3552,6 +3570,7 @@ class WebController(Controller):
         let logsSource = null;
         let autoScrollEnabled = true;
         let logBuffer = [];
+        let logStreamActive = true;
         let scrollTimeout = null;
         let nodeOrder = [];
         let nodesData = {};  // Store node data for reference
@@ -3577,6 +3596,11 @@ class WebController(Controller):
         let simpleCache = {};
         let currentChartData = {};
         let rawGraphData = {};
+        let currentDrillDown = {
+            metric: null,
+            timestamp: null,
+            nodes: []
+        };
         let currentDrillDownData = null;
 
         // Log level names
@@ -4630,7 +4654,7 @@ class WebController(Controller):
                         </div>
 
                         <div class="node-custom-container">
-                            ${customHtml || '<div class="node-custom"><div class="custom-value">—</div><div class="custom-unit">None</div></div>'}
+                            ${customHtml || '<div class="node-custom"><div class="custom-value">—</div><div class="custom-unit">No data</div></div>'}
                         </div>
 
                         <div class="node-footer">
@@ -5266,6 +5290,7 @@ class WebController(Controller):
 
         // ============ GRAPH VIEW CODE ============
         let currentView = 'grid';
+        let expandedGraph = null;
         let graphCharts = {};
 
         const GRAPH_CONFIG = {
@@ -5323,6 +5348,7 @@ class WebController(Controller):
         ];
 
         let currentTimeRange = TIME_RANGES[0];
+        let customTimeRange = null;
 
         function toggleView(view) {
             currentView = view;
@@ -5455,6 +5481,10 @@ class WebController(Controller):
             const now = Math.floor(Date.now() / 1000);
             const startTime = now - (currentTimeRange.hours * 3600);
             const cacheKey = `${currentTimeRange.hours}_${Math.floor(startTime / 60)}`;
+
+            console.log(`Current time: ${new Date(now*1000).toLocaleString()}`);
+            console.log(`Start time: ${new Date(startTime*1000).toLocaleString()}`);
+            console.log(`Duration: ${currentTimeRange.hours} hours`);
 
             if (simpleCache[cacheKey]) {
                 renderGraphs(simpleCache[cacheKey]);
@@ -6007,6 +6037,7 @@ class WebController(Controller):
                                 <button class="graph-tool-btn" onclick="exportGraphCSV('${graphKey}')" title="Export as CSV">📊 CSV</button>
                                 <button class="graph-tool-btn" onclick="saveGraphAsImage('${graphKey}')" title="Save as Image">💾</button>
                                 <button class="graph-tool-btn" onclick="resetGraphZoom('${graphKey}')" title="Reset Zoom">⟳</button>
+                                <span class="graph-expand-hint" style="font-size: 9px;">⤢ Double-click to expand | Click bar for details</span>
                             </div>
                         </div>
                         <div id="graph-${graphKey}" class="graph-container"></div>
@@ -6028,8 +6059,9 @@ class WebController(Controller):
                     const filteredData = {};
                     for (const [nodeIp, points] of Object.entries(seriesData)) {
                         if (includeAllNodes || selectedNodes.includes(nodeIp)) {
+                            // Filter points to only those within the requested time range
                             const filteredPoints = points.filter(point => {
-                                const timestamp = point[0];
+                                const timestamp = point[0]; // milliseconds
                                 return timestamp >= requestedStart && timestamp <= now;
                             });
                             if (filteredPoints.length > 0) {
@@ -6038,14 +6070,16 @@ class WebController(Controller):
                         }
                     }
 
-                    // Build sorted timestamps array for this graph (used for drill-down)
-                    const timestampsSet = new Set();
+                    // ========== INSERT DEBUG HERE ==========
+                    const allTimestamps = new Set();
                     for (const [nodeIp, points] of Object.entries(filteredData)) {
                         for (const point of points) {
-                            timestampsSet.add(point[0]);
+                            allTimestamps.add(point[0]);
                         }
                     }
-                    const graphTimestamps = Array.from(timestampsSet).sort((a, b) => a - b);
+                    const sortedTimestamps = Array.from(allTimestamps).sort();
+                    console.log(`${graphKey} unique timestamps:`, sortedTimestamps.map(ts => new Date(ts).toISOString()));
+                    // ========== END DEBUG ==========
 
                     // Debug: log the filtered range
                     let minTs = Infinity, maxTs = -Infinity;
@@ -6064,8 +6098,10 @@ class WebController(Controller):
                     const container = document.getElementById(`graph-${graphKey}`);
                     if (!container) continue;
 
-                    // Store the RAW data for export
+                    // Store the RAW data for export (before any chart stacking)
                     rawGraphData[graphKey] = filteredData;
+
+                    // Also store for toggleGraphExpand if needed
                     currentChartData[graphKey] = filteredData;
 
                     if (Object.keys(filteredData).length === 0) {
@@ -6073,7 +6109,7 @@ class WebController(Controller):
                         chart.setOption({
                             title: {
                                 show: true,
-                                text: 'None',
+                                text: 'No data',
                                 left: 'center',
                                 top: 'center',
                                 textStyle: { color: '#999', fontSize: 12 }
@@ -6085,32 +6121,44 @@ class WebController(Controller):
 
                     const chart = echarts.init(container);
                     const option = buildChartOption(graphKey, filteredData, config);
+
+                    // === DEBUG START ===
+                    console.log(`=== RENDER GRAPHS DEBUG for ${graphKey} ===`);
+                    console.log(`requestedStart: ${requestedStart} (${new Date(requestedStart).toISOString()})`);
+                    console.log(`now: ${now} (${new Date(now).toISOString()})`);
+                    console.log(`option.xAxis.min: ${option.xAxis.min} (${new Date(option.xAxis.min).toISOString()})`);
+                    console.log(`option.xAxis.max: ${option.xAxis.max} (${new Date(option.xAxis.max).toISOString()})`);
+                    console.log(`First data point timestamp: ${Object.values(filteredData)[0]?.[0]?.[0]} (${new Date(Object.values(filteredData)[0]?.[0]?.[0]).toISOString()})`);
+                    // === DEBUG END ===
                     chart.setOption(option);
-
-                    // Store timestamps on the chart for drill-down (needed for category axis)
-                    chart.timestamps = graphTimestamps;
-
                     graphCharts[graphKey] = chart;
 
-                    // Single-click for drill-down
+                    // Helper function to find data index for a timestamp
+                    function findDataIndex(chart, timestamp) {
+                        const option = chart.getOption();
+                        for (let i = 0; i < option.series.length; i++) {
+                            const series = option.series[i];
+                            if (series.data) {
+                                for (let j = 0; j < series.data.length; j++) {
+                                    if (Math.abs(series.data[j][0] - timestamp) < 1000) {
+                                        return { seriesIndex: i, dataIndex: j };
+                                    }
+                                }
+                            }
+                        }
+                        return null;
+                    }
+
+                    // Single-click for drill-down using ECharts' built-in click event
                     chart.off('click');
                     chart.on('click', function(params) {
                         if (params.componentType !== 'series') return;
 
                         let timestamp = null;
-
-                        if (config.isEvent) {
-                            // For category axis, use the stored timestamps array
-                            if (params.dataIndex !== undefined && chart.timestamps && chart.timestamps[params.dataIndex]) {
-                                timestamp = chart.timestamps[params.dataIndex];
-                            }
-                        } else {
-                            // For time axis, extract from data point
-                            if (params.data && params.data[0]) {
-                                timestamp = params.data[0];
-                            } else if (params.value && params.value[0]) {
-                                timestamp = params.value[0];
-                            }
+                        if (params.data && params.data[0]) {
+                            timestamp = params.data[0];
+                        } else if (params.value && params.value[0]) {
+                            timestamp = params.value[0];
                         }
 
                         if (timestamp) {
@@ -6148,18 +6196,6 @@ class WebController(Controller):
             const colors = generateColors(Object.keys(seriesData).length);
             let colorIndex = 0;
 
-            // For event charts, collect all unique timestamps across all nodes
-            let allTimestamps = [];
-            if (config.isEvent) {
-                const timestampSet = new Set();
-                for (const [nodeIp, points] of Object.entries(seriesData)) {
-                    for (const point of points) {
-                        timestampSet.add(point[0]);
-                    }
-                }
-                allTimestamps = Array.from(timestampSet).sort((a, b) => a - b);
-            }
-
             const sortedNodes = Object.entries(seriesData).sort((a, b) => {
                 const lastOctetA = parseInt(a[0].split('.').pop());
                 const lastOctetB = parseInt(b[0].split('.').pop());
@@ -6172,42 +6208,18 @@ class WebController(Controller):
                 const nodeName = getNodeNameByIp(nodeIp);
                 const displayName = `${nodeName}\n(${nodeIp})`;
                 const seriesColor = colors[colorIndex % colors.length];
-                colorIndex++;
 
                 if (config.isEvent) {
-                    // For category axis, align points to timestamp indices
-                    const alignedData = allTimestamps.map(ts => {
-                        const point = points.find(p => p[0] === ts);
-                        return point ? point[1] : 0;
-                    });
-
-                    // Calculate optimal bar width percentage based on number of nodes
-                    // We want total width used = (barWidth% * numNodes) + (barGap% * (numNodes - 1)) to be <= 90%
-                    // Solving for barWidth%: barWidth% = (90% - (barGap% * (numNodes - 1))) / numNodes
-                    const numNodes = Object.keys(seriesData).length;
-                    const barGapPercent = 2;  // 2% gap between bars
-                    const targetUtilization = 85;  // Target percentage of category width to use (leaves 15% padding)
-
-                    // Calculate bar width percentage
-                    let barWidthPercentage = (targetUtilization - (barGapPercent * (numNodes - 1))) / numNodes;
-                    // Clamp between 5% and 30%
-                    barWidthPercentage = Math.min(30, Math.max(5, barWidthPercentage));
-                    // Format as percentage string
-                    const barWidthPercentStr = barWidthPercentage.toFixed(0) + '%';
-
                     series.push({
                         name: displayName,
                         type: 'bar',
-                        data: alignedData,
-                        barWidth: barWidthPercentStr,
-                        barGap: barGapPercent + '%',
-                        barCategoryGap: '15%',  // Space between categories (timestamps)
+                        data: points,
+                        barWidth: 20,  // Fixed width in pixels - THIS IS THE ONLY CHANGE
+                        barGap: '10%',
+                        barCategoryGap: '20%',
                         color: seriesColor,
-                        itemStyle: { color: seriesColor, borderRadius: [2, 2, 0, 0], borderColor: 'rgba(0,0,0,0.2)', borderWidth: 0.5 },
-                        label: { show: false },
-                        emphasis: { focus: 'series' }
+                        itemStyle: { color: seriesColor, borderRadius: [2, 2, 0, 0], borderColor: 'rgba(0,0,0,0.2)', borderWidth: 0.5 }
                     });
-
                 } else {
                     // Line chart for continuous metrics (RSSI, heap)
                     series.push({
@@ -6221,276 +6233,202 @@ class WebController(Controller):
                         lineStyle: { width: 2, color: seriesColor }
                     });
                 }
+                colorIndex++;
             }
 
-            if (config.isEvent) {
-                // Category axis for event charts
-                let yMax = 0;
-                for (const s of series) {
-                    const maxVal = Math.max(...s.data);
-                    if (maxVal > yMax) yMax = maxVal;
+            // Calculate y-axis range
+            let yMin = Infinity, yMax = -Infinity;
+            for (const points of Object.values(seriesData)) {
+                for (const point of points) {
+                    const value = point[1];
+                    if (value < yMin) yMin = value;
+                    if (value > yMax) yMax = value;
                 }
-                const yPadding = yMax * 0.1;
+            }
 
-                return {
-                    tooltip: {
-                        trigger: 'axis',
-                        axisPointer: { type: 'shadow' },
-                        formatter: function(params) {
-                            if (!params || params.length === 0) return '';
-                            const timestamp = allTimestamps[params[0].dataIndex];
-                            const time = new Date(timestamp).toLocaleString();
-                            let html = `<strong>${time}</strong><br/>`;
-                            html += `<hr style="margin: 4px 0; border-color: #ddd;"/>`;
-                            let total = 0;
-                            for (const p of params) {
-                                if (p.value > 0) {
-                                    html += `<span style="color:${p.color}">●</span> ${p.seriesName}: ${config.valueFormatter(p.value)}<br/>`;
-                                    total += p.value;
-                                }
-                            }
-                            if (total > 0) {
-                                html += `<hr style="margin: 4px 0; border-color: #ddd;"/>`;
-                                html += `<strong>Total: ${config.valueFormatter(total)}</strong>`;
-                            }
-                            return html;
-                        },
-                        backgroundColor: 'rgba(50,50,50,0.95)',
-                        borderColor: '#333',
-                        borderWidth: 1,
-                        textStyle: { color: '#fff', fontSize: 11 }
-                    },
-                    xAxis: {
-                        type: 'category',
-                        data: allTimestamps.map(ts => {
-                            const date = new Date(ts);
+            if (yMin !== Infinity) {
+                const range = yMax - yMin;
+                const padding = range * 0.1;
+                yMin = Math.floor(yMin - padding);
+                yMax = Math.ceil(yMax + padding);
+
+                if (graphKey === 'rssi') {
+                    yMin = Math.max(-100, yMin);
+                    yMax = Math.min(-30, yMax);
+                } else if (graphKey === 'heap') {
+                    yMin = Math.max(0, yMin);
+                } else if (graphKey === 'panics' || graphKey === 'ctrl_disconnects' ||
+                        graphKey === 'log_disconnects' || graphKey === 'wifi_failures') {
+                    yMin = Math.max(0, yMin);
+                    yMax = yMax + 1;  // Add a little headroom
+                }
+            }
+
+            const now = Date.now();
+            const requestedStart = now - (currentTimeRange.hours * 3600 * 1000);
+
+            // Build enhanced tooltip formatter
+            const tooltipFormatter = function(params) {
+                if (!params || params.length === 0) return '';
+
+                // For bar charts, extract the time from the first series
+                let time = '';
+                let totalValue = 0;
+                const items = [];
+
+                for (const p of params) {
+                    if (p.value && p.value[0]) {
+                        time = new Date(p.value[0]).toLocaleString();
+                    } else if (p.data && p.data[0]) {
+                        time = new Date(p.data[0]).toLocaleString();
+                    }
+                    const value = p.value ? p.value[1] : (p.data ? p.data[1] : 0);
+                    totalValue += value;
+                    items.push({
+                        name: p.seriesName,
+                        value: value,
+                        color: p.color,
+                        marker: p.marker
+                    });
+                }
+
+                // Sort by value descending
+                items.sort((a, b) => b.value - a.value);
+
+                let html = `<strong>${time}</strong><br/>`;
+                html += `<hr style="margin: 4px 0; border-color: #ddd;"/>`;
+
+                for (const item of items) {
+                    if (item.value > 0) {
+                        html += `<span style="color:${item.color}">●</span> ${item.name}: ${config.valueFormatter(item.value)}<br/>`;
+                    }
+                }
+
+                if (config.isEvent && totalValue > 0) {
+                    html += `<hr style="margin: 4px 0; border-color: #ddd;"/>`;
+                    html += `<strong>Total: ${config.valueFormatter(totalValue)}</strong>`;
+                }
+
+                return html;
+            };
+
+            return {
+                tooltip: {
+                    trigger: 'axis',
+                    axisPointer: { type: config.isEvent ? 'shadow' : 'cross' },
+                    formatter: tooltipFormatter,
+                    backgroundColor: 'rgba(50,50,50,0.95)',
+                    borderColor: '#333',
+                    borderWidth: 1,
+                    textStyle: {
+                        color: '#fff',
+                        fontSize: 11
+                    }
+                },
+                xAxis: {
+                    type: 'time',
+                    name: '',
+                    min: Number(requestedStart),
+                    max: Number(now),
+                    boundaryGap: false,
+                    scale: false,
+                    axisLabel: {
+                        fontSize: 8,
+                        margin: 4,
+                        formatter: function(value, index) {
+                            const date = new Date(value);
                             const hours = date.getHours().toString().padStart(2, '0');
                             const minutes = date.getMinutes().toString().padStart(2, '0');
                             const day = date.getDate();
                             const month = date.getMonth() + 1;
                             const rangeHours = currentTimeRange ? currentTimeRange.hours : 24;
 
-                            // Always return a formatted label, interval will control visibility
-                            if (rangeHours >= 72) {
-                                if (hours === '00' && minutes === '00') {
-                                    return `${day}/${month}`;
-                                }
-                                return `${hours}:${minutes}`;
-                            }
                             if (rangeHours > 24) {
                                 if (hours === '00' && minutes === '00') {
-                                    return `${day}/${month}`;
+                                    return `${day}.${month}`;
                                 }
                                 return `${hours}:${minutes}`;
                             }
                             if (rangeHours > 6) {
                                 if (hours === '00' && minutes === '00') {
-                                    return `${day}/${month}`;
+                                    return `${day}.${month}`;
                                 }
                                 return `${hours}:${minutes}`;
                             }
                             return `${hours}:${minutes}`;
-                        }),
-                        axisLabel: {
-                            fontSize: 10,
-                            margin: 8,
-                            rotate: 0,
-                            interval: function(index, value) {
-                                const rangeHours = currentTimeRange ? currentTimeRange.hours : 24;
-                                const timestamp = allTimestamps[index];
-                                const date = new Date(timestamp);
-                                const hours = date.getHours();
-
-                                if (rangeHours >= 72) {
-                                    // Show only at midnight (0:00)
-                                    return hours === 0;
-                                }
-                                if (rangeHours > 24) {
-                                    // Show every 6 hours (0, 6, 12, 18)
-                                    return hours % 6 === 0;
-                                }
-                                // Show all labels for shorter ranges
-                                return true;
-                            }
-                        },
-                        axisLine: { lineStyle: { color: '#888' } },
-                        axisTick: { show: true, alignWithLabel: true },
-                        boundaryGap: true
-                    },
-                    yAxis: {
-                        type: 'value',
-                        name: config.yAxisLabel || '',
-                        min: 0,
-                        max: yMax + yPadding,
-                        nameLocation: 'middle',
-                        nameGap: 35,
-                        axisLabel: '',
-                        splitLine: { lineStyle: { type: 'dashed', color: '#e0e0e0' } }
-                    },
-                    series: series,
-                    grid: { left: '8%', right: '5%', top: '8%', bottom: '18%', containLabel: true, backgroundColor: '#fafafa' },
-                    legend: {
-                        type: 'scroll',
-                        orient: 'horizontal',
-                        bottom: 0,
-                        left: 'center',
-                        textStyle: { fontSize: 7, lineHeight: 9 },
-                        itemWidth: 12,
-                        itemHeight: 4,
-                        icon: 'roundRect',
-                        backgroundColor: 'transparent',
-                        itemGap: 4,
-                        pageIconColor: '#666',
-                        pageTextStyle: { color: '#666' },
-                        formatter: function(name) {
-                            if (name.length > 30) return name.substring(0, 27) + '...';
-                            return name;
                         }
                     },
-                    media: [
-                        {
-                            query: { minWidth: 800, minHeight: 500 },
-                            option: {
-                                xAxis: { axisLabel: { fontSize: 14 } },
-                                yAxis: { axisLabel: { fontSize: 12 } },
-                                legend: { textStyle: { fontSize: 12, lineHeight: 16 }, itemWidth: 20, itemHeight: 8 },
-                                grid: { bottom: 30 }
+                    axisLine: { lineStyle: { color: '#888' } },
+                    splitLine: { show: false },
+                    minorTick: { show: false }
+                },
+                yAxis: {
+                    type: 'value',
+                    name: config.yAxisLabel || '',
+                    min: yMin,
+                    max: yMax,
+                    nameLocation: 'middle',
+                    nameGap: 35,
+                    axisLabel: {
+                        fontSize: 10,
+                        formatter: function(value) {
+                            if (graphKey === 'heap') return Math.round(value / 1024);
+                            if (graphKey === 'panics' || graphKey === 'ctrl_disconnects' ||
+                                graphKey === 'log_disconnects' || graphKey === 'wifi_failures') {
+                                return Math.floor(value) === value ? value : '';
                             }
+                            return value;
                         }
-                    ]
-                };
-            } else {
-                // Time axis for line charts (rssi, heap)
-                const now = Date.now();
-                const requestedStart = now - (currentTimeRange.hours * 3600 * 1000);
-
-                let yMin = Infinity, yMax = -Infinity;
-                for (const points of Object.values(seriesData)) {
-                    for (const point of points) {
-                        const value = point[1];
-                        if (value < yMin) yMin = value;
-                        if (value > yMax) yMax = value;
+                    },
+                    splitLine: {
+                        lineStyle: { type: 'dashed', color: '#e0e0e0' }
                     }
-                }
-                if (yMin !== Infinity) {
-                    const range = yMax - yMin;
-                    const padding = range * 0.1;
-                    yMin = Math.floor(yMin - padding);
-                    yMax = Math.ceil(yMax + padding);
-                    if (graphKey === 'rssi') {
-                        yMin = Math.max(-100, yMin);
-                        yMax = Math.min(-30, yMax);
-                    } else if (graphKey === 'heap') {
-                        yMin = Math.max(0, yMin);
+                },
+                series: series,
+                grid: {
+                    left: '8%',
+                    right: '5%',
+                    top: '8%',
+                    bottom: '18%',
+                    containLabel: true,
+                    backgroundColor: '#fafafa'
+                },
+                legend: {
+                    type: 'scroll',
+                    orient: 'horizontal',
+                    bottom: 0,
+                    left: 'center',
+                    textStyle: { fontSize: 7, lineHeight: 9 },
+                    itemWidth: 12,
+                    itemHeight: 4,
+                    icon: config.isEvent ? 'roundRect' : 'circle',
+                    backgroundColor: 'transparent',
+                    itemGap: 4,
+                    pageIconColor: '#666',
+                    pageTextStyle: { color: '#666' },
+                    formatter: function(name) {
+                        if (name.length > 30) {
+                            return name.substring(0, 27) + '...';
+                        }
+                        return name;
                     }
-                }
-
-                return {
-                    tooltip: {
-                        trigger: 'axis',
-                        axisPointer: { type: 'cross' },
-                        formatter: function(params) {
-                            if (!params || params.length === 0) return '';
-                            const time = new Date(params[0].value[0]).toLocaleString();
-                            let html = `<strong>${time}</strong><br/>`;
-                            for (const p of params) {
-                                html += `<span style="color:${p.color}">●</span> ${p.seriesName}: ${config.valueFormatter(p.value[1])}<br/>`;
-                            }
-                            return html;
-                        },
-                        backgroundColor: 'rgba(50,50,50,0.95)',
-                        borderColor: '#333',
-                        borderWidth: 1,
-                        textStyle: { color: '#fff', fontSize: 11 }
-                    },
-                    xAxis: {
-                        type: 'time',
-                        name: '',
-                        min: Number(requestedStart),
-                        max: Number(now),
-                        boundaryGap: false,
-                        scale: false,
-                        axisLabel: {
-                            fontSize: 8,
-                            margin: 4,
-                            formatter: function(value, index) {
-                                const date = new Date(value);
-                                const hours = date.getHours().toString().padStart(2, '0');
-                                const minutes = date.getMinutes().toString().padStart(2, '0');
-                                const day = date.getDate();
-                                const month = date.getMonth() + 1;
-                                const rangeHours = currentTimeRange ? currentTimeRange.hours : 24;
-                                if (rangeHours > 24) {
-                                    if (hours === '00' && minutes === '00') return `${day}/${month}`;
-                                    return `${hours}:${minutes}`;
-                                }
-                                if (rangeHours > 6) {
-                                    if (hours === '00' && minutes === '00') return `${day}/${month}`;
-                                    return `${hours}:${minutes}`;
-                                }
-                                return `${hours}:${minutes}`;
-                            }
-                        },
-                        axisLine: { lineStyle: { color: '#888' } },
-                        splitLine: { show: false },
-                        minorTick: { show: false }
-                    },
-                    yAxis: {
-                        type: 'value',
-                        name: config.yAxisLabel || '',
-                        min: yMin,
-                        max: yMax,
-                        nameLocation: 'middle',
-                        nameGap: 35,
-                        axisLabel: {
-                            fontSize: 10,
-                            formatter: function(value) {
-                                if (graphKey === 'heap') return Math.round(value / 1024);
-                                return value;
-                            }
-                        },
-                        splitLine: { lineStyle: { type: 'dashed', color: '#e0e0e0' } }
-                    },
-                    series: series,
-                    grid: { left: '8%', right: '5%', top: '8%', bottom: '18%', containLabel: true, backgroundColor: '#fafafa' },
-                    legend: {
-                        type: 'scroll',
-                        orient: 'horizontal',
-                        bottom: 0,
-                        left: 'center',
-                        textStyle: { fontSize: 7, lineHeight: 9 },
-                        itemWidth: 12,
-                        itemHeight: 4,
-                        icon: 'circle',
-                        backgroundColor: 'transparent',
-                        itemGap: 4,
-                        pageIconColor: '#666',
-                        pageTextStyle: { color: '#666' },
-                        formatter: function(name) {
-                            if (name.length > 30) return name.substring(0, 27) + '...';
-                            return name;
+                },
+                media: [
+                    {
+                        query: { minWidth: 800, minHeight: 500 },
+                        option: {
+                            xAxis: { axisLabel: { fontSize: 14 } },
+                            yAxis: { axisLabel: { fontSize: 12 } },
+                            legend: {
+                                textStyle: { fontSize: 12, lineHeight: 16 },
+                                itemWidth: 20,
+                                itemHeight: 8
+                            },
+                            grid: { bottom: 30 }
                         }
-                    },
-                    dataZoom: [{
-                        type: 'inside',
-                        startValue: requestedStart,
-                        endValue: now,
-                        zoomOnMouseWheel: true,
-                        moveOnMouseMove: true
-                    }],
-                    media: [
-                        {
-                            query: { minWidth: 800, minHeight: 500 },
-                            option: {
-                                xAxis: { axisLabel: { fontSize: 14 } },
-                                yAxis: { axisLabel: { fontSize: 12 } },
-                                legend: { textStyle: { fontSize: 12, lineHeight: 16 }, itemWidth: 20, itemHeight: 8 },
-                                grid: { bottom: 30 }
-                            }
-                        }
-                    ]
-                };
-            }
+                    }
+                ]
+            };
         }
 
         function toggleGraphExpand(graphKey) {
@@ -6499,10 +6437,10 @@ class WebController(Controller):
 
             const isExpanded = graphCard.classList.contains('expanded');
             const container = document.getElementById(`graph-${graphKey}`);
-            if (!container || !rawGraphData[graphKey]) return;
+            if (!container || !currentChartData[graphKey]) return;
 
             const config = GRAPH_CONFIG[graphKey];
-            const data = rawGraphData[graphKey];
+            const data = currentChartData[graphKey];
 
             // Completely destroy the old chart
             if (graphCharts[graphKey]) {
@@ -6542,6 +6480,14 @@ class WebController(Controller):
                 delete option.media;
 
                 const chart = echarts.init(container);
+                // === DEBUG START ===
+                console.log(`=== RENDER GRAPHS DEBUG for ${graphKey} ===`);
+                console.log(`requestedStart: ${requestedStart} (${new Date(requestedStart).toISOString()})`);
+                console.log(`now: ${now} (${new Date(now).toISOString()})`);
+                console.log(`option.xAxis.min: ${option.xAxis.min} (${new Date(option.xAxis.min).toISOString()})`);
+                console.log(`option.xAxis.max: ${option.xAxis.max} (${new Date(option.xAxis.max).toISOString()})`);
+                console.log(`First data point timestamp: ${Object.values(filteredData)[0]?.[0]?.[0]} (${new Date(Object.values(filteredData)[0]?.[0]?.[0]).toISOString()})`);
+                // === DEBUG END ===
                 chart.setOption(option);
                 graphCharts[graphKey] = chart;
 
@@ -6609,6 +6555,14 @@ class WebController(Controller):
                 delete option.media;
 
                 const chart = echarts.init(container);
+                // === DEBUG START ===
+                console.log(`=== RENDER GRAPHS DEBUG for ${graphKey} ===`);
+                console.log(`requestedStart: ${requestedStart} (${new Date(requestedStart).toISOString()})`);
+                console.log(`now: ${now} (${new Date(now).toISOString()})`);
+                console.log(`option.xAxis.min: ${option.xAxis.min} (${new Date(option.xAxis.min).toISOString()})`);
+                console.log(`option.xAxis.max: ${option.xAxis.max} (${new Date(option.xAxis.max).toISOString()})`);
+                console.log(`First data point timestamp: ${Object.values(filteredData)[0]?.[0]?.[0]} (${new Date(Object.values(filteredData)[0]?.[0]?.[0]).toISOString()})`);
+                // === DEBUG END ===
                 chart.setOption(option);
                 graphCharts[graphKey] = chart;
 
@@ -6689,7 +6643,8 @@ class WebController(Controller):
                 const selected = TIME_RANGES.find(r => r.hours === hours);
                 if (selected) {
                     currentTimeRange = selected;
-                    loadGraphs();
+                    console.log('Time range changed to:', currentTimeRange.hours, 'hours');  // Debug log
+                    loadGraphs();  // Reload with new time range
                 }
             };
         }

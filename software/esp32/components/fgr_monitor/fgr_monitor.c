@@ -34,6 +34,7 @@
 #include "fgr_util.h"
 #include "fgr_task.h"
 #include "fgr_rram.h"
+#include "fgr_metrics.h"
 #include "fgr_monitor.h"
 #include "fgr_lib.h"
 
@@ -196,6 +197,13 @@ static void do_abort(int8_t reason, const char *task_name,
         }
         CONTEXT_UNLOCK(context->lock, "do_abort()");
     }
+
+    // The reset reason at boot is set to "normal" for
+    // an abort, so we won't pick it up as a panic,
+    // instead set a panic event here with our abort
+    // reason as the value, negated so as not to overlap
+    // with esp_reset_reason_t.
+    fgr_metrics_event_set(FGR_METRIC_EVENT_PANIC, -reason);
 
     fgr_lib_deinit();
     clean_up(context);
