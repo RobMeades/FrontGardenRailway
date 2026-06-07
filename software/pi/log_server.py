@@ -98,11 +98,6 @@ class FGRLogServer:
         self.client_threads: Dict[socket.socket, threading.Thread] = {}
         self.running = True
 
-        # In-memory accumulator state for crash streams
-        self.active_crashes: Dict[str, Dict] = {}
-        self.crash_dir = Path("/var/log/fgr/crashes")
-        self.crash_dir.mkdir(parents=True, exist_ok=True)
-
         self.stats = {
             'connections': 0,
             'log_messages': 0,
