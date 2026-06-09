@@ -31,7 +31,6 @@ Usage:
 """
 
 import time
-import os
 import sys
 import argparse
 print("Importing asyncio: may take some time...", flush=True)
@@ -42,7 +41,7 @@ import signal
 import re
 import logging
 import sqlite3
-import calendar
+import systemd.journal
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
@@ -220,6 +219,10 @@ class WebController(Controller):
         super().__init__(listen_ip, port, nodes_dir, cfg_file)
 
         self.http_port = http_port
+
+        # Determine expected systemd unit for this service
+        self.script_name = Path(sys.argv[0]).stem  # Gets "web_controller" from "web_controller.py"
+        self.controller_unit = f"{self.script_name}.service"
 
         # Log storage for web interface - store as list with version tracking
         self.log_entries: List[Tuple[int, str]] = []  # (version, message)
@@ -444,13 +447,21 @@ class WebController(Controller):
         except Exception as e:
             self._log_message(f"Error saving node grid layout: {e}")
 
-    def _add_log(self, prefix: str, message: str):
+    def _add_log(self, prefix: str, message: str, journal_ts: float = None):
         """Add a log message to the buffer with automatic trimming"""
-        timestamp = datetime.now().strftime('%H:%M:%S')
+        if journal_ts:
+            dt = datetime.fromtimestamp(journal_ts)
+            timestamp = dt.strftime('%H:%M:%S')
+        else:
+            timestamp = datetime.now().strftime('%H:%M:%S')
+
         version = self._log_counter
         self._log_counter += 1
         linkified_message = linkify_log_line(message)
-        self.log_entries.append((version, f"[{timestamp}] {prefix} {linkified_message}"))
+        formatted_message = f"[{timestamp}] {prefix} {linkified_message}"
+
+        # Store with timestamp for streaming
+        self.log_entries.append((version, formatted_message, journal_ts))
 
         # Trim if needed
         while len(self.log_entries) > self.max_log_entries:
@@ -472,22 +483,24 @@ class WebController(Controller):
         logging.getLogger().addHandler(handler)
 
     def _capture_controller_log(self, message: str):
-        """Capture a controller log message for web display"""
+        """Capture a controller log message and send to journal"""
         # Extract just the message part
         if ' - ' in message:
             parts = message.split(' - ', 2)
             msg_text = parts[2] if len(parts) >= 3 else message
         else:
             msg_text = message
-        self._add_log("[CTRL]", msg_text)
 
-    def _add_node_log(self, message: str):
-        """Add a node log message to the buffer"""
-        self._add_log("[NODE]", message)
+        # Send to journal
+        self._log_message(msg_text)
 
     def _log_message(self, message: str):
-        """Add a message to the log buffer"""
-        self._add_log("[CTRL]", message)
+        """Add a message to the journal"""
+        systemd.journal.send(
+            f"{message}",
+            SYSLOG_IDENTIFIER=JOURNAL_IDENTIFIER,
+            PRIORITY=6
+        )
 
     def _start_journal_reader(self):
         """Start background thread to read logs from journal"""
@@ -514,7 +527,7 @@ class WebController(Controller):
         """Background thread to read logs from systemd journal"""
         try:
             # Open journal reader
-            j = journal.Reader()
+            j = journal.Reader(path='/var/log/journal')
             j.add_match(SYSLOG_IDENTIFIER=JOURNAL_IDENTIFIER)
 
             # Get the cursor of the last entry
@@ -529,23 +542,27 @@ class WebController(Controller):
             j.seek_tail()
             j.get_previous(100)
 
-            existing_logs = []
             for entry in j:
                 if not self.journal_running:
                     break
                 message = entry.get('MESSAGE', '')
                 if message:
                     message = message.rstrip()
-                    self._add_node_log(message)
+                    journal_ts = entry.get('__REALTIME_TIMESTAMP')
+                    journal_ts_value = journal_ts.timestamp() if journal_ts else None
 
-                    # Parse metrics from new logs
-                    metrics_result = self._parse_metrics_from_log(message)
-                    if metrics_result:
-                        node_ip, metrics_data = metrics_result
-                        self._update_node_metrics(node_ip, metrics_data)
-
-            if existing_logs:
-                self._log_message(f"Loaded {len(existing_logs)} existing node logs")
+                    # Determine prefix based on syslog identifier
+                    unit = entry.get('_SYSTEMD_UNIT', '')
+                    if unit == self.controller_unit:
+                        prefix = '[CTRL]'
+                    else:
+                        prefix = '[NODE]'
+                        # Parse metrics from new logs (only for NODE logs)
+                        metrics_result = self._parse_metrics_from_log(message)
+                        if metrics_result:
+                            node_ip, metrics_data = metrics_result
+                            self._update_node_metrics(node_ip, metrics_data)
+                    self._add_log(prefix, message, journal_ts_value)
 
             # Now follow new entries using the cursor
             if last_cursor:
@@ -568,13 +585,21 @@ class WebController(Controller):
                         message = entry.get('MESSAGE', '')
                         if message:
                             message = message.rstrip()
-                            self._add_node_log(message)
+                            journal_ts = entry.get('__REALTIME_TIMESTAMP')
+                            journal_ts_value = journal_ts.timestamp() if journal_ts else None
 
-                            # Parse metrics from new logs
-                            metrics_result = self._parse_metrics_from_log(message)
-                            if metrics_result:
-                                node_ip, metrics_data = metrics_result
-                                self._update_node_metrics(node_ip, metrics_data)
+                            # Determine prefix based on syslog identifier
+                            unit = entry.get('_SYSTEMD_UNIT', '')
+                            if unit == self.controller_unit:
+                                prefix = '[CTRL]'
+                            else:
+                                prefix = '[NODE]'
+                                # Parse metrics from new logs (only for NODE logs)
+                                metrics_result = self._parse_metrics_from_log(message)
+                                if metrics_result:
+                                    node_ip, metrics_data = metrics_result
+                                    self._update_node_metrics(node_ip, metrics_data)
+                            self._add_log(prefix, message, journal_ts_value)
 
         except Exception as e:
             self._log_message(f"Journal reader error: {e}")
@@ -1170,11 +1195,10 @@ class WebController(Controller):
                 if self.log_entries and self.log_entries[-1][0] > last_version:
                     # Find all new logs
                     new_logs = []
-                    for version, msg in self.log_entries:
+                    for version, msg, ts in self.log_entries:
                         if version > last_version:
-                            new_logs.append(msg)
+                            new_logs.append({"message": msg, "timestamp": ts})
                             last_version = version
-
                     if new_logs:
                         try:
                             await response.write(f"data: {json.dumps(new_logs)}\n\n".encode())
@@ -1202,7 +1226,7 @@ class WebController(Controller):
         def _get_logs():
             from datetime import datetime, timezone
 
-            j = journal.Reader()
+            j = journal.Reader(path='/var/log/journal')
             j.add_match(SYSLOG_IDENTIFIER=JOURNAL_IDENTIFIER)
 
             logs = []
@@ -1271,7 +1295,7 @@ class WebController(Controller):
         try:
             def _get_range():
                 self._log_message("[JOURNAL RANGE] _get_range: Opening journal...")
-                j = journal.Reader()
+                j = journal.Reader(path='/var/log/journal')
                 j.add_match(SYSLOG_IDENTIFIER=JOURNAL_IDENTIFIER)
 
                 # Get earliest timestamp
@@ -1326,27 +1350,22 @@ class WebController(Controller):
             traceback.print_exc()
             return web.json_response({'error': str(e)}, status=500)
 
-    async def handle_api_journal_fetch(self, request):
-        """Fetch journal logs - returning objects with message field to match frontend expectations"""
+    async def handle_api_journal_query(self, request):
+        """Unified journal query endpoint"""
 
         if not HAS_SYSTEMD:
             return web.json_response({'error': 'Journal not available'}, status=503)
 
         data = await request.json() if request.body_exists else {}
-        before_timestamp = data.get('before')
-        after_timestamp = data.get('after')
-        limit = data.get('limit', 100)
 
-        print(f"[JOURNAL FETCH] RAW: before={before_timestamp}, after={after_timestamp}, limit={limit}")
+        timestamp = data.get('timestamp')
+        before = data.get('before', 0)
+        after = data.get('after', 0)
 
-        if before_timestamp is None and after_timestamp is None:
-            print(f"[JOURNAL FETCH] ERROR: No before or after timestamp provided")
-            return web.json_response({'status': 'ok', 'logs': [], 'has_more': False})
+        if timestamp is None:
+            return web.json_response({'status': 'ok', 'logs': []})
 
         def _format_log_entry(entry):
-            """Format journal entry to match stream format and return as object with message field"""
-            from datetime import datetime
-
             ts = entry.get('__REALTIME_TIMESTAMP')
             if ts:
                 dt = datetime.fromtimestamp(ts.timestamp())
@@ -1354,250 +1373,74 @@ class WebController(Controller):
             else:
                 time_str = '00:00:00'
 
-            syslog_id = entry.get('SYSLOG_IDENTIFIER', '')
             message = entry.get('MESSAGE', '')
-
-            if syslog_id == 'fgr-log-server':
-                formatted_message = f"[{time_str}] [NODE] {message}"
+            unit = entry.get('_SYSTEMD_UNIT', '')
+            if unit == self.controller_unit:
+                prefix = '[CTRL]'
             else:
-                formatted_message = f"[{time_str}] [CTRL] {message}"
+                prefix = '[NODE]'
 
-            # Return object with message field (and timestamp for potential use)
             return {
-                'message': formatted_message,
+                'message': f"[{time_str}] {prefix} {message}",
                 'timestamp': ts.timestamp() if ts else None
             }
 
-        def _fetch_logs():
-            from datetime import datetime, timezone
-            import time
+        def _query():
+            target_dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
 
-            start_time = time.time()
-
-            print(f"[JOURNAL FETCH] Opening journal...")
-            j = journal.Reader()
-            j.add_match(SYSLOG_IDENTIFIER=JOURNAL_IDENTIFIER)
-
-            logs = []
-
-            if after_timestamp is not None:
-                print(f"[JOURNAL FETCH] FORWARD query after {after_timestamp}")
-                target_dt = datetime.fromtimestamp(after_timestamp, tz=timezone.utc)
-                j.seek_realtime(target_dt)
-
-                count = 0
-                for entry in j:
-                    if count >= limit:
-                        break
-                    ts = entry.get('__REALTIME_TIMESTAMP')
-                    if ts and ts.timestamp() > after_timestamp:
-                        formatted = _format_log_entry(entry)
-                        logs.append(formatted)
-                        count += 1
-                        if count == 1:
-                            print(f"[JOURNAL FETCH] First forward log: {formatted['message'][:80]}...")
-
-                print(f"[JOURNAL FETCH] Forward query found {len(logs)} logs")
-                return logs, len(logs) >= limit
-
-            elif before_timestamp is not None:
-                print(f"[JOURNAL FETCH] BACKWARD query before {before_timestamp}")
-                target_dt = datetime.fromtimestamp(before_timestamp, tz=timezone.utc)
-                j.seek_realtime(target_dt)
-
-                entry = j.get_previous()
-
-                if entry is None:
-                    print(f"[JOURNAL FETCH] No entries before target")
-                    return [], False
-
-                print(f"[JOURNAL FETCH] get_previous() returned type: {type(entry)}")
-                if isinstance(entry, dict):
-                    print(f"[JOURNAL FETCH] It's a dict with keys: {list(entry.keys())[:10]}")
-                    sample_msg = entry.get('MESSAGE', 'NO MESSAGE')
-                    print(f"[JOURNAL FETCH] Sample MESSAGE: {sample_msg[:100]}...")
-
-                temp_logs = []
-                iteration = 0
-
-                while entry and len(temp_logs) < limit:
-                    iteration += 1
-                    if iteration % 10 == 0:
-                        print(f"[JOURNAL FETCH] Iteration {iteration}, collected {len(temp_logs)} logs")
-
-                    if isinstance(entry, dict):
-                        ts = entry.get('__REALTIME_TIMESTAMP')
-                        if ts and ts.timestamp() < before_timestamp:
-                            formatted = _format_log_entry(entry)
-                            temp_logs.append(formatted)
-                            if len(temp_logs) == 1:
-                                print(f"[JOURNAL FETCH] First log: ts={ts.timestamp()}, msg={formatted['message'][:80]}...")
-
-                    entry = j.get_previous()
-
-                elapsed = time.time() - start_time
-                print(f"[JOURNAL FETCH] Backward query: {len(temp_logs)} logs in {elapsed:.2f}s, iterations={iteration}")
-
-                # Reverse to chronological order
-                logs = list(reversed(temp_logs))
-                return logs, len(logs) >= limit
-
-        try:
-            logs, has_more = await asyncio.to_thread(_fetch_logs)
-            print(f"[JOURNAL FETCH] Returning {len(logs)} logs, has_more={has_more}")
-            return web.json_response({'status': 'ok', 'logs': logs, 'has_more': has_more})
-        except Exception as e:
-            print(f"[JOURNAL FETCH] Exception: {e}")
-            import traceback
-            traceback.print_exc()
-            return web.json_response({'error': str(e)}, status=500)
-
-    async def handle_api_journal_scroll(self, request):
-        """Fetch journal logs around a specific timestamp - with FULL DEBUG"""
-
-        if not HAS_SYSTEMD:
-            return web.json_response({'error': 'Journal not available'}, status=503)
-
-        data = await request.json() if request.body_exists else {}
-        target_timestamp = data.get('timestamp')
-        before_count = data.get('before', 50)
-        after_count = data.get('after', 50)
-
-        print(f"[JOURNAL SCROLL] ========== START ==========")
-        print(f"[JOURNAL SCROLL] target={target_timestamp}, before={before_count}, after={after_count}")
-
-        if not target_timestamp:
-            print(f"[JOURNAL SCROLL] ERROR: Missing timestamp")
-            return web.json_response({'error': 'Missing timestamp'}, status=400)
-
-        def _format_log_entry(entry):
-            """Format journal entry to match stream format"""
-            from datetime import datetime
-
-            ts = entry.get('__REALTIME_TIMESTAMP')
-            if ts:
-                dt = datetime.fromtimestamp(ts.timestamp())
-                time_str = dt.strftime('%H:%M:%S')
-            else:
-                time_str = '00:00:00'
-
-            syslog_id = entry.get('SYSLOG_IDENTIFIER', '')
-            message = entry.get('MESSAGE', '')
-
-            if syslog_id == 'fgr-log-server':
-                formatted_message = f"[{time_str}] [NODE] {message}"
-            else:
-                formatted_message = f"[{time_str}] [CTRL] {message}"
-
-            return {
-                'message': formatted_message,
-                'timestamp': ts.timestamp() if ts else None
-            }
-
-        def _scroll_logs():
-            from datetime import datetime, timezone
-            import time
-
-            start_time = time.time()
-
-            print(f"[JOURNAL SCROLL] Opening journal...")
-            j = journal.Reader()
-            j.add_match(SYSLOG_IDENTIFIER=JOURNAL_IDENTIFIER)
-
-            target_dt = datetime.fromtimestamp(target_timestamp, tz=timezone.utc)
-            print(f"[JOURNAL SCROLL] Target datetime: {target_dt}")
-
-            # Seek to target timestamp
-            print(f"[JOURNAL SCROLL] Calling seek_realtime({target_dt})...")
+            j = journal.Reader(path='/var/log/journal')
             j.seek_realtime(target_dt)
-            print(f"[JOURNAL SCROLL] seek_realtime complete")
+            j.add_match(SYSLOG_IDENTIFIER='fgr-log-server')
 
-            # Get logs BEFORE target (using get_previous)
-            print(f"[JOURNAL SCROLL] Getting up to {before_count} logs BEFORE target...")
+            center = j.get_next()
+
+            # Collect AFTER logs first (cursor moves forward)
+            after_logs = []
+            if after > 0 and center:
+                entry = j.get_next()  # First after center
+                while entry and len(after_logs) < after:
+                    after_logs.append(_format_log_entry(entry))
+                    entry = j.get_next()
+
+            # Reposition to center for BEFORE logs
+            j.seek_realtime(target_dt)
+            j.add_match(SYSLOG_IDENTIFIER='fgr-log-server')
+            j.get_next()  # Move to center
+            entry = j.get_previous()  # Move to log before center
+
             before_logs = []
-            before_iter = 0
-            entry = j.get_previous()
-            print(f"[JOURNAL SCROLL] First get_previous() returned: {type(entry)}")
-
-            while entry and len(before_logs) < before_count:
-                before_iter += 1
-                if before_iter % 10 == 0:
-                    print(f"[JOURNAL SCROLL] Before iteration {before_iter}, collected {len(before_logs)} logs")
-
-                ts = entry.get('__REALTIME_TIMESTAMP')
-                if ts:
-                    ts_utc = ts.timestamp()
-                    if ts_utc < target_timestamp:
-                        formatted = _format_log_entry(entry)
-                        before_logs.append(formatted)
-                        if len(before_logs) == 1:
-                            print(f"[JOURNAL SCROLL] First BEFORE log: ts={ts_utc}, msg={formatted['message'][:80]}...")
-                    else:
-                        print(f"[JOURNAL SCROLL] Skipping BEFORE entry with ts={ts_utc} >= {target_timestamp}")
-                else:
-                    print(f"[JOURNAL SCROLL] BEFORE entry has no timestamp")
-
-                entry = j.get_previous()
-
-            print(f"[JOURNAL SCROLL] Collected {len(before_logs)} BEFORE logs after {before_iter} iterations")
-
-            # Reverse before_logs to chronological order
+            if before > 0 and center:
+                while entry and len(before_logs) < before:
+                    before_logs.append(_format_log_entry(entry))
+                    entry = j.get_previous()
             before_logs.reverse()
 
-            # Get logs AFTER target (using get_next)
-            print(f"[JOURNAL SCROLL] Getting up to {after_count} logs AFTER target...")
-            # Need to seek back to target first
-            print(f"[JOURNAL SCROLL] Re-seeking to target for AFTER logs...")
-            j.seek_realtime(target_dt)
-            after_logs = []
-            after_iter = 0
-            entry = j.get_next()
-            print(f"[JOURNAL SCROLL] First get_next() returned: {type(entry)}")
+            # Assemble
+            logs = before_logs
+            target_index = -1
+            if before > 0 and after > 0 and center:
+                target_index = len(logs)
+                logs.append(_format_log_entry(center))
+            logs.extend(after_logs)
 
-            while entry and len(after_logs) < after_count:
-                after_iter += 1
-                if after_iter % 10 == 0:
-                    print(f"[JOURNAL SCROLL] After iteration {after_iter}, collected {len(after_logs)} logs")
+            if target_index == -1:
+                if before > 0 and after == 0:
+                    target_index = len(logs)
+                elif before == 0 and after > 0:
+                    target_index = 0
 
-                ts = entry.get('__REALTIME_TIMESTAMP')
-                if ts:
-                    ts_utc = ts.timestamp()
-                    if ts_utc >= target_timestamp:
-                        formatted = _format_log_entry(entry)
-                        after_logs.append(formatted)
-                        if len(after_logs) == 1:
-                            print(f"[JOURNAL SCROLL] First AFTER log: ts={ts_utc}, msg={formatted['message'][:80]}...")
-                    else:
-                        print(f"[JOURNAL SCROLL] Skipping AFTER entry with ts={ts_utc} < {target_timestamp}")
-                else:
-                    print(f"[JOURNAL SCROLL] AFTER entry has no timestamp")
-
-                entry = j.get_next()
-
-            print(f"[JOURNAL SCROLL] Collected {len(after_logs)} AFTER logs after {after_iter} iterations")
-
-            # Combine: before_logs + after_logs
-            all_logs = before_logs + after_logs
-            target_index = len(before_logs)  # The first after_log is the target or first after
-
-            elapsed = time.time() - start_time
-            print(f"[JOURNAL SCROLL] Total: {len(all_logs)} logs in {elapsed:.2f}s, target_index={target_index}")
-            print(f"[JOURNAL SCROLL] ========== END ==========")
-
-            return all_logs, target_index
+            return logs, target_index
 
         try:
-            logs, target_index = await asyncio.to_thread(_scroll_logs)
-            print(f"[JOURNAL SCROLL] Returning {len(logs)} logs with target_index={target_index}")
+            logs, target_index = await asyncio.to_thread(_query)
+            has_more = len(logs) >= (before if before > 0 else after)
             return web.json_response({
                 'status': 'ok',
                 'logs': logs,
-                'target_index': target_index
+                'target_index': target_index,
+                'has_more': has_more
             })
         except Exception as e:
-            print(f"[JOURNAL SCROLL] Exception: {e}")
-            import traceback
-            traceback.print_exc()
             return web.json_response({'error': str(e)}, status=500)
 
     async def handle_api_command(self, request):
@@ -2499,9 +2342,8 @@ class WebController(Controller):
         self.web_app.router.add_post('/api/node/data', self.handle_api_node_data)
         self.web_app.router.add_post('/api/node/html', self.handle_api_node_html)
         if HAS_SYSTEMD:
-            self.web_app.router.add_post('/api/journal/fetch', self.handle_api_journal_fetch)
+            self.web_app.router.add_post('/api/journal/query', self.handle_api_journal_query)
             self.web_app.router.add_get('/api/journal/range', self.handle_api_journal_time_range)
-            self.web_app.router.add_post('/api/journal/scroll', self.handle_api_journal_scroll)
             self._log_message("Journal API endpoints enabled")
         if self.graphs_enabled:
             self.web_app.router.add_post('/api/graph/data', self.handle_api_graph_data)
@@ -2567,9 +2409,9 @@ class WebController(Controller):
 
         # Log graph status
         if self.graphs_enabled:
-            print(f"📈 Graphs enabled: {self.db_path}")
+            print(f"Graphs enabled: {self.db_path}")
         else:
-            print(f"📈 Graphs disabled (use --db-path to enable)")
+            print(f"Graphs disabled (use --db-path to enable)")
 
         return True
 
@@ -3590,6 +3432,18 @@ class WebController(Controller):
             min-height: auto !important;
         }
 
+        .log-marker {
+            background: #2d5a2d;
+            color: #88ffaa;
+            text-align: center;
+            padding: 4px;
+            margin: 8px 0;
+            font-size: 10px;
+            border-top: 1px solid #88ffaa;
+            border-bottom: 1px solid #88ffaa;
+            font-family: monospace;
+        }
+
         /* View selector buttons */
         .view-btn {
             padding: 4px 16px;
@@ -4032,10 +3886,10 @@ class WebController(Controller):
         let isAtBottom = true;          // Whether we're scrolled to bottom
         let autoScrollLocked = false;   // Whether auto-scroll is locked (disabled)
         let isLoading = false;          // Whether we're currently loading more logs
-        let hasMoreUp = true;           // Whether there are more logs above
         let hasMoreDown = true;         // Whether there are more logs below
         let journalRange = { earliest: null, latest: null };  // Available journal range
         let currentScrollAnchor = null;  // Timestamp to anchor scrolling after loading
+        let maxNormalGapSeconds = 5; // Track the maximum normal gap between consecutive logs
 
         // Set CSS variables from server data if needed
         function updateCSSVariables(status) {
@@ -5675,13 +5529,18 @@ class WebController(Controller):
         async function loadHistoricalLogsAbove() {
             // Get the earliest log we currently have
             const earliestLog = logBuffer.length > 0 ? logBuffer[0] : null;
-            const beforeTimestamp = earliestLog ? earliestLog.timestamp : null;
+            const beforeTimestamp = earliestLog ? earliestLog.timestamp - 0.001 : null;
 
             // If we have no logs, use latest journal time as reference
             if (!beforeTimestamp && journalRange.latest) {
+                if (!journalRange.latest) {
+                    console.log("journalRange.latest not ready, waiting...");
+                    setTimeout(() => loadHistoricalLogsAbove(), 500);
+                    return;
+                }
                 isLoading = true;
                 try {
-                    const response = await fetch('/api/journal/scroll', {
+                    const response = await fetch('/api/journal/query', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
@@ -5693,7 +5552,7 @@ class WebController(Controller):
                     const data = await response.json();
                     if (data.status === 'ok' && data.logs && data.logs.length > 0) {
                         currentScrollAnchor = data.logs[data.target_index]?.timestamp;
-                        addHistoricalLogs(data.logs);
+                        addHistoricalLogsAbove(data.logs);
                     }
                 } catch (e) {
                     console.error('loadHistoricalLogsAbove: error=', e);
@@ -5714,12 +5573,12 @@ class WebController(Controller):
             isLoading = true;
 
             try {
-                const response = await fetch('/api/journal/fetch', {
+                const response = await fetch('/api/journal/query', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        before: beforeTimestamp,
-                        limit: 100
+                        timestamp: beforeTimestamp,
+                        before: 100
                     })
                 });
                 const data = await response.json();
@@ -5734,7 +5593,6 @@ class WebController(Controller):
                     debugWindow.scrollTop = oldScrollTop + (newScrollHeight - oldScrollHeight);
                 }
 
-                hasMoreUp = data.has_more !== false;
             } catch (e) {
                 console.error('loadHistoricalLogsAbove: fetch error=', e);
             }
@@ -5759,12 +5617,12 @@ class WebController(Controller):
             isLoading = true;
 
             try {
-                const response = await fetch('/api/journal/fetch', {
+                const response = await fetch('/api/journal/query', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        after: afterTimestamp,
-                        limit: 100
+                        timestamp: afterTimestamp,
+                        after: 100
                     })
                 });
                 const data = await response.json();
@@ -5804,23 +5662,57 @@ class WebController(Controller):
             }
         }
 
+        function updateMaxNormalGap(timestamp, prevTimestamp) {
+            if (prevTimestamp) {
+                const gap = timestamp - prevTimestamp;
+                // Only update if gap is reasonable (ignore huge gaps from jumps)
+                if (gap < 60 && gap > maxNormalGapSeconds) {
+                    maxNormalGapSeconds = gap;
+                }
+            }
+        }
+
         // Add historical logs above existing logs
         function addHistoricalLogsAbove(newLogs) {
             if (!newLogs.length) return;
 
-            // Convert to internal format and filter
-            const filteredLogs = newLogs.filter(log => shouldDisplayLog(log.message));
+            // Convert to internal format
+            const newEntries = newLogs.map(log => ({
+                timestamp: log.timestamp,
+                message: log.message
+            })).filter(log => shouldDisplayLog(log.message));
 
-            // Add to beginning of buffer
-            for (let i = filteredLogs.length - 1; i >= 0; i--) {
-                const log = filteredLogs[i];
-                logBuffer.unshift({
-                    timestamp: log.timestamp,
-                    message: log.message
-                });
+            // Create a Set of existing timestamps for quick lookup (with tolerance)
+            const existingTimestamps = new Set(logBuffer.map(log => log.timestamp));
+
+            // Only add logs that don't already exist (within 0.1 second tolerance)
+            const uniqueNewEntries = newEntries.filter(log => {
+                // Check if any existing log has a timestamp within 0.1 seconds
+                const exists = Array.from(existingTimestamps).some(ts => Math.abs(ts - log.timestamp) < 0.1);
+                return !exists;
+            });
+
+            if (uniqueNewEntries.length === 0) return;
+
+            // Update maxNormalGapSeconds for consecutive entries within the new batch
+            for (let i = 1; i < uniqueNewEntries.length; i++) {
+                updateMaxNormalGap(uniqueNewEntries[i].timestamp, uniqueNewEntries[i-1].timestamp);
             }
 
-            // Rebuild display (inefficient but simple - we could do smarter DOM insertion)
+            // Also check gap between last existing log and first new log
+            if (logBuffer.length > 0 && uniqueNewEntries.length > 0) {
+                const lastExisting = logBuffer[logBuffer.length - 1].timestamp;
+                const firstNew = uniqueNewEntries[0].timestamp;
+                updateMaxNormalGap(firstNew, lastExisting);
+            }
+
+            // Add to buffer
+            logBuffer.push(...uniqueNewEntries);
+
+            // Sort by timestamp
+            logBuffer.sort((a, b) => a.timestamp - b.timestamp);
+
+            // Rebuild display
             rebuildDebugDisplay();
         }
 
@@ -5829,22 +5721,66 @@ class WebController(Controller):
             if (!newLogs.length) return;
 
             // Convert to internal format and filter
+            const newEntries = [];
             for (const log of newLogs) {
                 if (shouldDisplayLog(log.message)) {
-                    logBuffer.push({
+                    newEntries.push({
                         timestamp: log.timestamp,
                         message: log.message
                     });
                 }
             }
 
+            if (newEntries.length === 0) return;
+
+            // Update maxNormalGapSeconds for consecutive entries within the new batch
+            for (let i = 1; i < newEntries.length; i++) {
+                updateMaxNormalGap(newEntries[i].timestamp, newEntries[i-1].timestamp);
+            }
+
+            // Also check gap between last existing log and first new log
+            if (logBuffer.length > 0 && newEntries.length > 0) {
+                const lastExisting = logBuffer[logBuffer.length - 1].timestamp;
+                const firstNew = newEntries[0].timestamp;
+                updateMaxNormalGap(firstNew, lastExisting);
+            }
+
+            // Add to buffer
+            for (const entry of newEntries) {
+                logBuffer.push(entry);
+            }
+
+            // Sort by timestamp
+            logBuffer.sort((a, b) => a.timestamp - b.timestamp);
+
             // Rebuild display
             rebuildDebugDisplay();
         }
 
         // Add a single new log (from stream)
-        function addNewLog(message) {
-            const timestamp = Date.now() / 1000;
+        function addNewLog(logData) {
+            // Handle both old string format and new object format
+            let message, timestamp;
+            if (typeof logData === 'string') {
+                message = logData;
+                timestamp = Date.now() / 1000;
+            } else {
+                message = logData.message;
+                timestamp = logData.timestamp;
+            }
+
+            // If timestamp is null/undefined (CTRL logs without journal time), try to parse from message or use current time
+            if (!timestamp) {
+                const timeMatch = message.match(/\\[(\\d{2}:\\d{2}:\\d{2})\\]/);
+                if (timeMatch) {
+                    const [h, m, s] = timeMatch[1].split(':').map(Number);
+                    const now = new Date();
+                    now.setHours(h, m, s, 0);
+                    timestamp = now.getTime() / 1000;
+                } else {
+                    timestamp = Date.now() / 1000;
+                }
+            }
 
             // Check if we already have this exact message (prevent duplicates)
             // Use message + recent timestamp as duplicate detection
@@ -5855,11 +5791,20 @@ class WebController(Controller):
                 return;
             }
 
+            // Update maxNormalGapSeconds by comparing with the last log in buffer
+            if (logBuffer.length > 0) {
+                const lastTimestamp = logBuffer[logBuffer.length - 1].timestamp;
+                updateMaxNormalGap(timestamp, lastTimestamp);
+            }
+
             // Add to buffer
             logBuffer.push({
                 timestamp: timestamp,
                 message: message
             });
+
+            // Sort buffer by timestamp to maintain chronological order
+            logBuffer.sort((a, b) => a.timestamp - b.timestamp);
 
             // Trim buffer if too large (keep last 2000)
             while (logBuffer.length > 2000) {
@@ -5905,9 +5850,42 @@ class WebController(Controller):
             logTimestamps = [];
 
             let visibleCount = 0;
+            let lastDisplayedTimestamp = null;
 
             for (const log of logBuffer) {
+                // Skip markers for gap calculation, but they still affect display
+                if (log.isMarker) {
+                    // Render marker
+                    const markerDiv = document.createElement('div');
+                    markerDiv.className = 'gap-marker';
+                    markerDiv.textContent = log.message;
+                    debugWindow.appendChild(markerDiv);
+                    logElements.push(markerDiv);
+                    logTexts.push(log.message);
+                    logTimestamps.push(log.timestamp);
+                    visibleCount++;
+                    continue;
+                }
+
                 if (shouldDisplayLog(log.message)) {
+                    // Check for gap before displaying this log
+                    if (lastDisplayedTimestamp !== null) {
+                        const gap = log.timestamp - lastDisplayedTimestamp;
+                        const threshold = maxNormalGapSeconds * 2;
+                        if (gap > threshold) {
+                            // Insert a gap marker
+                            const markerDiv = document.createElement('div');
+                            markerDiv.className = 'gap-marker';
+                            markerDiv.textContent = `~~~~~~~~~~~~~~~~~~~~ [gap of ${Math.round(gap)} seconds] ~~~~~~~~~~~~~~~~~~~~~`;
+                            debugWindow.appendChild(markerDiv);
+                            logElements.push(markerDiv);
+                            logTexts.push(markerDiv.textContent);
+                            logTimestamps.push(lastDisplayedTimestamp + (gap / 2));
+                            visibleCount++;
+                        }
+                    }
+
+                    // Render the log
                     const className = log.message.includes('[CTRL]') ? 'log-ctrl' : 'log-node';
                     const logDiv = document.createElement('div');
                     logDiv.className = className;
@@ -5924,14 +5902,15 @@ class WebController(Controller):
                     logTexts.push(log.message);
                     logTimestamps.push(log.timestamp);
                     visibleCount++;
+
+                    lastDisplayedTimestamp = log.timestamp;
                 }
             }
 
-            // Restore or adjust scroll position
+            // Restore or adjust scroll position (existing code remains the same)
             if (shouldScrollToBottom) {
                 debugWindow.scrollTop = debugWindow.scrollHeight;
             } else if (currentScrollAnchor) {
-                // Find the element with matching timestamp and scroll to it
                 for (let i = 0; i < logTimestamps.length; i++) {
                     if (Math.abs(logTimestamps[i] - currentScrollAnchor) < 0.1) {
                         const targetElement = logElements[i];
@@ -5947,7 +5926,6 @@ class WebController(Controller):
                 }
                 currentScrollAnchor = null;
             } else if (oldScrollTop > 0 && oldScrollHeight > 0) {
-                // Try to maintain relative scroll position
                 const ratio = oldScrollTop / oldScrollHeight;
                 debugWindow.scrollTop = ratio * debugWindow.scrollHeight;
             }
@@ -5997,7 +5975,7 @@ class WebController(Controller):
             isLoading = true;
 
             try {
-                const response = await fetch('/api/journal/scroll', {
+                const response = await fetch('/api/journal/query', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -6115,7 +6093,6 @@ class WebController(Controller):
             if (debugWindow) {
                 debugWindow.innerHTML = 'Logs cleared...';
             }
-            hasMoreUp = true;
             hasMoreDown = true;
             fetch('/api/logs/clear', {method: 'POST'})
                 .then(() => {

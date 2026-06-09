@@ -26,7 +26,7 @@ Since the Pi will lose connectivity to your Wi-Fi network (you do _not_ want an 
   
   - `sudo apt install iptables iptables-persistent`: will be needed for MAC address filtering,
 
-  - `sudo apt install tcpdump`: can be handy for debugging,
+  - `sudo apt install tcpdump lsof`: can be handy for debugging,
 
   - `sudo apt install sqlite3`: may be needed later when you are storing metrics from nodes in a database,
 

@@ -51,10 +51,10 @@ For isolation, the Raspberry Pi should be installed on a VLAN of the home networ
   ...then make the mount persistent by getting the `PARTUUID` of the partition with `sudo blkid /dev/sda1` and then `sudo nano /etc/fstab` and add a line as follows, adding no spurious spaces at the start:
   
   ```
-  PARTUUID=3e4d6a20-01 /mnt/ssd ext4 defaults,noatime,nofail 0 2
+  PARTUUID=<PARTUUID> /mnt/ssd ext4 defaults,noatime,nofail 0 2
   ```
 
-  ...(obviously replacing `PARTUUID` with the `PARTUUID` for your SSD) then check that you got that write by confirming the mount with:
+  ...(obviously replacing `<PARTUUID>` with the `PARTUUID` for your SSD) then check that you got that write by confirming the mount with:
  
   ```
   sudo mount -a
@@ -121,6 +121,35 @@ For isolation, the Raspberry Pi should be installed on a VLAN of the home networ
   journalctl -n 5
   journalctl --disk-usage
   ```
+
+  ...then you need to make sure that `systemd-journald` doesn't try to start logging until the SSD has been mounted, which you do by creating a drop-in directory with:
+  
+  ```
+  sudo mkdir -p /etc/systemd/system/systemd-journald.service.d
+  ```
+  
+  ...then `sudo nano /etc/systemd/system/systemd-journald.service.d/00-wait-for-ssd.conf` and paste into it:
+  
+  ```
+  [Unit]
+  After=var-log-journal.mount
+  Requires=var-log-journal.mount
+  ```
+
+  ...and `sudo systemctl daemon-reload` to make it active, then, since `systemd-journald` can be a bit sensitive about having the disk switched to RO underneath it, and is now writing to external SSD so it matters a but more that it doesn't suddenly decide to not bother flushing stuff to disk, `sudo nano /etc/bash.bashrc` and add `sudo systemctl restart systemd-journald` to the alias lines:
+  
+  ```
+  alias ro='sudo mount -o remount,ro / ; sudo mount -o remount,ro /boot/firmware ; sudo systemctl restart systemd-journald'
+  alias rw='sudo mount -o remount,rw / ; sudo mount -o remount,rw /boot/firmware ; sudo systemctl restart systemd-journald'
+  ```
+
+  ...then, to monitor the situation and make sure stuff really is being written to the SSD journal file, run the `journal_ssd_check.sh` script every 5 minutes by doing `sudo crontab -e` and adding:
+  
+  ```
+  */5 * * * * <path to cloned FGR repo>/FrontGardenRailway/software/pi/journal_ssd_check.sh
+  ```
+
+  ...which will insert a journal entry every 5 minutes telling you whether the SSD journal file is being written to. 
 
 - Since you now have a large writable SSD, you might want to move the `~/fw` directory to it, `sudo nano /lib/systemd/system/https_server.service` to point the working directory to the new location and then `sudo systemctl deamon-reload`, `sudo systemctl restart https_server`.
 
