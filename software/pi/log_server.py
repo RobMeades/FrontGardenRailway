@@ -96,6 +96,7 @@ class FGRLogServer:
 
         self.server_socket: Optional[socket.socket] = None
         self.client_threads: Dict[socket.socket, threading.Thread] = {}
+        self.active_crashes = {}
         self.running = True
 
         self.stats = {
@@ -484,44 +485,25 @@ class FGRLogServer:
 
     def _handle_client(self, client_socket: socket.socket, client_address: tuple) -> None:
         device_info = {'addr': client_address[0], 'port': client_address[1]}
+
+        # Just set a reasonable timeout - no flush needed
         client_socket.settimeout(1.0)
+
         print(f"New connection from {client_address[0]}:{client_address[1]}")
 
         try:
-            # Set the socket briefly to non-blocking to clear any desynced
-            # buffered stream trash waiting on the wire before entering the parser loop.
-            client_socket.setblocking(False)
-            purged_bytes = 0
-            try:
-                while True:
-                    trash = client_socket.recv(4096)
-                    if not trash:
-                        break
-                    purged_bytes += len(trash)
-            except (BlockingIOError, socket.timeout):
-                # No data left to clear - stream is clean
-                pass
-            except OSError:
-                return  # Connection dropped during flush pass
-            finally:
-                client_socket.setblocking(True)
-                client_socket.settimeout(1.0)
-
-            if purged_bytes > 0:
-                print(f"Purged {purged_bytes} residual desynced stream bytes from {client_address[0]}")
-
             while self.running:
                 try:
                     msg = receive_message(client_socket, timeout=1.0)
                     if msg is None:
-                        # Dynamic network checking to bypass hidden dead sockets
+                        # Check if socket is still alive
                         try:
                             client_socket.setblocking(False)
                             if not client_socket.recv(1, socket.MSG_PEEK):
                                 break
                         except (BlockingIOError, socket.timeout):
                             pass
-                        except OSError:
+                        except (OSError, ConnectionError):
                             break
                         finally:
                             client_socket.setblocking(True)
@@ -537,6 +519,10 @@ class FGRLogServer:
                     self._write_to_journal(log_text, log_level, device_info)
                     self._queue_log_for_storage(device_info['addr'], log_level, log_text)
 
+                except socket.timeout:
+                    continue
+                except (ConnectionResetError, BrokenPipeError):
+                    break
                 except Exception as e:
                     with self.lock:
                         self.stats['errors'] += 1
@@ -545,10 +531,12 @@ class FGRLogServer:
         finally:
             try:
                 client_socket.shutdown(socket.SHUT_RDWR)
-            except: pass
+            except:
+                pass
             try:
                 client_socket.close()
-            except: pass
+            except:
+                pass
             with self.lock:
                 if client_socket in self.client_threads:
                     del self.client_threads[client_socket]

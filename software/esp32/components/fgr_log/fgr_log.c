@@ -382,7 +382,7 @@ static void log_replay_marker(const char *str, context_t *context)
         marker_msg->body.length = htonl(strlen(str));
         memcpy(marker_msg->body.contents, str, strlen(str));
 
-        fgr_socket_send_no_log(context->sock, &marker_msg,
+        fgr_socket_send_no_log(context->sock, marker_msg,
                                sizeof(marker_msg->header) + sizeof(marker_msg->body.length) + strlen(str), 0);
         free(marker_msg);
     }
@@ -446,7 +446,7 @@ static void log_buffer_replay(context_t *context,
 
                 xSemaphoreGive(context->lock);
 
-                fgr_socket_send_no_log(context->sock, &replay_msg,
+                fgr_socket_send_no_log(context->sock, replay_msg,
                                        sizeof(replay_msg->header) + body_length, 0);
 
                 idx++;
