@@ -6917,18 +6917,35 @@ class WebController(Controller):
                     } else {
                         // Line chart (RSSI, Heap) - use direct canvas click handler
                         setTimeout(() => {
-                            const canvas = container.querySelector('canvas');
-                            if (canvas) {
-                                if (canvas._clickHandler) {
-                                    canvas.removeEventListener('click', canvas._clickHandler);
-                                }
+                            const containerEl = container;
+                            const chart = graphCharts[graphKey];
 
-                                canvas._clickHandler = function(e) {
+                            if (containerEl && chart) {
+                                // Remove any existing overlay
+                                const existingOverlay = containerEl.querySelector('.click-overlay');
+                                if (existingOverlay) existingOverlay.remove();
+
+                                // Create overlay div for click detection
+                                const overlay = document.createElement('div');
+                                overlay.className = 'click-overlay';
+                                overlay.style.cssText = `
+                                    position: absolute;
+                                    top: 8%;
+                                    left: 8%;
+                                    right: 5%;
+                                    bottom: 18%;
+                                    cursor: pointer;
+                                    z-index: 10;
+                                    background: transparent;
+                                `;
+
+                                overlay.onclick = function(e) {
                                     e.stopPropagation();
 
-                                    const rect = canvas.getBoundingClientRect();
-                                    const scaleX = canvas.width / rect.width;
-                                    const scaleY = canvas.height / rect.height;
+                                    // Get click position relative to overlay
+                                    const rect = overlay.getBoundingClientRect();
+                                    const scaleX = containerEl.querySelector('canvas').width / rect.width;
+                                    const scaleY = containerEl.querySelector('canvas').height / rect.height;
                                     const canvasX = (e.clientX - rect.left) * scaleX;
                                     const canvasY = (e.clientY - rect.top) * scaleY;
 
@@ -6941,7 +6958,8 @@ class WebController(Controller):
                                     }
                                 };
 
-                                canvas.addEventListener('click', canvas._clickHandler);
+                                containerEl.style.position = 'relative';
+                                containerEl.appendChild(overlay);
                             }
                         }, 200);
                     }
