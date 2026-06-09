@@ -6792,6 +6792,90 @@ class WebController(Controller):
             }
         }
 
+        function setupGraphTimeClickHandler(graphKey, chart, container) {
+            const zr = chart.getZr();
+
+            // Remove any existing handler
+            zr.off('click');
+
+            zr.on('click', function(params) {
+                // Get the plot area (where the actual data is drawn)
+                let plotAreaBottom = null;
+
+                try {
+                    const model = chart.getModel();
+                    const gridComponent = model.getComponent('grid');
+                    if (gridComponent && gridComponent.coordinateSystem) {
+                        const rect = gridComponent.coordinateSystem.getRect();
+                        plotAreaBottom = rect.y + rect.height;
+                    }
+                } catch(e) {
+                    // Fallback if grid detection fails
+                    plotAreaBottom = chart.getHeight() * 0.7;
+                }
+
+                // Ignore clicks below the plot area (legend area)
+                if (plotAreaBottom !== null && params.offsetY > plotAreaBottom) {
+                    return; // Legend click - ignore
+                }
+
+                // Convert pixel coordinates to chart coordinates (time, value)
+                const pointInPixel = [params.offsetX, params.offsetY];
+                const pointInGrid = chart.convertFromPixel({ seriesIndex: 0 }, pointInPixel);
+
+                if (pointInGrid && pointInGrid[0]) {
+                    const timestamp = pointInGrid[0];
+                    const timestampSeconds = timestamp / 1000;
+
+                    // Jump to this time in the logs
+                    scrollToTimestamp(timestampSeconds);
+
+                    // Visual feedback - show a brief flash at click position
+                    const flash = document.createElement('div');
+                    flash.style.cssText = `
+                        position: absolute;
+                        left: ${params.offsetX - 8}px;
+                        top: ${params.offsetY - 8}px;
+                        width: 16px;
+                        height: 16px;
+                        background: #2196f3;
+                        border-radius: 50%;
+                        pointer-events: none;
+                        z-index: 1000;
+                        animation: pulse 0.3s ease-out;
+                    `;
+                    container.style.position = 'relative';
+                    container.appendChild(flash);
+
+                    // Collapse the expanded graph after a short delay
+                    setTimeout(() => {
+                        const graphCard = document.querySelector(`.graph-card[data-graph="${graphKey}"]`);
+                        if (graphCard && graphCard.classList.contains('expanded')) {
+                            toggleGraphExpand(graphKey);
+                        }
+                    }, 200);
+
+                    setTimeout(() => flash.remove(), 300);
+                }
+            });
+
+            // Add visual cursor hint
+            container.style.cursor = 'crosshair';
+
+            // Add CSS animation if not already present
+            if (!document.querySelector('#pulse-style')) {
+                const style = document.createElement('style');
+                style.id = 'pulse-style';
+                style.textContent = `
+                    @keyframes pulse {
+                        0% { transform: scale(0.5); opacity: 1; }
+                        100% { transform: scale(6); opacity: 0; }
+                    }
+                `;
+                document.head.appendChild(style);
+            }
+        }
+
         function renderGraphs(data) {
             const graphGrid = document.getElementById('graphGrid');
             if (!graphGrid) return;
@@ -6915,53 +6999,21 @@ class WebController(Controller):
                             }
                         });
                     } else {
-                        // Line chart (RSSI, Heap) - use direct canvas click handler
-                        setTimeout(() => {
-                            const containerEl = container;
-                            const chart = graphCharts[graphKey];
+                        // Line chart (RSSI, Heap) - use the shared click handler function
+                        setupGraphTimeClickHandler(graphKey, chart, container);
 
-                            if (containerEl && chart) {
-                                // Remove any existing overlay
-                                const existingOverlay = containerEl.querySelector('.click-overlay');
-                                if (existingOverlay) existingOverlay.remove();
-
-                                // Create overlay div for click detection
-                                const overlay = document.createElement('div');
-                                overlay.className = 'click-overlay';
-                                overlay.style.cssText = `
-                                    position: absolute;
-                                    top: 8%;
-                                    left: 8%;
-                                    right: 5%;
-                                    bottom: 18%;
-                                    cursor: pointer;
-                                    z-index: 10;
-                                    background: transparent;
-                                `;
-
-                                overlay.onclick = function(e) {
-                                    e.stopPropagation();
-
-                                    // Get click position relative to overlay
-                                    const rect = overlay.getBoundingClientRect();
-                                    const scaleX = containerEl.querySelector('canvas').width / rect.width;
-                                    const scaleY = containerEl.querySelector('canvas').height / rect.height;
-                                    const canvasX = (e.clientX - rect.left) * scaleX;
-                                    const canvasY = (e.clientY - rect.top) * scaleY;
-
-                                    const pointInGrid = chart.convertFromPixel({ seriesIndex: 0 }, [canvasX, canvasY]);
-
-                                    if (pointInGrid && pointInGrid[0]) {
-                                        const timestamp = pointInGrid[0];
-                                        const timestampSeconds = timestamp / 1000;
-                                        scrollToTimestamp(timestampSeconds);
-                                    }
-                                };
-
-                                containerEl.style.position = 'relative';
-                                containerEl.appendChild(overlay);
-                            }
-                        }, 200);
+                        // Add CSS animation
+                        if (!document.querySelector('#pulse-style')) {
+                            const style = document.createElement('style');
+                            style.id = 'pulse-style';
+                            style.textContent = `
+                                @keyframes pulse {
+                                    0% { transform: scale(0.5); opacity: 1; }
+                                    100% { transform: scale(6); opacity: 0; }
+                                }
+                            `;
+                            document.head.appendChild(style);
+                        }
                     }
 
                     // Double-click on graph card for expand
@@ -7399,23 +7451,31 @@ class WebController(Controller):
                 chart.option = option;
                 graphCharts[graphKey] = chart;
 
-                // Re-attach click handler
-                chart.off('click');
-                chart.on('click', function(params) {
-                    if (params.componentType !== 'series') return;
-                    let timestamp = params.data ? params.data[0] : (params.value ? params.value[0] : null);
-                    if (timestamp) {
-                        chart.dispatchAction({
-                            type: 'showTip',
-                            seriesIndex: params.seriesIndex,
-                            dataIndex: params.dataIndex
-                        });
-                        setTimeout(() => chart.dispatchAction({ type: 'hideTip' }), 800);
-                        const nodeFilter = document.getElementById('graphNodeFilter');
-                        const selectedNodes = nodeFilter ? Array.from(nodeFilter.selectedOptions).map(opt => opt.value) : ['all'];
-                        showMinuteDrillDown(graphKey, timestamp, selectedNodes);
-                    }
-                });
+                // Re-attach click handler based on chart type
+                if (config.isEvent) {
+                    // Bar chart (event data) - show drill-down modal on click
+                    chart.off('click');
+                    chart.on('click', function(params) {
+                        if (params.dataIndex !== undefined && chart.timestamps && chart.timestamps[params.dataIndex]) {
+                            const timestamp = chart.timestamps[params.dataIndex];
+                            chart.dispatchAction({
+                                type: 'showTip',
+                                seriesIndex: params.seriesIndex,
+                                dataIndex: params.dataIndex
+                            });
+                            setTimeout(() => {
+                                chart.dispatchAction({ type: 'hideTip' });
+                            }, 800);
+
+                            const nodeFilter = document.getElementById('graphNodeFilter');
+                            const selectedNodes = nodeFilter ? Array.from(nodeFilter.selectedOptions).map(opt => opt.value) : ['all'];
+                            showMinuteDrillDown(graphKey, timestamp, selectedNodes);
+                        }
+                    });
+                } else {
+                    // Line chart - use the shared click handler
+                    setupGraphTimeClickHandler(graphKey, chart, container);
+                }
 
             } else {
                 // Expand
@@ -7467,23 +7527,31 @@ class WebController(Controller):
                 chart.option = option;
                 graphCharts[graphKey] = chart;
 
-                // Re-attach click handler
-                chart.off('click');
-                chart.on('click', function(params) {
-                    if (params.componentType !== 'series') return;
-                    let timestamp = params.data ? params.data[0] : (params.value ? params.value[0] : null);
-                    if (timestamp) {
-                        chart.dispatchAction({
-                            type: 'showTip',
-                            seriesIndex: params.seriesIndex,
-                            dataIndex: params.dataIndex
-                        });
-                        setTimeout(() => chart.dispatchAction({ type: 'hideTip' }), 800);
-                        const nodeFilter = document.getElementById('graphNodeFilter');
-                        const selectedNodes = nodeFilter ? Array.from(nodeFilter.selectedOptions).map(opt => opt.value) : ['all'];
-                        showMinuteDrillDown(graphKey, timestamp, selectedNodes);
-                    }
-                });
+                // Re-attach click handler based on chart type
+                if (config.isEvent) {
+                    // Bar chart (event data) - show drill-down modal on click
+                    chart.off('click');
+                    chart.on('click', function(params) {
+                        if (params.dataIndex !== undefined && chart.timestamps && chart.timestamps[params.dataIndex]) {
+                            const timestamp = chart.timestamps[params.dataIndex];
+                            chart.dispatchAction({
+                                type: 'showTip',
+                                seriesIndex: params.seriesIndex,
+                                dataIndex: params.dataIndex
+                            });
+                            setTimeout(() => {
+                                chart.dispatchAction({ type: 'hideTip' });
+                            }, 800);
+
+                            const nodeFilter = document.getElementById('graphNodeFilter');
+                            const selectedNodes = nodeFilter ? Array.from(nodeFilter.selectedOptions).map(opt => opt.value) : ['all'];
+                            showMinuteDrillDown(graphKey, timestamp, selectedNodes);
+                        }
+                    });
+                } else {
+                    // Line chart - use the shared click handler
+                    setupGraphTimeClickHandler(graphKey, chart, container);
+                }
             }
 
             // Force a final resize
