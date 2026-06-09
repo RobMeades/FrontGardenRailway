@@ -542,12 +542,16 @@ class WebController(Controller):
             j.seek_tail()
             j.get_previous(100)
 
+            backfill_count = 0
             for entry in j:
                 if not self.journal_running:
                     break
                 message = entry.get('MESSAGE', '')
                 if message:
                     message = message.rstrip()
+                    cursor = entry.get('__CURSOR', 'unknown')
+                    backfill_count += 1
+
                     journal_ts = entry.get('__REALTIME_TIMESTAMP')
                     journal_ts_value = journal_ts.timestamp() if journal_ts else None
 
@@ -570,6 +574,7 @@ class WebController(Controller):
                 j.get_next(1)
 
             # Use a short timeout to allow checking the running flag frequently
+            append_count = 0
             while self.journal_running:
                 # Use a very short timeout (100ms) to be responsive to stop signal
                 # wait() takes microseconds: 100,000 microseconds = 0.1 seconds
@@ -585,6 +590,9 @@ class WebController(Controller):
                         message = entry.get('MESSAGE', '')
                         if message:
                             message = message.rstrip()
+                            cursor = entry.get('__CURSOR', 'unknown')
+                            append_count += 1
+
                             journal_ts = entry.get('__REALTIME_TIMESTAMP')
                             journal_ts_value = journal_ts.timestamp() if journal_ts else None
 
@@ -1215,91 +1223,18 @@ class WebController(Controller):
 
         return response
 
-    async def handle_api_journal_test(self, request):
-        """Test endpoint to verify journal access and show sample logs"""
-        if not HAS_SYSTEMD:
-            return web.json_response({'error': 'Journal not available'}, status=503)
-
-        direction = request.query.get('direction', 'tail')
-        limit = int(request.query.get('limit', '20'))
-
-        def _get_logs():
-            from datetime import datetime, timezone
-
-            j = journal.Reader(path='/var/log/journal')
-            j.add_match(SYSLOG_IDENTIFIER=JOURNAL_IDENTIFIER)
-
-            logs = []
-
-            if direction == 'head':
-                # Get earliest logs
-                j.seek_head()
-                count = 0
-                for entry in j:
-                    if count >= limit:
-                        break
-                    message = entry.get('MESSAGE', '')
-                    if message:
-                        ts = entry.get('__REALTIME_TIMESTAMP')
-                        logs.append({
-                            'timestamp': ts.timestamp() if ts else None,
-                            'message': message.rstrip()[:200]
-                        })
-                        count += 1
-            else:
-                # Get latest logs - simpler: seek to tail and read backwards
-                j.seek_tail()
-                # Get the last entry
-                j.get_previous()
-                # Now collect going backwards
-                temp = []
-                count = 0
-                for entry in j:
-                    if count >= limit:
-                        break
-                    message = entry.get('MESSAGE', '')
-                    if message:
-                        ts = entry.get('__REALTIME_TIMESTAMP')
-                        temp.append({
-                            'timestamp': ts.timestamp() if ts else None,
-                            'message': message.rstrip()[:200]
-                        })
-                        count += 1
-                # Reverse to chronological order
-                logs = list(reversed(temp))
-
-            return logs
-
-        try:
-            logs = await asyncio.to_thread(_get_logs)
-            return web.json_response({
-                'status': 'ok',
-                'identifier_filter': JOURNAL_IDENTIFIER,
-                'direction': direction,
-                'limit': limit,
-                'logs': logs,
-                'count': len(logs)
-            })
-        except Exception as e:
-            import traceback
-            return web.json_response({'error': str(e), 'traceback': traceback.format_exc()}, status=500)
-
     async def handle_api_journal_time_range(self, request):
         """Get the earliest and latest timestamps available in the journal (UTC)"""
-        self._log_message("[JOURNAL RANGE] Starting request...")
 
         if not HAS_SYSTEMD:
-            self._log_message("[JOURNAL RANGE] ERROR: systemd module not available")
             return web.json_response({'error': 'Journal not available'}, status=503)
 
         try:
             def _get_range():
-                self._log_message("[JOURNAL RANGE] _get_range: Opening journal...")
                 j = journal.Reader(path='/var/log/journal')
                 j.add_match(SYSLOG_IDENTIFIER=JOURNAL_IDENTIFIER)
 
                 # Get earliest timestamp
-                self._log_message("[JOURNAL RANGE] Seeking to head...")
                 j.seek_head()
                 earliest = None
                 earliest_count = 0
@@ -1309,14 +1244,11 @@ class WebController(Controller):
                         earliest_ts = entry.get('__REALTIME_TIMESTAMP')
                         if earliest_ts:
                             earliest = earliest_ts.timestamp()  # UTC timestamp
-                        self._log_message(f"[JOURNAL RANGE] Found earliest at entry {earliest_count}: {earliest} (UTC)")
                         break
                     if earliest_count > 10000:
-                        self._log_message("[JOURNAL RANGE] Stopping earliest search after 10000 entries")
                         break
 
                 # Get latest timestamp
-                self._log_message("[JOURNAL RANGE] Getting latest timestamp...")
                 j.seek_tail()
                 latest = None
                 latest_count = 0
@@ -1327,25 +1259,20 @@ class WebController(Controller):
                         latest_ts = entry.get('__REALTIME_TIMESTAMP')
                         if latest_ts:
                             latest = latest_ts.timestamp()  # UTC timestamp
-                        self._log_message(f"[JOURNAL RANGE] Found latest at position {latest_count} from tail: {latest} (UTC)")
                         break
                     if latest_count > 1000:
-                        self._log_message("[JOURNAL RANGE] Stopping latest search after 1000 entries")
                         break
 
-                self._log_message(f"[JOURNAL RANGE] Returning earliest={earliest}, latest={latest}")
                 return earliest, latest
 
             earliest, latest = await asyncio.to_thread(_get_range)
 
-            self._log_message(f"[JOURNAL RANGE] Response: earliest={earliest}, latest={latest}")
             return web.json_response({
                 'earliest': earliest if earliest else None,
                 'latest': latest if latest else None
             })
 
         except Exception as e:
-            self._log_message(f"[JOURNAL RANGE] Exception: {e}")
             import traceback
             traceback.print_exc()
             return web.json_response({'error': str(e)}, status=500)
@@ -1451,7 +1378,6 @@ class WebController(Controller):
         params = data.get('params', {})
 
         result = {'status': 'ok', 'message': ''}
-        notification_msg = None
 
         try:
             if command == 'query_state':
@@ -2350,7 +2276,6 @@ class WebController(Controller):
             self.web_app.router.add_post('/api/graph/raw_minute_data', self.handle_api_raw_minute_data)
             self.web_app.router.add_get('/api/graph/nodes', self.handle_api_graph_nodes)
             self.web_app.router.add_get('/api/graph/time_range', self.handle_api_graph_time_range)
-            self.web_app.router.add_get('/api/journal/test', self.handle_api_journal_test)
             self._log_message(f"Graph endpoints enabled")
         else:
             self._log_message(f"Graph endpoints disabled (use --db-path to enable)")
@@ -5498,11 +5423,6 @@ class WebController(Controller):
 
             // Load journal range info
             loadJournalRange();
-
-            // Initial load: get recent logs from stream, then historical above
-            setTimeout(() => {
-                loadHistoricalLogsAbove();
-            }, 1000);
         }
 
         // Load available journal time range
