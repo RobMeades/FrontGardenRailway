@@ -7222,6 +7222,7 @@ class WebController(Controller):
                         axisPointer: {
                             type: 'line',
                             snap: true,
+                            triggerOn: 'mousemove|click',
                             label: {
                                 show: true,
                                 formatter: function(params) {
