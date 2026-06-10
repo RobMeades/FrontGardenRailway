@@ -233,7 +233,7 @@ def main():
         except Exception as e:
             early_exit(e)
 
-        elf_file = f"{fw_hash}/test.elf"
+        elf_file = f"{fw_hash}/*.elf"
         elf_candidates = list(Path(args.archive).rglob(elf_file))
         if not elf_candidates:
             early_exit(f"ELF file {elf_file} not found under {args.archive}")
