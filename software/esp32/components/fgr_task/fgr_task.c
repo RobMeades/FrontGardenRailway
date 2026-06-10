@@ -134,7 +134,7 @@ static void task_base(void *param)
     if (task_state->cb) {
         task_state->cb(FGR_TASK_STATE_STOPPED,
                        task->handle, task->name,
-                       task->cb_param);
+                       task_state->cb_param);
     }
     CONTEXT_UNLOCK(task_state->lock, "task state 2");
 

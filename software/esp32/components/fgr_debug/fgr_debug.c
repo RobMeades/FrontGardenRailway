@@ -289,6 +289,25 @@ static const fgr_debug_colour_t g_state_to_breathe_colour[] = {FGR_DEBUG_LED_COL
 #  endif  // #if defined(CONFIG_FGR_DEBUG_LED_PIN) && (CONFIG_FGR_DEBUG_LED_PIN >= 0)
 #endif    // #  if defined(CONFIG_FGR_DEBUG_LED_SPI_NUM) && (CONFIG_FGR_DEBUG_LED_SPI_NUM > 1)
 
+// The names of the ESP32 reset reasons, in the order of
+// esp_reset_reason_t, for easy display.
+static const char *g_esp_reset_reason[]  = {"UNKNOWN",      // ESP_RST_UNKNOWN
+                                            "POWERON",      // ESP_RST_POWERON
+                                            "EXT",          // ESP_RST_EXT
+                                            "SW",           // ESP_RST_SW
+                                            "PANIC",        // ESP_RST_PANIC
+                                            "INT_WDT",      // ESP_RST_INT_WDT
+                                            "TASK_WDT",     // ESP_RST_TASK_WDT
+                                            "WDT",          // ESP_RST_WDT
+                                            "DEEPSLEEP",    // ESP_RST_DEEPSLEEP
+                                            "BROWNOUT",     // ESP_RST_BROWNOUT
+                                            "SDIO",         // ESP_RST_SDIO
+                                            "USB",          // ESP_RST_USB
+                                            "JTAG",         // ESP_RST_JTAG
+                                            "EFUSE",        // ESP_RST_EFUSE
+                                            "PWR_GLITCH",   // ESP_RST_PWR_GLITCH
+                                            "CPU_LOCKUP"};  // ESP_RST_CPU_LOCKUP
+
 // Storage for backtrace address list in retained RAM.
 FGR_RRAM_DEFINE(backtrace_t, backtrace);
 
@@ -1297,6 +1316,18 @@ int32_t fgr_debug_core_dump_get(const char *tag, esp_log_level_t level)
 /* ----------------------------------------------------------------
  * PUBLIC FUNCTIONS: MISC
  * -------------------------------------------------------------- */
+
+// Log the ESP32 reset reason.
+void fgr_debug_reset_reason_log()
+{
+    esp_reset_reason_t reset_reason = esp_reset_reason();
+    const char *name = "DONT_KNOW_THIS_ONE";
+
+    if ((reset_reason >= 0) && (reset_reason < FGR_UTIL_ARRAY_LENGTH(g_esp_reset_reason))) {
+        name = g_esp_reset_reason[reset_reason];
+    }
+    ESP_LOGI(TAG, "Last reset reason was ESP_RESET_%s (%d)", name, reset_reason);
+}
 
 // A message receive handler callback.
 bool fgr_debug_msg_receive_handler_cb(fgr_msg_t *msg, void *param)

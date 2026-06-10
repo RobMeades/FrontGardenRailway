@@ -150,14 +150,15 @@ int32_t fgr_lib_init(const char *ota_server_cert_pem,
                                CONFIG_FGR_LOG_PORT, FGR_LOG_LEVEL_INFO);
         }
 
-        // Now that we have a connection to a log server,
-        // if there was previously a panic resulting in a backtrace,
-        // or a stack overflow, and maybe an associated core dump,
+        // Now that we have a connection to a log server, log the reset
+        // reason and, if there was previously a panic resulting in a
+        // backtrace, or a stack overflow, and maybe an associated core dump,
         // log the lot
         // IMPORTANT: the tags used below are parsed out by log_server.py
         // when writing to database, so if you change them you will need to
         // change that script also.
         if (err == ESP_OK) {
+            fgr_debug_reset_reason_log();
             fgr_monitor_abort_reason_log("ABORT", NULL, ESP_LOG_WARN);
             fgr_debug_panic_log("BACKTRACE", NULL, ESP_LOG_WARN);
             fgr_debug_stack_overflow_log("STACK_OVERFLOW", NULL, ESP_LOG_WARN);

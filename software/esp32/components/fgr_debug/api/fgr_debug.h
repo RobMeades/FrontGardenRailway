@@ -477,6 +477,10 @@ int32_t fgr_debug_core_dump_get(const char *tag, esp_log_level_t level);
  * FUNCTIONS: MISC
  * -------------------------------------------------------------- */
 
+/** Log the ESP32 reset reason.
+ */
+void fgr_debug_reset_reason_log();
+
 /** A message receive handler callback that will handle
  * the FGR_REQ_CNF_DEBUG_* messages: add this to your
  * application's message receive chain (before

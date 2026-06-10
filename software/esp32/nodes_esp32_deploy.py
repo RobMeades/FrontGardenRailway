@@ -54,7 +54,7 @@ def run_command(cmd, cwd=None):
     print(f"Running: {cmd}")
     result = subprocess.run(cmd, shell=True, cwd=cwd)
     if result.returncode != 0:
-        print(f"\n[ERROR] Command failed with exit code {result.returncode}: {cmd}")
+        print(f"\n[ERROR] Command failed with exit code {result.returncode}: {cmd} [did you run get_idf?]")
         sys.exit(result.returncode)
 
 def get_git_hash():
@@ -315,9 +315,9 @@ def main():
     # OPTIONAL REMOTE DEPLOYMENT STEP
     # =========================================================================
     if remote and remote['host'] and remote['directory']:
-        print("\n=======================================================")
+        print("\n===========================================================")
         print(" Synchronizing Local Staging to Remote Destination Machine")
-        print("=======================================================")
+        print("===========================================================")
 
         local_staging_path = os.path.join(workspace_root, args.staging) + "/"
         user_prefix = f"{remote['user']}@" if remote['user'] else ""
