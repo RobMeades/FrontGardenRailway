@@ -429,6 +429,8 @@ class FGRLogServer:
                         self.wfile.write(response_text.encode('utf-8'))
                     elif parsed_url.path.startswith('/data/'):
                         crash_id = parsed_url.path.split('/')[-1]
+                        print(f"Web API asked for /data/ for crash ID {crash_id}")
+
                         conn = sqlite3.connect(server_instance.db_path)
                         row = conn.execute("SELECT core_blob, fw_hash FROM crash_dumps WHERE crash_id=?", (crash_id,)).fetchone()
                         conn.close()
@@ -438,8 +440,10 @@ class FGRLogServer:
                             self.send_header("Content-Type", "application/octet-stream")
                             self.end_headers()
                             self.wfile.write(row[0]) # The binary BLOB
+                            print(f"Web API returned {len(row[0])} byte(s) of crash dump")
                     elif parsed_url.path.startswith('/meta/'):
                         crash_id = parsed_url.path.split('/')[-1]
+                        print(f"Web API asked for /meta/ for crash ID {crash_id}")
                         conn = sqlite3.connect(server_instance.db_path)
                         row = conn.execute("SELECT fw_hash FROM crash_dumps WHERE crash_id=?", (crash_id,)).fetchone()
                         conn.close()
@@ -448,11 +452,13 @@ class FGRLogServer:
                         self.send_header("Content-Type", "application/json")
                         self.end_headers()
                         self.wfile.write(json.dumps({"fw_hash": row[0]}).encode('utf-8'))
+                        print(f"Web API returned {row[0]}")
                     else:
                         self.send_error(404)
                 except Exception as route_err:
                     server_instance._write_to_journal(
-                        f"Dashboard Route Routing Error: {str(route_err)}", 3, {"addr": server_instance.web_bind}
+                        f"Web API route routing error: {str(route_err)}",
+                        7, {"addr": server_instance.web_bind}
                     )
                     self.send_response(500)
                     self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -464,11 +470,11 @@ class FGRLogServer:
             try:
                 # Bind specifically to the web_bind interface instead of the general bind_address
                 httpd = HTTPServer((self.web_bind, self.web_port), CrashDashboardHandler)
-                print(f"Interactive Crash Web Dashboard serving at http://{self.web_bind}:{self.web_port}/")
+                print(f"Interactive crash web API serving at http://{self.web_bind}:{self.web_port}/")
 
                 # Write an explicit startup notification directly to the systemd journal
                 server_instance._write_to_journal(
-                    f"Web Dashboard thread started successfully on {self.web_bind}:{self.web_port}",
+                    f"Web API thread started successfully on {self.web_bind}:{self.web_port}",
                     7, {"addr": self.web_bind}
                 )
 
@@ -476,7 +482,7 @@ class FGRLogServer:
                     httpd.handle_request()
             except Exception as e:
                 server_instance._write_to_journal(
-                    f"CRITICAL: Web server thread died fatally: {str(e)}",
+                    f"ERROR: Web server thread died fatally: {str(e)}",
                     3, {"addr": self.web_bind}
                 )
                 print(f"Web server fatal failure: {e}")

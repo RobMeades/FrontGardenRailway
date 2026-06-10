@@ -179,7 +179,7 @@ The `log_server.py` script can be run on the Raspberry Pi to listen for log mess
   [Service]
   Type=simple
   WorkingDirectory=/home/<your home directory name>/FrontGardenRailway/software/pi
-  ExecStart=python /home/<your home directory name>/FrontGardenRailway/software/pi/log_server.py
+  ExecStart=python -u /home/<your home directory name>/FrontGardenRailway/software/pi/log_server.py
   KillSignal=SIGINT
   Restart=on-failure
 

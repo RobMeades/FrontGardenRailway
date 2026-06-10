@@ -202,7 +202,7 @@ def format_connection_duration(node: Node) -> str:
     return ""
 
 def linkify_log_line(text):
-   # This matches the full URL structure and ensures it keeps capturing
+    # This matches the full URL structure and ensures it keeps capturing
     # until a character that doesn't fit a URL (like a space or closing bracket)
     url_pattern = r'(http://[\d\.]+:[\d]+/\d+_[0-9\.]+)'
 
@@ -1301,6 +1301,7 @@ class WebController(Controller):
                 time_str = '00:00:00'
 
             message = entry.get('MESSAGE', '')
+            linkify_message = linkify_log_line(message)
             unit = entry.get('_SYSTEMD_UNIT', '')
             if unit == self.controller_unit:
                 prefix = '[CTRL]'
@@ -1308,7 +1309,7 @@ class WebController(Controller):
                 prefix = '[NODE]'
 
             return {
-                'message': f"[{time_str}] {prefix} {message}",
+                'message': f"[{time_str}] {prefix} {linkify_message}",
                 'timestamp': ts.timestamp() if ts else None
             }
 
@@ -4371,15 +4372,37 @@ class WebController(Controller):
 
         // Apply highlighting to a log line
         function applyHighlighting(logLine) {
+            const TOKEN_PREFIX = '___PROTECTED_LINK_';
+            const TOKEN_SUFFIX = '___';
+
+            const protectedTags = [];
+            let working = logLine;
+            let matchCount = 0;
+
+            // Protect ALL <a> tags (needed for links to crash dumps)
+            working = working.replace(/<a\\b[^>]*?>.*?<\\/a>/gi, (match) => {
+                const token = `${TOKEN_PREFIX}${matchCount++}${TOKEN_SUFFIX}`;
+                protectedTags.push({ token, html: match });
+                return token;
+            });
+
+            // Escape HTML characters
+            working = working.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+            // Restore protected <a> tags
+            protectedTags.forEach(({ token, html }) => {
+                working = working.replace(token, html);
+            });
+
             if (filterHighlightNodes.size === 0) {
-                return logLine;  // Return raw text, not escaped
+                return working;
             }
 
             const lastOctet = extractNodeLastOctet(logLine);
             if (lastOctet && filterHighlightNodes.has(lastOctet)) {
-                return `<span class="log-highlight">${logLine}</span>`;
+                return `<span class="log-highlight">${working}</span>`;
             }
-            return logLine;
+            return working;
         }
 
         function refilterAndRenderLogs() {
@@ -4412,11 +4435,7 @@ class WebController(Controller):
                 if (shouldShow) {
                     logDiv.style.display = '';
                     const highlightedContent = applyHighlighting(log);
-                    if (highlightedContent !== log) {
-                        logDiv.innerHTML = highlightedContent;
-                    } else if (logDiv.innerHTML !== log && logDiv.textContent === log) {
-                        logDiv.textContent = log;
-                    }
+                    logDiv.innerHTML = highlightedContent;
                     visibleCount++;
                 } else {
                     logDiv.style.setProperty('display', 'none', 'important');
@@ -5739,11 +5758,7 @@ class WebController(Controller):
                 logDiv.className = className;
 
                 const highlightedContent = applyHighlighting(message);
-                if (highlightedContent !== message) {
-                    logDiv.innerHTML = highlightedContent;
-                } else {
-                    logDiv.textContent = message;
-                }
+                logDiv.innerHTML = highlightedContent;
 
                 debugWindow.appendChild(logDiv);
                 logElements.push(logDiv);
@@ -5811,11 +5826,7 @@ class WebController(Controller):
                     logDiv.className = className;
 
                     const highlightedContent = applyHighlighting(log.message);
-                    if (highlightedContent !== log.message) {
-                        logDiv.innerHTML = highlightedContent;
-                    } else {
-                        logDiv.textContent = log.message;
-                    }
+                    logDiv.innerHTML = highlightedContent
 
                     debugWindow.appendChild(logDiv);
                     logElements.push(logDiv);

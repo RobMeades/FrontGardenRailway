@@ -169,7 +169,7 @@ For isolation, the Raspberry Pi should be installed on a VLAN of the home networ
   [Service]
   Type=simple
   WorkingDirectory=<path to cloned FGR repo>/FrontGardenRailway/software/pi
-  ExecStart=/usr/bin/python <path to cloned FGR repo>/FrontGardenRailway/software/pi/crash_decoder.py --daemon
+  ExecStart=/usr/bin/python -u <path to cloned FGR repo>/FrontGardenRailway/software/pi/crash_decoder.py --daemon
   KillSignal=SIGINT
   Restart=on-failure
 
