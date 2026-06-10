@@ -3412,6 +3412,16 @@ class WebController(Controller):
             font-family: monospace;
         }
 
+        .gap-marker {
+            transition: opacity 0.1s ease;
+            position: relative;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+
         /* View selector buttons */
         .view-btn {
             padding: 4px 16px;
@@ -3812,6 +3822,13 @@ class WebController(Controller):
     </div>
 
     <script>
+
+        // Base64 SVG - single up arrow
+        const UP_ARROW_CURSOR = "url('data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0Ij48cG9seWdvbiBwb2ludHM9IjEyLDIgNCwxMCAyMCwxMCIgZmlsbD0iYmxhY2siIHN0cm9rZT0id2hpdGUiIHN0cm9rZS13aWR0aD0iMiIvPjwvc3ZnPg==') 12 2, auto";
+        // Base64 SVG - single down arrow
+        const DOWN_ARROW_CURSOR = "url('data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0Ij48cG9seWdvbiBwb2ludHM9IjEyLDIyIDQsMTQgMjAsMTQiIGZpbGw9ImJsYWNrIiBzdHJva2U9IndoaXRlIiBzdHJva2Utd2lkdGg9IjIiLz48L3N2Zz4=') 12 22, auto";
+
+
         let statusSource = null;
         let logsSource = null;
         let autoScrollEnabled = true;
@@ -3858,6 +3875,46 @@ class WebController(Controller):
         let journalRange = { earliest: null, latest: null };  // Available journal range
         let currentScrollAnchor = null;  // Timestamp to anchor scrolling after loading
         let maxNormalGapSeconds = 5; // Track the maximum normal gap between consecutive logs
+        let deadGaps = new Set();  // Stores gap keys that have no logs in journal
+
+        // Show a temporary toast message
+        let toastTimeout = null;
+
+        function showTemporaryMessage(msg) {
+            // Remove existing toast if present
+            const existingToast = document.getElementById('temp-toast');
+            if (existingToast) {
+                existingToast.remove();
+                if (toastTimeout) clearTimeout(toastTimeout);
+            }
+
+            const toast = document.createElement('div');
+            toast.id = 'temp-toast';
+            toast.textContent = msg;
+            toast.style.cssText = `
+                position: fixed;
+                bottom: 100px;
+                right: 20px;
+                background: #333;
+                color: #0f0;
+                padding: 8px 12px;
+                border-radius: 4px;
+                font-family: monospace;
+                font-size: 11px;
+                z-index: 10001;
+                opacity: 0.9;
+                transition: opacity 0.3s ease;
+            `;
+            document.body.appendChild(toast);
+
+            toastTimeout = setTimeout(() => {
+                toast.style.opacity = '0';
+                setTimeout(() => {
+                    if (toast.parentNode) toast.remove();
+                }, 300);
+                toastTimeout = null;
+            }, 2000);
+        }
 
         // Set CSS variables from server data if needed
         function updateCSSVariables(status) {
@@ -5813,6 +5870,110 @@ class WebController(Controller):
             }
         }
 
+        // Fill a gap by fetching logs in a specific direction
+        async function fillGapDirectional(edgeTimestamp, direction, gapMarkerElement) {
+            const gapKey = gapMarkerElement.dataset.gapKey;
+            const originalOlder = parseFloat(gapMarkerElement.dataset.olderTimestamp);
+            const originalNewer = parseFloat(gapMarkerElement.dataset.newerTimestamp);
+            const BATCH_SIZE = 50;
+
+            // Visual feedback while loading
+            gapMarkerElement.style.opacity = '0.5';
+            gapMarkerElement.style.cursor = 'wait';
+
+            try {
+                const requestBody = {
+                    timestamp: parseFloat(edgeTimestamp),
+                    before: direction === 'older' ? BATCH_SIZE : 0,
+                    after: direction === 'newer' ? BATCH_SIZE : 0
+                };
+
+                const response = await fetch('/api/journal/query', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(requestBody)
+                });
+
+                const data = await response.json();
+
+                if (data.status === 'ok' && data.logs && data.logs.length > 0) {
+                    const newEntries = data.logs
+                        .map(log => ({
+                            timestamp: log.timestamp,
+                            message: log.message
+                        }))
+                        .filter(log => shouldDisplayLog(log.message));
+
+                    if (newEntries.length > 0) {
+                        const existingTimestamps = new Set(logBuffer.map(log => log.timestamp));
+                        const uniqueNew = [];
+
+                        for (const log of newEntries) {
+                            let isDuplicate = false;
+                            for (const ts of existingTimestamps) {
+                                if (Math.abs(ts - log.timestamp) < 0.1) {
+                                    isDuplicate = true;
+                                    break;
+                                }
+                            }
+                            if (!isDuplicate) {
+                                uniqueNew.push(log);
+                            }
+                        }
+
+                        if (uniqueNew.length > 0) {
+                            logBuffer.push(...uniqueNew);
+                            logBuffer.sort((a, b) => a.timestamp - b.timestamp);
+                            rebuildDebugDisplay();
+
+                            // Scroll to the gap marker after rebuild
+                            setTimeout(() => {
+                                const markers = document.querySelectorAll('.gap-marker');
+                                let bestMarker = null;
+                                let smallestDistance = Infinity;
+
+                                for (const marker of markers) {
+                                    const markerOlder = parseFloat(marker.dataset.olderTimestamp);
+                                    const markerNewer = parseFloat(marker.dataset.newerTimestamp);
+
+                                    if (markerOlder >= originalOlder && markerNewer <= originalNewer) {
+                                        bestMarker = marker;
+                                        break;
+                                    }
+
+                                    const distance = Math.abs(markerOlder - originalOlder) + Math.abs(markerNewer - originalNewer);
+                                    if (distance < smallestDistance) {
+                                        smallestDistance = distance;
+                                        bestMarker = marker;
+                                    }
+                                }
+
+                                if (bestMarker) {
+                                    bestMarker.scrollIntoView({ block: 'center', behavior: 'smooth' });
+                                }
+                            }, 200);
+
+                            gapMarkerElement.style.opacity = '';
+                            gapMarkerElement.style.cursor = '';
+                            showTemporaryMessage(`Loaded ${uniqueNew.length} logs`);
+                            return;
+                        }
+                    }
+                }
+
+                // No logs found or all were duplicates
+                deadGaps.add(gapKey);
+                gapMarkerElement.remove();
+                showTemporaryMessage('No logs exist in this gap');
+
+            } catch (e) {
+                console.error('Error filling gap:', e);
+                gapMarkerElement.style.opacity = '';
+                gapMarkerElement.style.cursor = '';
+                showTemporaryMessage('Failed to load logs: ' + e.message);
+            }
+        }
+
         // Rebuild entire debug display (used after bulk adds)
         function rebuildDebugDisplay() {
             if (!debugWindow) return;
@@ -5828,6 +5989,7 @@ class WebController(Controller):
 
             let visibleCount = 0;
             let lastDisplayedTimestamp = null;
+            const currentGapKeys = new Set();  // Track gaps that exist in this rebuild
 
             for (const log of logBuffer) {
                 // Skip markers for gap calculation, but they still affect display
@@ -5850,15 +6012,110 @@ class WebController(Controller):
                         const gap = log.timestamp - lastDisplayedTimestamp;
                         const threshold = maxNormalGapSeconds * 2;
                         if (gap > threshold) {
-                            // Insert a gap marker
-                            const markerDiv = document.createElement('div');
-                            markerDiv.className = 'gap-marker';
-                            markerDiv.textContent = `~~~~~~~~~~~~~~~~~~~~ [gap of ${Math.round(gap)} seconds] ~~~~~~~~~~~~~~~~~~~~~`;
-                            debugWindow.appendChild(markerDiv);
-                            logElements.push(markerDiv);
-                            logTexts.push(markerDiv.textContent);
-                            logTimestamps.push(lastDisplayedTimestamp + (gap / 2));
-                            visibleCount++;
+                            const gapKey = `${lastDisplayedTimestamp}|${log.timestamp}`;
+                            currentGapKeys.add(gapKey);
+
+                            // Check if this gap is dead (no logs in journal)
+                            if (!deadGaps.has(gapKey)) {
+                                // Create gap marker
+                                const markerDiv = document.createElement('div');
+                                markerDiv.className = 'gap-marker';
+                                markerDiv.style.userSelect = 'none';  // Prevent text selection cursor
+                                markerDiv.textContent = `~~~~~~~~~~~~~~~~~~~~ [gap of ${Math.round(gap)} seconds] ~~~~~~~~~~~~~~~~~~~~~`;
+
+                                // Store metadata
+                                markerDiv.dataset.olderTimestamp = lastDisplayedTimestamp;
+                                markerDiv.dataset.newerTimestamp = log.timestamp;
+                                markerDiv.dataset.gapKey = gapKey;
+                                markerDiv.dataset.gapSeconds = Math.round(gap);
+
+                                // Helper to measure text width
+                                function measureTextWidth(text, element) {
+                                    const tempSpan = document.createElement('span');
+                                    tempSpan.style.visibility = 'hidden';
+                                    tempSpan.style.position = 'absolute';
+                                    tempSpan.style.whiteSpace = 'nowrap';
+                                    tempSpan.style.font = window.getComputedStyle(element).font;
+                                    tempSpan.textContent = text;
+                                    document.body.appendChild(tempSpan);
+                                    const width = tempSpan.offsetWidth;
+                                    document.body.removeChild(tempSpan);
+                                    return width;
+                                }
+
+                                markerDiv.addEventListener('mousemove', (e) => {
+                                    const rect = markerDiv.getBoundingClientRect();
+                                    const clickX = e.clientX - rect.left;
+
+                                    // Measure actual text width
+                                    const fullTextWidth = measureTextWidth(markerDiv.textContent, markerDiv);
+
+                                    if (clickX <= fullTextWidth) {
+                                        // Find center text position
+                                        const centerText = `[gap of ${Math.round(gap)} seconds]`;
+                                        const centerTextWidth = measureTextWidth(centerText, markerDiv);
+                                        const fullText = markerDiv.textContent;
+                                        const leftSquiggles = fullText.indexOf(centerText);
+                                        const leftSquigglesText = fullText.substring(0, leftSquiggles);
+                                        const leftSquigglesWidth = measureTextWidth(leftSquigglesText, markerDiv);
+                                        const centerStart = leftSquigglesWidth;
+                                        const centerEnd = centerStart + centerTextWidth;
+
+                                        if (clickX < centerStart) {
+                                            markerDiv.style.cursor = UP_ARROW_CURSOR;
+                                            markerDiv.title = '↑ Load older logs above this gap';
+                                        } else if (clickX > centerEnd) {
+                                            markerDiv.style.cursor = DOWN_ARROW_CURSOR;
+                                            markerDiv.title = '↓ Load newer logs below this gap';
+                                        } else {
+                                            markerDiv.style.cursor = 'default';
+                                            markerDiv.title = `Gap of ${Math.round(gap)} seconds - click ~ to fill`;
+                                        }
+                                    } else {
+                                        markerDiv.style.cursor = 'default';
+                                        markerDiv.title = `Gap of ${Math.round(gap)} seconds - click on the ~ marks to fill`;
+                                    }
+                                });
+
+                                markerDiv.addEventListener('click', (e) => {
+                                    const rect = markerDiv.getBoundingClientRect();
+                                    const clickX = e.clientX - rect.left;
+
+                                    const fullTextWidth = measureTextWidth(markerDiv.textContent, markerDiv);
+
+                                    if (clickX <= fullTextWidth) {
+                                        const centerText = `[gap of ${Math.round(gap)} seconds]`;
+                                        const centerTextWidth = measureTextWidth(centerText, markerDiv);
+                                        const fullText = markerDiv.textContent;
+                                        const leftSquiggles = fullText.indexOf(centerText);
+                                        const leftSquigglesText = fullText.substring(0, leftSquiggles);
+                                        const leftSquigglesWidth = measureTextWidth(leftSquigglesText, markerDiv);
+                                        const centerStart = leftSquigglesWidth;
+                                        const centerEnd = centerStart + centerTextWidth;
+
+                                        if (clickX < centerStart) {
+                                            // UP arrow - fill from bottom edge upward
+                                            e.stopPropagation();
+                                            fillGapDirectional(markerDiv.dataset.newerTimestamp, 'older', markerDiv);
+                                        } else if (clickX > centerEnd) {
+                                            // DOWN arrow - fill from top edge downward
+                                            e.stopPropagation();
+                                            fillGapDirectional(markerDiv.dataset.olderTimestamp, 'newer', markerDiv);
+                                        }
+                                    }
+                                });
+
+                                markerDiv.addEventListener('mouseleave', () => {
+                                    markerDiv.style.cursor = 'default';
+                                });
+
+                                debugWindow.appendChild(markerDiv);
+                                    logElements.push(markerDiv);
+                                    logTexts.push(markerDiv.textContent);
+                                    logTimestamps.push(lastDisplayedTimestamp + (gap / 2));
+                                    visibleCount++;
+                            }
+                            // If deadGaps.has(gapKey), skip marker entirely (logs will be adjacent)
                         }
                     }
 
@@ -5880,7 +6137,14 @@ class WebController(Controller):
                 }
             }
 
-            // Restore or adjust scroll position (existing code remains the same)
+            // Prune deadGaps - remove keys that no longer exist in current display
+            for (const deadKey of deadGaps) {
+                if (!currentGapKeys.has(deadKey)) {
+                    deadGaps.delete(deadKey);
+                }
+            }
+
+            // Restore or adjust scroll position
             if (shouldScrollToBottom) {
                 debugWindow.scrollTop = debugWindow.scrollHeight;
             } else if (currentScrollAnchor) {
