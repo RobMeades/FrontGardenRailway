@@ -61,8 +61,6 @@ For isolation, the Raspberry Pi should be installed on a VLAN of the home networ
   lsblk
   ```
 
-  Note: the `umask=000` bit allows anyone/anything access, preventing permissions problems later. 
-
 - You can then `sudo nano /lib/systemd/system/log_server.service` and add to the end of the `ExecStart` line `--db-path /mnt/ssd/logs.db`, do a `sudo systemctl daemon-reload` and then restart the `log_server` service  with `sudo systemctl restart log_server` and all logs sent by all nodes will be stored in the database.
 
 - Note: later you can use `log_viewer.py` to query the database.

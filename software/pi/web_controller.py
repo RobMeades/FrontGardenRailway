@@ -1656,10 +1656,11 @@ class WebController(Controller):
 
     async def handle_api_raw_minute_data(self, request):
         """Get raw minute-by-minute data for a specific hour bucket"""
-        data = await request.json()
+        data = await request.json() if request.body_exists else {}
         metric = data.get('metric')
         hour_timestamp = data.get('timestamp')  # milliseconds from frontend
         node_ips = data.get('nodes', [])
+        graph_start_time = data.get('graph_start_time')  # seconds since epoch
 
         if not metric or not hour_timestamp:
             return web.json_response({'error': 'Missing metric or timestamp'}, status=400)
@@ -1687,7 +1688,7 @@ class WebController(Controller):
 
             column = metric_column_map.get(metric, metric)
 
-            # Build node filter
+            # Build node filter for hour bucket query
             node_filter = ""
             params = [hour_start, hour_end]
             if node_ips and len(node_ips) > 0 and node_ips[0] != 'all':
@@ -1708,10 +1709,7 @@ class WebController(Controller):
             cursor.execute(query, params)
             rows = cursor.fetchall()
 
-            if not rows:
-                return web.json_response({'error': 'No data found for this hour'}, status=404)
-
-            # Group by node_ip and organize data
+            # Build result dictionary
             result = {}
             for row in rows:
                 epoch_time, node_ip, value = row
@@ -1721,29 +1719,73 @@ class WebController(Controller):
                         'name': self._get_node_name_by_ip(node_ip) or node_ip,
                         'data': []
                     }
-                # Convert to milliseconds for frontend
                 result[node_ip]['data'].append([epoch_time * 1000, value])
 
-            # Also get the delta (new events) for this hour for context
-            delta_info = {}
+            # For each node with data in this hour, get the baseline
+            # (last known value before the hour, bounded by graph_start_time if provided)
+            baseline_info = {}
             for node_ip, node_data in result.items():
-                values = [d[1] for d in node_data['data']]
-                if len(values) >= 2:
-                    # Calculate deltas between consecutive readings
-                    deltas = [values[i] - values[i-1] for i in range(1, len(values)) if values[i] - values[i-1] > 0]
-                    delta_info[node_ip] = {
-                        'total_events': sum(deltas),
-                        'first_value': values[0],
-                        'last_value': values[-1]
-                    }
-                elif len(values) == 1:
-                    delta_info[node_ip] = {
-                        'total_events': values[0],  # First reading, assume all events happened? Or 0?
-                        'first_value': values[0],
-                        'last_value': values[0]
+                baseline_query = f"""
+                    SELECT epoch_time, {column}
+                    FROM metrics_history
+                    WHERE node_ip = ?
+                    AND {column} IS NOT NULL
+                    AND epoch_time < ?
+                """
+                baseline_params = [node_ip, hour_start]
+
+                if graph_start_time:
+                    baseline_query += " AND epoch_time >= ?"
+                    baseline_params.append(graph_start_time)
+
+                baseline_query += " ORDER BY epoch_time DESC LIMIT 1"
+
+                cursor.execute(baseline_query, baseline_params)
+                baseline_row = cursor.fetchone()
+
+                if baseline_row:
+                    baseline_epoch, baseline_value = baseline_row
+                    baseline_info[node_ip] = {
+                        'value': baseline_value,
+                        'timestamp': baseline_epoch * 1000
                     }
                 else:
+                    baseline_info[node_ip] = None
+
+            # Calculate delta_info using baseline as starting point
+            delta_info = {}
+            for node_ip, node_data in result.items():
+                baseline = baseline_info.get(node_ip)
+                values = node_data['data']
+
+                if not values:
                     delta_info[node_ip] = {'total_events': 0}
+                    continue
+
+                # Start with baseline if available
+                if baseline and baseline['value'] is not None:
+                    prev_value = baseline['value']
+                else:
+                    prev_value = None
+
+                total_events = 0
+                for point in values:
+                    current_value = point[1]
+                    if prev_value is not None:
+                        if current_value > prev_value:
+                            delta = current_value - prev_value
+                            total_events += delta
+                        elif current_value < prev_value:
+                            total_events += current_value
+                    prev_value = current_value
+
+                delta_info[node_ip] = {
+                    'total_events': total_events,
+                    'first_value': values[0][1] if values else None,
+                    'last_value': values[-1][1] if values else None,
+                    'baseline_value': baseline['value'] if baseline else None,
+                    'baseline_timestamp': baseline['timestamp'] if baseline else None
+                }
 
             return web.json_response({
                 'metric': metric,
@@ -6319,12 +6361,11 @@ class WebController(Controller):
         }
 
         // Show minute-by-minute modal
-        async function showMinuteDrillDown(graphKey, timestamp, nodes) {
+        async function showMinuteDrillDown(graphKey, timestamp, selectedNodes, graphStartTime) {
             const modal = document.getElementById('minuteModal');
             const title = document.getElementById('minuteModalTitle');
             const body = document.getElementById('minuteModalBody');
 
-            // Get metric display name
             const config = GRAPH_CONFIG[graphKey];
             const date = new Date(timestamp);
             const hourStr = date.toLocaleString();
@@ -6340,7 +6381,8 @@ class WebController(Controller):
                     body: JSON.stringify({
                         metric: graphKey,
                         timestamp: timestamp,
-                        nodes: nodes
+                        nodes: selectedNodes,
+                        graph_start_time: graphStartTime
                     })
                 });
 
@@ -6351,10 +6393,8 @@ class WebController(Controller):
                     return;
                 }
 
-                // Store the data for CSV export
                 currentDrillDownData = data;
 
-                // Build HTML for each node
                 let html = '';
                 const nodeEntries = Object.entries(data.data || {});
 
@@ -6367,11 +6407,25 @@ class WebController(Controller):
                     const nodeName = nodeInfo.name;
                     const points = nodeInfo.data;
                     const deltaInfo = data.delta_summary?.[nodeIp] || {};
+                    const baseline = deltaInfo.baseline_value;
+                    const baselineTimestamp = deltaInfo.baseline_timestamp;
 
-                    // Build events list (only rows where changes occurred)
                     let eventsHtml = '';
                     let prevValue = null;
                     let eventCount = 0;
+
+                    if (baseline !== null && baseline !== undefined) {
+                        const baselineDate = new Date(baselineTimestamp);
+                        const baselineTimeStr = baselineDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+                        eventsHtml += `
+                            <tr style="background: #f0f0f0; font-style: italic;">
+                                <td colspan="2"><strong>Baseline (before this hour)</strong></td>
+                                <td><strong>${baseline}</strong></td>
+                                <td>—</td>
+                            </tr>
+                            <tr><td colspan="4" style="padding: 0;"><hr style="margin: 4px 0;"></td></tr>
+                        `;
+                    }
 
                     for (let i = 0; i < points.length; i++) {
                         const point = points[i];
@@ -6389,12 +6443,14 @@ class WebController(Controller):
                             delta = `↺ ${value}`;
                             isEvent = true;
                             eventCount++;
+                        } else if (prevValue === null && baseline !== null && baseline !== undefined) {
+                            delta = `+${value - baseline}`;
+                            isEvent = true;
+                            eventCount++;
                         }
-                        prevValue = value;
 
-                        // Only include rows where something happened
                         if (isEvent) {
-                            const pointTimestamp = point[0] / 1000; // Convert to seconds for scrollToTimestamp
+                            const pointTimestamp = point[0] / 1000;
                             eventsHtml += `
                                 <tr class="clickable-row" data-timestamp="${pointTimestamp}" style="cursor: pointer;">
                                     <td style="white-space: nowrap;">${timeStr}</td>
@@ -6403,16 +6459,18 @@ class WebController(Controller):
                                 </tr>
                             `;
                         }
+
+                        prevValue = value;
                     }
 
-                    // Only show node section if there were events
-                    if (eventCount > 0) {
+                    if (eventCount > 0 || (baseline !== null && points.length > 0)) {
                         html += `
                             <div class="minute-node-section">
                                 <div class="minute-node-header" onclick="toggleMinuteNode(this)">
                                     <span class="minute-node-name">${nodeName} (${nodeIp})</span>
                                     <span class="minute-node-stats">
                                         ${deltaInfo.total_events ? `📊 ${deltaInfo.total_events} events this hour` : ''}
+                                        ${baseline ? ` (baseline: ${baseline})` : ''}
                                     </span>
                                 </div>
                                 <div class="minute-node-body" style="display: block;">
@@ -6439,7 +6497,6 @@ class WebController(Controller):
                 } else {
                     body.innerHTML = html;
 
-                    // Add click handlers to all rows
                     document.querySelectorAll('.clickable-row').forEach(row => {
                         row.addEventListener('click', (e) => {
                             e.stopPropagation();
@@ -6452,17 +6509,14 @@ class WebController(Controller):
                     });
                 }
 
-                // Attach copy button handler
                 const copyBtn = document.getElementById('minuteModalCopyBtn');
                 if (copyBtn) {
                     copyBtn.onclick = null;
                     copyBtn.onclick = copyMinuteDataToClipboard;
                 }
 
-                // Attach CSV button handler
                 const csvBtn = document.getElementById('minuteModalCsvBtn');
                 if (csvBtn) {
-                    // Remove old handler to avoid duplicates
                     csvBtn.onclick = null;
                     csvBtn.onclick = exportMinuteDataCSV;
                 }
@@ -6594,7 +6648,7 @@ class WebController(Controller):
             URL.revokeObjectURL(url);
         }
 
-        async function copyMinuteDataToClipboard() {
+        function copyMinuteDataToClipboard() {
             if (!currentDrillDownData) {
                 alert('No data to copy');
                 return;
@@ -6611,28 +6665,49 @@ class WebController(Controller):
             for (const [nodeIp, nodeInfo] of Object.entries(data.data)) {
                 const nodeName = nodeInfo.name;
                 const points = nodeInfo.data;
-                let prevValue = null;
+                const deltaInfo = data.delta_summary?.[nodeIp] || {};
+                const baseline = deltaInfo.baseline_value;
+                const baselineTimestamp = deltaInfo.baseline_timestamp;
+
                 let hasAnyChanges = false;
 
-                // First pass to check for changes
-                for (const point of points) {
-                    const value = point[1];
-                    if (prevValue !== null && value !== prevValue) {
+                // Check if there's a baseline that differs from the first point
+                if (baseline !== null && baseline !== undefined && points.length > 0) {
+                    if (points[0][1] !== baseline) {
                         hasAnyChanges = true;
-                        break;
                     }
-                    prevValue = value;
+                }
+
+                // Also check for changes between consecutive points
+                if (!hasAnyChanges) {
+                    let prevValue = null;
+                    for (const point of points) {
+                        const value = point[1];
+                        if (prevValue !== null && value !== prevValue) {
+                            hasAnyChanges = true;
+                            break;
+                        }
+                        prevValue = value;
+                    }
                 }
 
                 if (hasAnyChanges) {
-                    prevValue = null;
+                    // Add baseline row if it exists
+                    if (baseline !== null && baseline !== undefined && baselineTimestamp) {
+                        const baselineDate = new Date(baselineTimestamp);
+                        const baselineIsoString = baselineDate.toISOString();
+                        rows.push(`${nodeIp}\t${nodeName}\t${baselineIsoString}\t${baseline}\t(baseline)`);
+                    }
+
+                    // Add data points with deltas
+                    let prevValue = baseline;
                     for (const point of points) {
                         const timestamp = new Date(point[0]).toISOString();
                         const value = point[1];
                         let change = '';
                         let includeRow = false;
 
-                        if (prevValue !== null) {
+                        if (prevValue !== null && prevValue !== undefined) {
                             if (value > prevValue) {
                                 change = `+${value - prevValue}`;
                                 includeRow = true;
@@ -6654,8 +6729,19 @@ class WebController(Controller):
                 }
             }
 
+            if (rows.length <= 4) {
+                rows.push('No events detected in this hour bucket');
+            }
+
             const text = rows.join(String.fromCharCode(10));
-            await navigator.clipboard.writeText(text);
+
+            // Fallback method for non-secure contexts
+            const textarea = document.createElement('textarea');
+            textarea.value = text;
+            document.body.appendChild(textarea);
+            textarea.select();
+            document.execCommand('copy');
+            document.body.removeChild(textarea);
 
             const btn = document.getElementById('minuteModalCopyBtn');
             if (btn) {
@@ -6801,6 +6887,30 @@ class WebController(Controller):
                     end: 100
                 });
             }
+        }
+
+        function setupGraphCategoryClickHandler(graphKey, chart) {
+            chart.off('click');
+            chart.on('click', function(params) {
+                if (params.dataIndex !== undefined && this.timestamps && this.timestamps[params.dataIndex]) {
+                    const timestamp = this.timestamps[params.dataIndex];
+
+                    // Flash the bar briefly
+                    this.dispatchAction({
+                        type: 'showTip',
+                        seriesIndex: params.seriesIndex,
+                        dataIndex: params.dataIndex
+                    });
+                    setTimeout(() => {
+                        this.dispatchAction({ type: 'hideTip' });
+                    }, 800);
+
+                    const nodeFilter = document.getElementById('graphNodeFilter');
+                    const selectedNodes = nodeFilter ? Array.from(nodeFilter.selectedOptions).map(opt => opt.value) : ['all'];
+
+                    showMinuteDrillDown(graphKey, timestamp, selectedNodes, this.graphStartTime);
+                }
+            });
         }
 
         function setupGraphTimeClickHandler(graphKey, chart, container) {
@@ -6984,31 +7094,15 @@ class WebController(Controller):
                     chart.setOption(option);
                     chart.option = option;
 
-                    // Store timestamps on the chart for drill-down (needed for category axis)
+                    // Store timestamps and start time for drill-down (needed for category axis)
                     chart.timestamps = graphTimestamps;
+                    chart.graphStartTime = requestedStart / 1000;
 
                     graphCharts[graphKey] = chart;
 
                     if (config.isEvent) {
-                        // Bar chart (event data) - show drill-down modal on click
-                        chart.off('click');
-                        chart.on('click', function(params) {
-                            if (params.dataIndex !== undefined && chart.timestamps && chart.timestamps[params.dataIndex]) {
-                                const timestamp = chart.timestamps[params.dataIndex];
-                                chart.dispatchAction({
-                                    type: 'showTip',
-                                    seriesIndex: params.seriesIndex,
-                                    dataIndex: params.dataIndex
-                                });
-                                setTimeout(() => {
-                                    chart.dispatchAction({ type: 'hideTip' });
-                                }, 800);
-
-                                const nodeFilter = document.getElementById('graphNodeFilter');
-                                const selectedNodes = nodeFilter ? Array.from(nodeFilter.selectedOptions).map(opt => opt.value) : ['all'];
-                                showMinuteDrillDown(graphKey, timestamp, selectedNodes);
-                            }
-                        });
+                        // Category chart (Wifi failure, disconnects, panics) drill-down click handler
+                        setupGraphCategoryClickHandler(graphKey, chart);
                     } else {
                         // Line chart (RSSI, Heap) - use the shared click handler function
                         setupGraphTimeClickHandler(graphKey, chart, container);
@@ -7461,28 +7555,12 @@ class WebController(Controller):
                 chart.setOption(option);
                 chart.option = option;
                 graphCharts[graphKey] = chart;
+                chart.graphStartTime = requestedStart / 1000;
 
                 // Re-attach click handler based on chart type
                 if (config.isEvent) {
-                    // Bar chart (event data) - show drill-down modal on click
-                    chart.off('click');
-                    chart.on('click', function(params) {
-                        if (params.dataIndex !== undefined && chart.timestamps && chart.timestamps[params.dataIndex]) {
-                            const timestamp = chart.timestamps[params.dataIndex];
-                            chart.dispatchAction({
-                                type: 'showTip',
-                                seriesIndex: params.seriesIndex,
-                                dataIndex: params.dataIndex
-                            });
-                            setTimeout(() => {
-                                chart.dispatchAction({ type: 'hideTip' });
-                            }, 800);
-
-                            const nodeFilter = document.getElementById('graphNodeFilter');
-                            const selectedNodes = nodeFilter ? Array.from(nodeFilter.selectedOptions).map(opt => opt.value) : ['all'];
-                            showMinuteDrillDown(graphKey, timestamp, selectedNodes);
-                        }
-                    });
+                    // Category chart (Wifi failure, disconnects, panics) drill-down click handler
+                    setupGraphCategoryClickHandler(graphKey, chart);
                 } else {
                     // Line chart - use the shared click handler
                     setupGraphTimeClickHandler(graphKey, chart, container);
@@ -7537,28 +7615,12 @@ class WebController(Controller):
                 chart.setOption(option);
                 chart.option = option;
                 graphCharts[graphKey] = chart;
+                chart.graphStartTime = requestedStart / 1000;
 
                 // Re-attach click handler based on chart type
                 if (config.isEvent) {
-                    // Bar chart (event data) - show drill-down modal on click
-                    chart.off('click');
-                    chart.on('click', function(params) {
-                        if (params.dataIndex !== undefined && chart.timestamps && chart.timestamps[params.dataIndex]) {
-                            const timestamp = chart.timestamps[params.dataIndex];
-                            chart.dispatchAction({
-                                type: 'showTip',
-                                seriesIndex: params.seriesIndex,
-                                dataIndex: params.dataIndex
-                            });
-                            setTimeout(() => {
-                                chart.dispatchAction({ type: 'hideTip' });
-                            }, 800);
-
-                            const nodeFilter = document.getElementById('graphNodeFilter');
-                            const selectedNodes = nodeFilter ? Array.from(nodeFilter.selectedOptions).map(opt => opt.value) : ['all'];
-                            showMinuteDrillDown(graphKey, timestamp, selectedNodes);
-                        }
-                    });
+                    // Category chart (Wifi failure, disconnects, panics) drill-down click handler
+                    setupGraphCategoryClickHandler(graphKey, chart);
                 } else {
                     // Line chart - use the shared click handler
                     setupGraphTimeClickHandler(graphKey, chart, container);
