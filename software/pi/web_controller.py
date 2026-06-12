@@ -41,12 +41,14 @@ import signal
 import re
 import logging
 import sqlite3
+import uuid
 import systemd.journal
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
 print("Importing aiohttp: may take some time...", flush=True)
 from aiohttp import web
+from LibLogger import LibLogger
 
 # Import the controller
 from controller import Controller, ConnectionState, NodeHandler, Node
@@ -208,6 +210,349 @@ def linkify_log_line(text):
 
     return re.sub(url_pattern, r'<a href="\1" target="_blank">\1</a>', text)
 
+class SearchIterator:
+    """Stateful search iterator with SQLite (fast) and journal (fallback) support"""
+
+    def __init__(self, params: dict, start_timestamp: float, db_path: Path = None):
+        self.params = params
+        self.current_timestamp = start_timestamp
+        self.direction = params['direction']
+        self.wrapped = False
+        self.search_string = params['search']
+        self.case_sensitive = params['case_sensitive']
+        self.whole_word = params['whole_word']
+        self.exclude_ctrl = params['exclude_ctrl']
+        self.include_nodes = set(params['include_nodes']) if params['include_nodes'] else None
+        self.min_log_level = params['min_log_level']
+        self.controller_unit = None  # Will be set from WebController
+        self.cancelled = False
+        self.entries_checked = 0
+        self.debug = params.get('debug', False)
+        self.db_path = db_path
+        self.using_sqlite = False  # Track which backend we're using
+
+        # Don't open journal immediately - we'll try SQLite first
+        self.journal = None
+
+    def _log_debug(self, msg: str):
+        """Conditional debug logging to a separate file
+           (can't printf from a thread-pool and don't want
+           to write to the journal as it may be being searched)"""
+        if self.debug:
+            try:
+                with open('/tmp/sqlite_search_debug.log', 'a') as f:
+                    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+                    f.write(f"[{timestamp}] {msg}\n")
+                    f.flush()
+            except Exception as e:
+                # Last resort - try stderr but don't crash
+                print(f"Debug logging failed: {e}", file=sys.stderr, flush=True)
+
+    def cancel(self):
+        """Cancel ongoing or future searches"""
+        self.cancelled = True
+        self._log_debug("Search cancelled")
+
+    def _search_sqlite(self, max_entries: int) -> Optional[Tuple[float, str, bool, int, int, int]]:
+        """Search SQLite database using FTS5 for fast full-text search"""
+        if not self.db_path or not self.db_path.exists():
+            return None
+
+        self._log_debug(f"=== Starting SQLite search ===")
+        self._log_debug(f"Search string: {repr(self.search_string)}")
+        self._log_debug(f"Search string length: {len(self.search_string)}")
+        self._log_debug(f"Search string bytes: {self.search_string.encode('utf-8')}")
+        self._log_debug(f"Current timestamp: {self.current_timestamp}")
+        self._log_debug(f"Direction: {self.direction}")
+        self._log_debug(f"Max entries: {max_entries}")
+
+        # Log each character to catch invisible chars
+        for i, ch in enumerate(self.search_string):
+            self._log_debug(f"  char[{i}]: {repr(ch)} (ord={ord(ch)})")
+
+        conn = None
+        try:
+            conn = sqlite3.connect(str(self.db_path))
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+
+            self._log_debug("Database connected successfully")
+
+            # Test MATCH in isolation first
+            try:
+                cursor.execute("SELECT rowid FROM logs_fts WHERE logs_fts MATCH ? LIMIT 1", (self.search_string,))
+                test_row = cursor.fetchone()
+                self._log_debug(f"MATCH test successful, got rowid: {test_row['rowid'] if test_row else 'None'}")
+            except Exception as e:
+                self._log_debug(f"MATCH test FAILED: {e}")
+                raise
+
+            # Direction and ordering
+            if self.direction == 'next':
+                operator = '>='
+                order = 'ASC'
+            else:
+                operator = '<='
+                order = 'DESC'
+
+            self._log_debug(f"Operator: {operator}, Order: {order}")
+
+            # ORDER BY rowid for chronological order
+            query = f"""
+                SELECT d.log_id, d.epoch_time, d.message, d.node_ip
+                FROM logs d
+                WHERE d.rowid IN (
+                    SELECT rowid FROM logs_fts
+                    WHERE logs_fts MATCH ?
+                )
+                AND d.epoch_time {operator} ?
+                ORDER BY d.rowid {order}
+                LIMIT ?
+            """
+
+            self._log_debug(f"Query: {query}")
+
+            cursor.execute(query, (self.search_string, self.current_timestamp, max_entries))
+            rows = cursor.fetchall()
+
+            self._log_debug(f"Query returned {len(rows)} rows")
+
+            if not rows:
+                return None
+
+            scanned = 0
+            last_timestamp = self.current_timestamp
+            last_log_id = 0
+
+            for row in rows:
+                scanned += 1
+                log_id = row['log_id']
+                timestamp = row['epoch_time']
+                message = row['message']
+                node_ip = row['node_ip']
+                last_timestamp = timestamp
+                last_log_id = log_id
+
+                # Apply filters
+                if self.exclude_ctrl and message.startswith('[CTRL]'):
+                    continue
+
+                if self.include_nodes:
+                    last_octet = node_ip.split('.')[-1] if node_ip else None
+                    if not last_octet or last_octet not in self.include_nodes:
+                        continue
+
+                if self.min_log_level < 4:
+                    match = re.search(r'\[(?:NODE|CTRL)\].*?\[[\d.]+\]\s*([DIWE])\s', message)
+                    if match:
+                        level = {'D': 0, 'I': 1, 'W': 2, 'E': 3}.get(match.group(1), 4)
+                        if level < self.min_log_level:
+                            continue
+
+                # Match found!
+                self.current_timestamp = timestamp
+                self.entries_checked += scanned
+                result_tuple = (timestamp, message, False, scanned, self.entries_checked, log_id)
+                self._log_debug(f"Returning result tuple: type={type(result_tuple)}, len={len(result_tuple)}")
+                self._log_debug(f"  elements: ts={timestamp}, msg_len={len(message)}, wrapped=False, scanned={scanned}, total={self.entries_checked}, log_id={log_id}")
+
+                return (timestamp, message, False, scanned, self.entries_checked, log_id)
+
+            # No match in this chunk
+            if rows:
+                self.current_timestamp = last_timestamp
+                self.entries_checked += scanned
+
+                result_tuple = (None, None, False, scanned, self.entries_checked, last_log_id)
+                self._log_debug(f"Returning result tuple: type={type(result_tuple)}, len={len(result_tuple)}")
+                self._log_debug(f"  elements: ts=None, msg_len=0, wrapped=False, scanned={scanned}, total={self.entries_checked}, log_id={last_log_id}")
+
+                return (None, None, False, scanned, self.entries_checked, last_log_id)
+            else:
+                return None
+
+        except Exception as e:
+            self._log_debug(f"SQLite search error: {e}")
+            return None
+        finally:
+            if conn:
+                conn.close()
+
+    def _init_journal(self):
+        """Lazy initialization of journal reader"""
+        if self.journal is None:
+            self.journal = journal.Reader(path='/var/log/journal')
+            self.journal.add_match(SYSLOG_IDENTIFIER=JOURNAL_IDENTIFIER)
+            self._seek_to_position_journal()
+
+    def _seek_to_position_journal(self):
+        """Seek journal to start timestamp"""
+        dt = datetime.fromtimestamp(self.current_timestamp, tz=timezone.utc)
+        self._log_debug(f"Journal seeking to timestamp {self.current_timestamp} ({dt})")
+        self.journal.seek_realtime(dt)
+        if self.direction == 'next':
+            entry = self.journal.get_next()
+            self._log_debug(f"Moved to next entry, exists: {entry is not None}")
+        else:
+            entry = self.journal.get_previous()
+            self._log_debug(f"Moved to previous entry, exists: {entry is not None}")
+
+    def _extract_ip_from_log(self, message: str) -> Optional[str]:
+        """Extract node IP from raw journal log line"""
+        if not isinstance(message, str):
+            message = str(message)
+        match = re.search(r'\[([0-9.]+)\]', message)
+        if match:
+            return match.group(1)
+        return None
+
+    def _extract_log_level(self, message: str) -> Optional[int]:
+        """Extract log level (D/I/W/E) from raw journal log line"""
+        if not isinstance(message, str):
+            message = str(message)
+        match = re.search(r'\[\d+\.\d+\.\d+\.\d+\]\s+([DIWE])\s', message)
+        if match:
+            level_char = match.group(1)
+            return {'D': 0, 'I': 1, 'W': 2, 'E': 3}.get(level_char)
+        return None
+
+    def _should_include_journal(self, message: str, unit: str) -> bool:
+        """Apply same filters as debug view to journal entries"""
+        is_ctrl = unit == self.controller_unit
+
+        if self.exclude_ctrl and is_ctrl:
+            return False
+
+        if self.include_nodes and not is_ctrl:
+            node_ip = self._extract_ip_from_log(message)
+            if node_ip:
+                last_octet = node_ip.split('.')[-1]
+                if last_octet not in self.include_nodes:
+                    return False
+
+        if self.min_log_level < 4 and not is_ctrl:
+            level = self._extract_log_level(message)
+            if level is not None and level < self.min_log_level:
+                return False
+
+        return True
+
+    def _matches_search(self, message: str) -> bool:
+        """Check if message matches search string"""
+        if not self.search_string:
+            return False
+
+        if not isinstance(message, str):
+            message = str(message)
+
+        search = self.search_string
+        target = message
+
+        if not self.case_sensitive:
+            search = search.lower()
+            target = target.lower()
+
+        if self.whole_word:
+            import re
+            pattern = rf'\b{re.escape(search)}\b'
+            return re.search(pattern, target) is not None
+        else:
+            return search in target
+
+    def _get_next_journal_entry(self):
+        """Get next journal entry, handling direction and wrap"""
+        if self.direction == 'next':
+            entry = self.journal.get_next()
+        else:
+            entry = self.journal.get_previous()
+
+        if not entry:
+            self.wrapped = True
+            self._log_debug(f"Wrapping at entry {self.entries_checked}")
+            if self.direction == 'next':
+                self.journal.seek_head()
+                entry = self.journal.get_next()
+            else:
+                self.journal.seek_tail()
+                entry = self.journal.get_previous()
+            self._log_debug(f"After wrap, entry exists: {entry is not None}")
+
+        return entry
+
+    def _search_journal(self, max_entries: int) -> Optional[Tuple[float, str, bool, int, int, int]]:
+        """Fall back to journal search (slower)"""
+        self._init_journal()
+
+        scanned_this_call = 0
+        self._log_debug(f"Journal search starting, max_entries={max_entries}, direction={self.direction}")
+
+        while not self.cancelled and scanned_this_call < max_entries:
+            if self.cancelled:
+                return None
+
+            entry = self._get_next_journal_entry()
+            if not entry:
+                return None
+
+            if self.cancelled:
+                return None
+
+            scanned_this_call += 1
+            self.entries_checked += 1
+
+            message_raw = entry.get('MESSAGE')
+            unit = entry.get('_SYSTEMD_UNIT', '')
+            ts = entry.get('__REALTIME_TIMESTAMP')
+            timestamp = ts.timestamp() if ts else None
+
+            if self.cancelled:
+                return None
+
+            if isinstance(message_raw, list):
+                message = ' '.join(str(m) for m in message_raw)
+            elif message_raw is None:
+                message = ''
+            elif not isinstance(message_raw, str):
+                message = str(message_raw)
+            else:
+                message = message_raw
+
+            if not message:
+                continue
+
+            if not self._should_include_journal(message, unit):
+                continue
+
+            if self._matches_search(message):
+                if timestamp:
+                    self.current_timestamp = timestamp
+                    self._log_debug(f"Journal MATCH FOUND at entry {self.entries_checked}")
+                    return (timestamp, message, self.wrapped, scanned_this_call, self.entries_checked, 0)
+
+        return (None, None, self.wrapped, scanned_this_call, self.entries_checked, 0)
+
+    def find_next_match(self, max_entries: int = 1000) -> Optional[Tuple[float, str, bool, int, int, int]]:
+        """
+        Find next match, scanning at most max_entries.
+        Returns (timestamp, message, wrapped, scanned_this_call, total_scanned) or None
+        """
+        # Only use SQLite if db_path is provided
+        if self.db_path and self.db_path.exists():
+            result = self._search_sqlite(max_entries)
+
+            if result is not None:
+                return result
+            # SQLite exhausted (no more rows) - search complete
+            return None
+        else:
+            # Fall back to journal oif no database
+            return self._search_journal(max_entries)
+
+    def close(self):
+        """Close journal reader if open"""
+        if self.journal is not None:
+            self.journal.close()
+
 class WebController(Controller):
     """Web-enabled FGR Controller with journal log reading"""
 
@@ -231,10 +576,13 @@ class WebController(Controller):
 
         self.db_path = db_path
         self.graphs_enabled = db_path is not None and db_path.exists()
+        # Initialize shared logger (works with or without database)
+        self.liblogger = LibLogger()
+        self.liblogger.init(self.db_path)
         if not self.graphs_enabled:
-            self._log_message(f"Graphs disabled - database not found at {db_path}")
+            self._admin_log(f"Graphs disabled - database not found at {db_path}")
         else:
-            self._log_message(f"Graphs enabled using database: {db_path}")
+            self._admin_log(f"Graphs enabled using database: {db_path}")
 
         self.web_app = None
         self.web_runner = None
@@ -256,6 +604,9 @@ class WebController(Controller):
         self.journal_running = False
         self.journal_thread = None
 
+        self.search_sessions: Dict[str, Dict] = {}  # session_id -> {iterator, last_access}
+        self._start_session_cleanup()
+
         # Node grid layout
         self.node_grid_layout = self._load_node_grid_layout()
 
@@ -263,7 +614,7 @@ class WebController(Controller):
         if HAS_SYSTEMD:
             self._start_journal_reader()
         else:
-            self._log_message("Journal reading disabled - node logs will not appear")
+            self._admin_log("Journal reading disabled - node logs will not appear")
 
         # Override the logger to capture controller logs
         self._setup_log_capture()
@@ -310,29 +661,24 @@ class WebController(Controller):
             """)
 
             # Get source count
-            cursor.execute("SELECT COUNT(*) FROM device_logs WHERE message_type = 'METRIC'")
+            cursor.execute("SELECT COUNT(*) FROM logs WHERE message_type = 'METRIC'")
             source_count = cursor.fetchone()[0]
-            print(f"Source device_logs has {source_count} metric rows")
+            print(f"Source logs has {source_count} metric rows")
 
             # Check current row count
             cursor.execute("SELECT COUNT(*) FROM metrics_history")
             current_count = cursor.fetchone()[0]
             print(f"metrics_history has {current_count} rows")
 
-            # Backfill if missing more than 10% of data
-            if current_count < source_count * 0.9:
-                print(f"Starting backfill (have {current_count}, need {source_count})...")
-
-                # Clear the table first to avoid duplicates
-                cursor.execute("DELETE FROM metrics_history")
-                conn.commit()
+            # Only backfill if the table is completely empty
+            if current_count == 0 and source_count > 0:
+                print(f"Initializing metrics_history (found {current_count} rows, need {source_count})...")
 
                 # Insert in batches to avoid memory issues
-                batch_size = 50000
+                batch_size = 5000
                 offset = 0
 
                 while offset < source_count:
-                    # Use INSERT OR REPLACE to handle duplicates, and take the latest values
                     cursor.execute(f"""
                         INSERT OR REPLACE INTO metrics_history (epoch_time, node_ip, rssi, heap, wifi_failures, panics, ctrl_disconnects, log_disconnects)
                         SELECT
@@ -344,7 +690,7 @@ class WebController(Controller):
                             json_extract(substr(message, instr(message, '{{')), '$.panic.n'),
                             json_extract(substr(message, instr(message, '{{')), '$.cnt_c.-.n'),
                             json_extract(substr(message, instr(message, '{{')), '$.log_c.-.n')
-                        FROM device_logs
+                        FROM logs
                         WHERE message_type = 'METRIC'
                         GROUP BY epoch_time, node_ip
                         LIMIT {batch_size} OFFSET {offset}
@@ -354,6 +700,8 @@ class WebController(Controller):
                     print(f"Backfilled {offset}/{source_count} rows")
 
                 print("Backfill complete")
+            else:
+                print(f"metrics_history already has {current_count} rows, skipping backfill (trigger will maintain it)")
 
             # Create indexes (only if they don't exist)
             print("Creating indexes...")
@@ -364,7 +712,7 @@ class WebController(Controller):
             print("Creating trigger...")
             cursor.execute("""
                 CREATE TRIGGER IF NOT EXISTS update_metrics_history
-                AFTER INSERT ON device_logs
+                AFTER INSERT ON logs
                 WHEN NEW.message_type = 'METRIC'
                 BEGIN
                     INSERT OR REPLACE INTO metrics_history (
@@ -410,9 +758,9 @@ class WebController(Controller):
             cursor.execute("DELETE FROM metrics_history WHERE epoch_time < ?", (cutoff,))
             conn.commit()
             if cursor.rowcount > 0:
-                self._log_message(f"Trimmed {cursor.rowcount} rows from metrics_history older than {days} days")
+                self._admin_log(f"Trimmed {cursor.rowcount} rows from metrics_history older than {days} days")
         except Exception as e:
-            self._log_message(f"Error trimming metrics_history: {e}")
+            self._admin_log(f"Error trimming metrics_history: {e}")
         finally:
             conn.close()
 
@@ -427,7 +775,7 @@ class WebController(Controller):
 
         trimmer_thread = threading.Thread(target=trimmer_loop, daemon=True)
         trimmer_thread.start()
-        self._log_message("Metrics trimmer started (runs daily)")
+        self._admin_log("Metrics trimmer started (runs daily)")
 
     def _load_node_grid_layout(self) -> Dict[str, Any]:
         """Load node grid layout from config file"""
@@ -436,7 +784,7 @@ class WebController(Controller):
                 with open(NODE_GRID_CONFIG, 'r') as f:
                     return json.load(f)
             except Exception as e:
-                self._log_message(f"Error loading node grid layout: {e}")
+                self._admin_log(f"Error loading node grid layout: {e}")
         return {'order': [], 'pages': {}, 'columns': 4, 'rows': 2}
 
     def _save_node_grid_layout(self):
@@ -445,15 +793,15 @@ class WebController(Controller):
             with open(NODE_GRID_CONFIG, 'w') as f:
                 json.dump(self.node_grid_layout, f, indent=2)
         except Exception as e:
-            self._log_message(f"Error saving node grid layout: {e}")
+            self._admin_log(f"Error saving node grid layout: {e}")
 
     def _add_log(self, prefix: str, message: str, journal_ts: float = None):
         """Add a log message to the buffer with automatic trimming"""
         if journal_ts:
             dt = datetime.fromtimestamp(journal_ts)
-            timestamp = dt.strftime('%H:%M:%S')
+            timestamp = dt.strftime('%d/%m %H:%M:%S')
         else:
-            timestamp = datetime.now().strftime('%H:%M:%S')
+            timestamp = datetime.now().strftime('%d/%m %H:%M:%S')
 
         version = self._log_counter
         self._log_counter += 1
@@ -495,33 +843,42 @@ class WebController(Controller):
         self._log_message(msg_text)
 
     def _log_message(self, message: str):
-        """Add a message to the journal"""
-        systemd.journal.send(
-            f"{message}",
-            SYSLOG_IDENTIFIER=JOURNAL_IDENTIFIER,
-            PRIORITY=6
+        """Add a message to the journal via shared logger"""
+        self.liblogger.log(
+            source='CTRL',
+            node_ip='0.0.0.0',
+            message=message,
+            log_level=6,  # INFO
+            message_type='CONTROL'
         )
+
+    def _admin_log(self, message: str, log_level: int = 6):
+        """
+        Admin-only log - not shown in debug view, only journal.
+        For ephemeral messages that shouldn't clutter the UI.
+        """
+        self.liblogger.admin_log(message, log_level)
 
     def _start_journal_reader(self):
         """Start background thread to read logs from journal"""
         self.journal_running = True
         self.journal_thread = threading.Thread(target=self._journal_reader_loop, daemon=True)
         self.journal_thread.start()
-        self._log_message(f"Journal reader started, monitoring '{JOURNAL_IDENTIFIER}'")
+        self._admin_log(f"Journal reader started, monitoring '{JOURNAL_IDENTIFIER}'")
 
     def _stop_journal_reader(self):
         """Stop the journal reader thread"""
-        self._log_message("Stopping journal reader...")
+        self._admin_log("Stopping journal reader...")
         self.journal_running = False
 
         # Give the thread time to notice the flag and exit
         if self.journal_thread and self.journal_thread.is_alive():
-            self._log_message("Waiting for journal reader thread to exit...")
+            self._admin_log("Waiting for journal reader thread to exit...")
             self.journal_thread.join(timeout=1.0)
             if self.journal_thread.is_alive():
-                self._log_message("Journal reader thread still alive (daemon will kill it)")
+                self._admin_log("Journal reader thread still alive (daemon will kill it)")
             else:
-                self._log_message("Journal reader thread exited cleanly")
+                self._admin_log("Journal reader thread exited cleanly")
 
     def _journal_reader_loop(self):
         """Background thread to read logs from systemd journal"""
@@ -549,23 +906,44 @@ class WebController(Controller):
                 message = entry.get('MESSAGE', '')
                 if message:
                     message = message.rstrip()
-                    cursor = entry.get('__CURSOR', 'unknown')
                     backfill_count += 1
 
                     journal_ts = entry.get('__REALTIME_TIMESTAMP')
                     journal_ts_value = journal_ts.timestamp() if journal_ts else None
 
-                    # Determine prefix based on syslog identifier
-                    unit = entry.get('_SYSTEMD_UNIT', '')
-                    if unit == self.controller_unit:
+                    # Get custom fields (may be missing for old logs)
+                    source = entry.get('FGR_SOURCE', '')
+                    node_ip = entry.get('FGR_NODE_IP', '')
+
+                    # Fallback for old logs: determine source from message content
+                    if not source:
+                        if message.startswith('[CTRL]'):
+                            source = 'CTRL'
+                        elif message.startswith('[ADMIN]'):
+                            source = 'ADMIN'
+                        else:
+                            source = 'NODE'
+                            # For node logs, extract IP from message (old format)
+                            if not node_ip:
+                                node_match = re.search(r'^\[([0-9.]+)\]', message)
+                                if node_match:
+                                    node_ip = node_match.group(1)
+
+                    # Determine prefix based on source (for display only)
+                    if source == 'CTRL':
                         prefix = '[CTRL]'
+                    elif source == 'ADMIN':
+                        prefix = '[ADMIN]'
                     else:
                         prefix = '[NODE]'
-                        # Parse metrics from new logs (only for NODE logs)
-                        metrics_result = self._parse_metrics_from_log(message)
+
+                    # Parse metrics from node logs (use node_ip from custom field or fallback)
+                    if source == 'NODE' and node_ip:
+                        metrics_result = self._parse_metrics_from_log(message, node_ip)
                         if metrics_result:
                             node_ip, metrics_data = metrics_result
                             self._update_node_metrics(node_ip, metrics_data)
+
                     self._add_log(prefix, message, journal_ts_value)
 
             # Now follow new entries using the cursor
@@ -590,37 +968,58 @@ class WebController(Controller):
                         message = entry.get('MESSAGE', '')
                         if message:
                             message = message.rstrip()
-                            cursor = entry.get('__CURSOR', 'unknown')
                             append_count += 1
 
                             journal_ts = entry.get('__REALTIME_TIMESTAMP')
                             journal_ts_value = journal_ts.timestamp() if journal_ts else None
 
-                            # Determine prefix based on syslog identifier
-                            unit = entry.get('_SYSTEMD_UNIT', '')
-                            if unit == self.controller_unit:
+                            # Get custom fields (may be missing for old logs)
+                            source = entry.get('FGR_SOURCE', '')
+                            node_ip = entry.get('FGR_NODE_IP', '')
+
+                            # Fallback for old logs: determine source from message content
+                            if not source:
+                                if message.startswith('[CTRL]'):
+                                    source = 'CTRL'
+                                elif message.startswith('[ADMIN]'):
+                                    source = 'ADMIN'
+                                else:
+                                    source = 'NODE'
+                                    # For node logs, extract IP from message (old format)
+                                    if not node_ip:
+                                        node_match = re.search(r'^\[([0-9.]+)\]', message)
+                                        if node_match:
+                                            node_ip = node_match.group(1)
+
+                            # Determine prefix based on source (for display only)
+                            if source == 'CTRL':
                                 prefix = '[CTRL]'
+                            elif source == 'ADMIN':
+                                prefix = '[ADMIN]'
                             else:
                                 prefix = '[NODE]'
-                                # Parse metrics from new logs (only for NODE logs)
-                                metrics_result = self._parse_metrics_from_log(message)
+
+                            # Parse metrics from node logs (use node_ip from custom field or fallback)
+                            if source == 'NODE' and node_ip:
+                                metrics_result = self._parse_metrics_from_log(message, node_ip)
                                 if metrics_result:
                                     node_ip, metrics_data = metrics_result
                                     self._update_node_metrics(node_ip, metrics_data)
+
                             self._add_log(prefix, message, journal_ts_value)
 
         except Exception as e:
-            self._log_message(f"Journal reader error: {e}")
+            self._admin_log(f"Journal reader error: {e}")
         finally:
-            self._log_message("Journal reader stopped")
+            self._admin_log("Journal reader stopped")
 
     def _get_node_name_by_ip(self, ip: str) -> Optional[str]:
         """Get node name from IP address"""
         for name, node in self.nodes.items():
             if node.ip == ip:
                 return name
-        self._log_message(f"Could not find node name for IP: {ip}")  # Debug line
-        self._log_message(f"Available node IPs: {[node.ip for node in self.nodes.values()]}")  # Debug line
+        self._admin_log(f"Could not find node name for IP: {ip}")
+        self._admin_log(f"Available node IPs: {[node.ip for node in self.nodes.values()]}")
         return None
 
     def _format_duration_compact(self, seconds: int) -> str:
@@ -643,17 +1042,19 @@ class WebController(Controller):
             parts.append(f"{secs}s")
         return ' '.join(parts)
 
-    def _parse_metrics_from_log(self, log_line: str) -> Optional[Tuple[str, dict]]:
+    def _parse_metrics_from_log(self, log_line: str, node_ip: str = None) -> Optional[Tuple[str, dict]]:
         """Extract metrics JSON from log line and return (node_ip, metrics_dict)"""
         # Look for "metrics:" pattern
         if 'metrics:' not in log_line:
             return None
 
-        # Extract node IP - log line starts with [IP] after [NODE] is stripped
-        node_match = re.search(r'^\[([0-9.]+)\]', log_line)
-        if not node_match:
-            return None
-        node_ip = node_match.group(1)
+        # Use provided node_ip if available (from custom field), otherwise parse from log_line
+        if not node_ip:
+            # Extract node IP - log line starts with [IP]
+            node_match = re.search(r'^\[([0-9.]+)\]', log_line)
+            if not node_match:
+                return None
+            node_ip = node_match.group(1)
 
         # Find the start of the JSON
         metrics_pos = log_line.find('metrics:')
@@ -937,7 +1338,7 @@ class WebController(Controller):
                 }
                 self.node_card_html[node_name] = node.handler.get_card_html(node_name, node_data)
             except Exception as e:
-                self._log_message(f"Error getting card HTML for {node_name}: {e}")
+                self._admin_log(f"Error getting card HTML for {node_name}: {e}")
 
     def set_node_notification(self, node_name: str, message: str, is_sent: bool = True, is_success: bool = True):
         """Set a notification for a node (sent/received message)
@@ -1125,6 +1526,117 @@ class WebController(Controller):
                         self.sse_clients.discard(client)
             await asyncio.sleep(0.5)
 
+    async def _run_search(self, session_id: str):
+        """Background task to run the search"""
+        session = self.search_sessions.get(session_id)
+        if not session:
+            return
+
+        iterator = session['iterator']
+
+        try:
+            # Run find_next_match in a thread pool to avoid blocking
+            result = await asyncio.get_event_loop().run_in_executor(
+                None, iterator.find_next_match
+            )
+
+            if session.get('cancelled'):
+                # Search was cancelled
+                pass
+            elif result:
+                session['result'] = result
+            else:
+                session['result'] = None  # No more matches
+
+            session['running'] = False
+
+        except Exception as e:
+            self._admin_log(f"Search error for session {session_id}: {e}")
+            session['running'] = False
+        finally:
+            # Don't delete session immediately - let cleanup thread handle it
+            pass
+
+    async def _run_search_in_thread(self, session_id: str):
+        """Run the search in a thread pool - creates iterator in the same thread"""
+        session = self.search_sessions.get(session_id)
+        if not session:
+            return
+
+        try:
+            params = session['params']
+            start_timestamp = session['start_timestamp']
+            max_entries_per_poll = 1000  # Scan this many entries per poll
+
+            def search_in_thread():
+                """This runs entirely in the thread pool"""
+                # Create iterator INSIDE the thread pool
+                iterator = SearchIterator(params, start_timestamp, db_path=self.db_path)
+                iterator.controller_unit = self.controller_unit
+                iterator.debug = params.get('debug', False)
+
+                # Store iterator in session for potential cancellation
+                session['iterator'] = iterator
+
+                total_scanned = 0
+
+                while not session.get('cancelled'):
+                    # Search for next match (bounded)
+                    result = iterator.find_next_match(max_entries_per_poll)
+
+                    if result is None:
+                        # End of journal/database
+                        session['finished'] = True
+                        session['running'] = False
+                        return
+
+                    timestamp, message, wrapped, scanned_this, total_scanned, log_id = result
+
+                    if timestamp is not None:
+                        # Match found
+                        session['result'] = (timestamp, message, wrapped, scanned_this, total_scanned, log_id)
+                        session['running'] = False
+                        return
+                    else:
+                        # No match in this chunk, update progress and continue
+                        session['total_scanned'] = total_scanned
+                        # Small sleep to allow polling loop to catch up
+                        time.sleep(0.05)
+
+                # Cancelled
+                if params.get('debug', False):
+                    print(f"SEARCH DEBUG: Session {session_id[:8]}... CANCELLED after {total_scanned} entries", flush=True)
+                session['running'] = False
+
+            # Run the entire search in a single thread pool thread
+            await asyncio.get_event_loop().run_in_executor(
+                None, search_in_thread
+            )
+
+        except Exception as e:
+            self._admin_log(f"Search error for session {session_id}: {e}")
+            session['error'] = str(e)
+            session['running'] = False
+
+    def _start_session_cleanup(self):
+        """Start background thread to clean up expired search sessions"""
+        def cleanup_loop():
+            while self.web_running:
+                time.sleep(60)  # Check every minute
+                now = time.time()
+                expired = []
+                for sid, session in self.search_sessions.items():
+                    if now - session['last_access'] > 300:  # 5 minutes
+                        expired.append(sid)
+                for sid in expired:
+                    if sid in self.search_sessions:
+                        self.search_sessions[sid]['iterator'].close()
+                        del self.search_sessions[sid]
+                        self._admin_log(f"Cleaned up expired search session {sid}")
+
+        cleanup_thread = threading.Thread(target=cleanup_loop, daemon=True)
+        cleanup_thread.start()
+
     async def handle_index(self, request):
         """Serve the main HTML page"""
         return web.Response(text=self._get_html_template(), content_type='text/html')
@@ -1159,7 +1671,7 @@ class WebController(Controller):
             # Client disconnected - normal
             pass
         except Exception as e:
-            self._log_message(f"Status stream error: {e}")
+            self._admin_log(f"Status stream error: {e}")
         finally:
             self.sse_clients.discard(response)
 
@@ -1219,7 +1731,7 @@ class WebController(Controller):
             # Client disconnected - normal, don't log
             pass
         except Exception as e:
-            self._log_message(f"Log stream error: {e}")
+            self._admin_log(f"Log stream error: {e}")
 
         return response
 
@@ -1296,21 +1808,30 @@ class WebController(Controller):
             ts = entry.get('__REALTIME_TIMESTAMP')
             if ts:
                 dt = datetime.fromtimestamp(ts.timestamp())
-                time_str = dt.strftime('%H:%M:%S')
+                time_str = dt.strftime('%d/%m %H:%M:%S')
             else:
                 time_str = '00:00:00'
 
+            # Get custom fields (these are the source of truth)
+            log_id_str = entry.get('FGR_LOG_ID', '0')
+            try:
+                log_id = int(log_id_str) if log_id_str else 0
+            except ValueError:
+                log_id = 0
+
+            source = entry.get('FGR_SOURCE', '')
+            node_ip = entry.get('FGR_NODE_IP', '')
+
+            # Get the message (already correctly formatted by LibLogger)
             message = entry.get('MESSAGE', '')
             linkify_message = linkify_log_line(message)
-            unit = entry.get('_SYSTEMD_UNIT', '')
-            if unit == self.controller_unit:
-                prefix = '[CTRL]'
-            else:
-                prefix = '[NODE]'
 
             return {
-                'message': f"[{time_str}] {prefix} {linkify_message}",
-                'timestamp': ts.timestamp() if ts else None
+                'message': f"[{time_str}] {linkify_message}",
+                'timestamp': ts.timestamp() if ts else None,
+                'log_id': log_id,
+                'source': source,
+                'node_ip': node_ip
             }
 
         def _query():
@@ -1370,6 +1891,103 @@ class WebController(Controller):
             })
         except Exception as e:
             return web.json_response({'error': str(e)}, status=500)
+
+    async def handle_api_search(self, request):
+        """Handle search requests - non-blocking with thread-safe iterator"""
+        # Search requires database
+        if not self.graphs_enabled:
+            return web.json_response({'error': 'Search requires database. Use --db-path to enable.'}, status=503)
+
+        data = await request.json()
+        action = data.get('action')
+
+        if action == 'start':
+            params = {
+                'search': data.get('search', ''),
+                'direction': data.get('direction', 'next'),
+                'case_sensitive': data.get('case_sensitive', False),
+                'whole_word': data.get('whole_word', False),
+                'exclude_ctrl': data.get('exclude_ctrl', False),
+                'include_nodes': data.get('include_nodes', []),
+                'min_log_level': data.get('min_log_level', 4),
+                'debug': data.get('debug', False)
+            }
+            start_timestamp = data.get('from_timestamp')
+
+            if not params['search']:
+                return web.json_response({'error': 'No search term'}, status=400)
+
+            if not start_timestamp:
+                return web.json_response({'error': 'No starting timestamp'}, status=400)
+
+            # Create session WITHOUT iterator (will be created in thread pool)
+            session_id = str(uuid.uuid4())
+            self.search_sessions[session_id] = {
+                'last_access': time.time(),
+                'result': None,
+                'running': True,
+                'cancelled': False,
+                'finished': False,
+                'params': params,
+                'start_timestamp': start_timestamp,
+                'iterator': None,  # Will be created in thread pool
+                'total_scanned': 0
+            }
+
+            # Start background search task (creates iterator in thread pool)
+            asyncio.create_task(self._run_search_in_thread(session_id))
+
+            # Return immediately with session_id
+            return web.json_response({
+                'session_id': session_id,
+                'status': 'searching'
+            })
+
+        elif action == 'poll':
+            import time as time_module
+            session_id = data.get('session_id')
+            max_entries = data.get('max_entries', 1000)
+
+            if not session_id or session_id not in self.search_sessions:
+                return web.json_response({'error': 'Invalid or expired session'}, status=404)
+
+            session = self.search_sessions[session_id]
+            session['last_access'] = time.time()
+
+            if session.get('cancelled'):
+                return web.json_response({'found': False, 'cancelled': True})
+
+            result = session.get('result')
+            if result:
+                timestamp, message, wrapped, scanned_this, total_scanned, log_id = result
+                return web.json_response({
+                    'found': True,
+                    'timestamp': timestamp,
+                    'message': message,
+                    'wrapped': wrapped,
+                    'scanned_this': scanned_this,
+                    'total_scanned': total_scanned,
+                    'log_id': log_id
+                })
+            else:
+                return web.json_response({
+                    'found': False,
+                    'finished': False,
+                    'scanned_this': 0,
+                    'total_scanned': 0
+                })
+        elif action == 'cancel':
+            session_id = data.get('session_id')
+            if session_id and session_id in self.search_sessions:
+                session = self.search_sessions[session_id]
+                session['cancelled'] = True
+                self._admin_log(f"Search session {session_id} cancelled by user")
+                return web.json_response({'status': 'cancelled'})
+            else:
+                return web.json_response({'error': 'Session not found'}, status=404)
+
+        else:
+            return web.json_response({'error': 'Invalid action'}, status=400)
 
     async def handle_api_command(self, request):
         """Handle command requests to nodes"""
@@ -1796,7 +2414,7 @@ class WebController(Controller):
             })
 
         except Exception as e:
-            self._log_message(f"Error querying raw minute data: {e}")
+            self._admin_log(f"Error querying raw minute data: {e}")
             import traceback
             traceback.print_exc()
             return web.json_response({'error': str(e)}, status=500)
@@ -1822,7 +2440,7 @@ class WebController(Controller):
                 }
                 node_specific_html = node.handler.get_expanded_html(node_name, node_data)
             except Exception as e:
-                self._log_message(f"Error getting expanded HTML from handler: {e}")
+                self._admin_log(f"Error getting expanded HTML from handler: {e}")
                 node_specific_html = '<div class="expanded-section"><h4>Error</h4><pre>Failed to load node data</pre></div>'
         else:
             node_specific_html = f'''
@@ -1914,7 +2532,7 @@ class WebController(Controller):
                                 <option value="2">WARN</option>
                                 <option value="3">ERROR</option>
                             </select>
-                            <button class="btn-apply-level" onclick="sendCommand('{node_name}', 'log_level', {{level: parseInt(this.previousElementSibling.value)}})">Apply</button>
+                            <button class="btn-apply-level" onclick="sendCommand('{node_name}', 'log_level', {{level: parseInt(this.previousElementSibling.value, 10)}})">Apply</button>
                             <div class="expanded-footer-status" data-dynamic="log_status">{log_status_text}</div>
                         </div>
                     </div>
@@ -2137,11 +2755,11 @@ class WebController(Controller):
                 result[node_ip].sort(key=lambda x: x[0])
 
             total_points = sum(len(v) for v in result.values())
-            self._log_message(f"{metric_column} (deltas): {total_points} event points from {len(result)} nodes")
+            self._admin_log(f"{metric_column} (deltas): {total_points} event points from {len(result)} nodes")
             return result
 
         except Exception as e:
-            self._log_message(f"Error querying {metric_column}: {e}")
+            self._admin_log(f"Error querying {metric_column}: {e}")
             import traceback
             traceback.print_exc()
             return {}
@@ -2191,7 +2809,7 @@ class WebController(Controller):
             return result
 
         except Exception as e:
-            self._log_message(f"Error querying RSSI: {e}")
+            self._admin_log(f"Error querying RSSI: {e}")
             return {}
         finally:
             conn.close()
@@ -2250,7 +2868,7 @@ class WebController(Controller):
             return result
 
         except Exception as e:
-            self._log_message(f"Error querying heap: {e}")
+            self._admin_log(f"Error querying heap: {e}")
             return {}
         finally:
             conn.close()
@@ -2281,7 +2899,7 @@ class WebController(Controller):
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT MIN(epoch_time), MAX(epoch_time)
-                FROM device_logs
+                FROM logs
                 WHERE message_type = 'METRIC'
                 OR message LIKE '%disconnect%'
             """)
@@ -2291,7 +2909,7 @@ class WebController(Controller):
                 'max_time': row[1] if row[1] else None
             })
         except Exception as e:
-            self._log_message(f"Error querying time range: {e}")
+            self._admin_log(f"Error querying time range: {e}")
             return web.json_response({'min_time': None, 'max_time': None})
         finally:
             conn.close()
@@ -2310,18 +2928,19 @@ class WebController(Controller):
         self.web_app.router.add_post('/api/reorder', self.handle_api_reorder)
         self.web_app.router.add_post('/api/node/data', self.handle_api_node_data)
         self.web_app.router.add_post('/api/node/html', self.handle_api_node_html)
+        self.web_app.router.add_post('/api/search', self.handle_api_search)
         if HAS_SYSTEMD:
             self.web_app.router.add_post('/api/journal/query', self.handle_api_journal_query)
             self.web_app.router.add_get('/api/journal/range', self.handle_api_journal_time_range)
-            self._log_message("Journal API endpoints enabled")
+            self._admin_log("Journal API endpoints enabled")
         if self.graphs_enabled:
             self.web_app.router.add_post('/api/graph/data', self.handle_api_graph_data)
             self.web_app.router.add_post('/api/graph/raw_minute_data', self.handle_api_raw_minute_data)
             self.web_app.router.add_get('/api/graph/nodes', self.handle_api_graph_nodes)
             self.web_app.router.add_get('/api/graph/time_range', self.handle_api_graph_time_range)
-            self._log_message(f"Graph endpoints enabled")
+            self._admin_log(f"Graph endpoints enabled")
         else:
-            self._log_message(f"Graph endpoints disabled (use --db-path to enable)")
+            self._admin_log(f"Graph endpoints disabled (use --db-path to enable)")
 
         # Event to signal the web thread to stop
         self.web_stop_event = threading.Event()
@@ -3083,8 +3702,8 @@ class WebController(Controller):
             justify-content: space-between;
             align-items: center;
             flex-wrap: nowrap;
-            gap: 12px;
-            padding: 8px 15px;
+            gap: 8px;
+            padding: 6px 10px;
             background: #f0f0f0;
             border-radius: 6px 6px 0 0;
             flex-shrink: 0;
@@ -3107,7 +3726,7 @@ class WebController(Controller):
         .debug-filters {
             display: flex;
             align-items: center;
-            gap: 12px;
+            gap: 6px;
             flex-wrap: wrap;
             font-size: 10px;
             flex: 1;
@@ -3126,16 +3745,13 @@ class WebController(Controller):
         }
 
         .filter-checkbox {
-            cursor: pointer;
-        }
-
-        .filter-checkbox {
             display: flex;
             align-items: center;
             gap: 4px;
             cursor: pointer;
             white-space: nowrap;
             color: #333;
+            font-size: 9px;
         }
 
         .filter-checkbox input {
@@ -3148,7 +3764,7 @@ class WebController(Controller):
             align-items: center;
             gap: 4px;
             background: #e9ecef;
-            padding: 2px 8px;
+            padding: 2px 4px;
             border-radius: 4px;
         }
 
@@ -3229,6 +3845,13 @@ class WebController(Controller):
             cursor: pointer;
         }
 
+        .debug-toggle-btn:disabled,
+        #searchInput:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            pointer-events: none;
+        }
+
         .debug-toggle-btn:hover {
             background: #0056b3;
         }
@@ -3253,6 +3876,33 @@ class WebController(Controller):
 
         .debug-window .log-node {
             color: #9cdcfe;
+        }
+
+        .debug-window .log-ctrl,
+        .debug-window .log-node {
+            border-left: 3px solid transparent;
+            padding-left: 6px;
+            transition: border-color 0.1s ease;
+        }
+
+        /* This comes after, so it wins when specificity is equal */
+        .debug-window .log-cursor {
+            border-left-color: #ff9800;
+            background-color: rgba(255, 152, 0, 0.15);
+        }
+        .debug-window .log-cursor:hover {
+            background-color: rgba(255, 152, 0, 0.25);
+        }
+
+        @keyframes spin {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+        }
+
+        .search-spinner {
+            display: inline-block;
+            animation: spin 1s linear infinite;
+            margin-right: 4px;
         }
 
         /* Highligh links in log messages */
@@ -3761,21 +4411,21 @@ class WebController(Controller):
 
     <div class="debug-panel">
         <div class="debug-header">
-            <h2>🐛 Debug Output <span id="journalBadge" class="badge-warning">loading...</span></h2>
+            <h2>🐛 Log</h2>
             <div class="debug-filters">
                 <label class="filter-checkbox">
                     <input type="checkbox" id="filterExcludeCtrl"> Exclude CTRL
                 </label>
                 <div class="filter-input-group">
-                    <span class="filter-label" id="filterIncludeLabel">Include only NODEs</span>
+                    <span class="filter-label" id="filterIncludeLabel">Include</span>
                     <input type="text" id="filterIncludeNodes" placeholder="e.g., 2,3" class="filter-textbox">
                 </div>
                 <div class="filter-input-group">
-                    <span class="filter-label" id="filterHighlightLabel">Highlight NODEs</span>
+                    <span class="filter-label" id="filterHighlightLabel">Highlight</span>
                     <input type="text" id="filterHighlightNodes" placeholder="e.g., 2,3" class="filter-textbox">
                 </div>
                 <div class="filter-input-group">
-                    <span class="filter-label">Min NODE log level</span>
+                    <span class="filter-label">Min log level</span>
                     <select id="filterMinLogLevel" class="filter-select">
                         <option value="0">DEBUG</option>
                         <option value="1">INFO</option>
@@ -3785,7 +4435,7 @@ class WebController(Controller):
                     </select>
                 </div>
                 <div class="filter-input-group">
-                    <span class="filter-label">Go to time</span>
+                    <span class="filter-label">Go to</span>
                     <input type="datetime-local" id="gotoTimeInput" class="filter-textbox" style="width: 160px;">
                     <button id="gotoTimeBtn" class="debug-toggle-btn" style="padding: 2px 6px; font-size: 10px;">Go</button>
                 </div>
@@ -3877,10 +4527,28 @@ class WebController(Controller):
         let maxNormalGapSeconds = 5; // Track the maximum normal gap between consecutive logs
         let deadGaps = new Set();  // Stores gap keys that have no logs in journal
 
+        // Debug window search
+        let activeSearchSession = null;
+        let searchCaseSensitive = false;
+        let searchWholeWord = false;
+        let isSearching = false;
+        let searchCursor = null;           // Timestamp of last found match
+        let searchLogId = null;
+        let lastSearchDirection = null;    // 'next' or 'prev'
+        let autoScrolling = false;         // Are we auto-scrolling to a match?
+        let currentSearchAborted = false;  // Flag to ignore pending search results after cancel
+
+        // Filter state
+        let filterExcludeCtrl = false;
+        let filterIncludeNodes = new Set();  // Set of node IP last octets to include (empty means all)
+        let filterHighlightNodes = new Set(); // Set of node IP last octets to highlight
+        let filterMinLogLevel = 4;  // Default OFF (4)
+        let controllerIpPrefix = ''; // Will be set from server
+
         // Show a temporary toast message
         let toastTimeout = null;
 
-        function showTemporaryMessage(msg) {
+        function showTemporaryMessage(msg, type = 'info') {
             // Remove existing toast if present
             const existingToast = document.getElementById('temp-toast');
             if (existingToast) {
@@ -3891,19 +4559,42 @@ class WebController(Controller):
             const toast = document.createElement('div');
             toast.id = 'temp-toast';
             toast.textContent = msg;
+
+            // Set color based on type
+            let textColor, borderColor;
+            switch (type) {
+                case 'search':
+                    textColor = '#ffd966';  // Warm yellow for search
+                    borderColor = '#ffd966';
+                    break;
+                case 'error':
+                    textColor = '#f44336';  // Red for errors
+                    borderColor = '#f44336';
+                    break;
+                case 'success':
+                    textColor = '#4caf50';  // Green for success
+                    borderColor = '#4caf50';
+                    break;
+                default: // 'info'
+                    textColor = '#9cdcfe';  // Light blue (like node logs)
+                    borderColor = '#2196f3';
+            }
+
             toast.style.cssText = `
                 position: fixed;
-                bottom: 100px;
+                bottom: 200px;
                 right: 20px;
-                background: #333;
-                color: #0f0;
+                background: #2d2d2d;
+                color: ${textColor};
+                border-left: 4px solid ${borderColor};
                 padding: 8px 12px;
                 border-radius: 4px;
                 font-family: monospace;
                 font-size: 11px;
                 z-index: 10001;
-                opacity: 0.9;
+                opacity: 0.95;
                 transition: opacity 0.3s ease;
+                box-shadow: 0 2px 8px rgba(0,0,0,0.3);
             `;
             document.body.appendChild(toast);
 
@@ -3924,8 +4615,8 @@ class WebController(Controller):
             if (status.grid_columns) {
                 document.documentElement.style.setProperty('--grid-columns', status.grid_columns);
             }
-            const rows = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--grid-rows')) || 2;
-            const cols = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--grid-columns')) || 4;
+            const rows = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--grid-rows'), 10) || 2;
+            const cols = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--grid-columns'), 10) || 4;
             nodesPerPage = rows * cols;
         }
 
@@ -4307,7 +4998,7 @@ class WebController(Controller):
             debugPanel.classList.remove('collapsed');
 
             // Update toggle button state (now in 'maximise' state relative to docked)
-            if (toggleBtn && !isCollapsed && currentHeight !== parseInt(dockedHeight)) {
+            if (toggleBtn && !isCollapsed && currentHeight !== parseInt(dockedHeight, 10)) {
                 // We were in an expanded state, now docked
                 toggleBtn.innerHTML = '▼ Minimise';
                 toggleBtn.textContent = '▼ Minimise';
@@ -4407,12 +5098,11 @@ class WebController(Controller):
             alert('Copied to clipboard');
         }
 
-        // Filter state
-        let filterExcludeCtrl = false;
-        let filterIncludeNodes = new Set();  // Set of node IP last octets to include (empty means all)
-        let filterHighlightNodes = new Set(); // Set of node IP last octets to highlight
-        let filterMinLogLevel = 4;  // Default OFF (4)
-        let controllerIpPrefix = ''; // Will be set from server
+        // Extract log_id from a log message (returns integer, 0 if not found)
+        function extractLogIdFromMessage(message) {
+            const match = message.match(/\\[LOG_ID=(\\d+)\\]/);
+            return match ? parseInt(match[1], 10) : 0;
+        }
 
         // Parse node IP last octet from log line
         function extractNodeLastOctet(logLine) {
@@ -4504,6 +5194,30 @@ class WebController(Controller):
             return working;
         }
 
+        function handleLogClick(logDiv, timestamp) {
+            return (e) => {
+                e.stopPropagation();
+                const ts = parseFloat(logDiv.getAttribute('data-timestamp'));
+                if (ts) {
+                    // If clicking on the current cursor line, clear it
+                    if (searchCursor !== null && Math.abs(ts - searchCursor) < 0.001) {
+                        resetSearch();
+                        showTemporaryMessage('Cursor cleared', 'search');
+                    } else {
+                        resetSearch();
+                        searchCursor = ts;
+                        showTemporaryMessage(`Cursor set to ${new Date(ts * 1000).toLocaleTimeString()}`, 'search');
+                        updateCursorHighlight();
+                        // Flash the clicked line
+                        logDiv.style.backgroundColor = '#4a4a4a';
+                        setTimeout(() => {
+                            if (logDiv) logDiv.style.backgroundColor = '';
+                        }, 500);
+                    }
+                }
+            };
+        }
+
         function refilterAndRenderLogs() {
             const debugWindow = document.getElementById('debugWindow');
             if (!debugWindow) return;
@@ -4514,13 +5228,17 @@ class WebController(Controller):
                 logElements = [];
                 logTexts = [];
                 for (const log of logBuffer) {
-                    const className = log.includes('[CTRL]') ? 'log-ctrl' : 'log-node';
+                    const className = log.message.includes('[CTRL]') ? 'log-ctrl' : 'log-node';
                     const logDiv = document.createElement('div');
                     logDiv.className = className;
-                    logDiv.textContent = log;
+                    logDiv.setAttribute('data-timestamp', log.timestamp);
+                    logDiv.setAttribute('data-log_id', log.log_id || '0');
+
+                    logDiv.textContent = log.message;
+                    logDiv.addEventListener('click', handleLogClick(logDiv));
                     debugWindow.appendChild(logDiv);
                     logElements.push(logDiv);
-                    logTexts.push(log);
+                    logTexts.push(log.message);
                 }
             }
 
@@ -4579,10 +5297,10 @@ class WebController(Controller):
             const highlightLabel = document.getElementById('filterHighlightLabel');
 
             if (includeLabel && controllerIpPrefix) {
-                includeLabel.textContent = `Include only NODEs ${controllerIpPrefix}.X`;
+                includeLabel.textContent = `Include ${controllerIpPrefix}.X`;
             }
             if (highlightLabel && controllerIpPrefix) {
-                highlightLabel.textContent = `Highlight NODEs ${controllerIpPrefix}.X`;
+                highlightLabel.textContent = `Highlight ${controllerIpPrefix}.X`;
             }
         }
 
@@ -4597,8 +5315,9 @@ class WebController(Controller):
             filterHighlightNodes = parseFilterInput(highlightInput ? highlightInput.value : '');
 
             const logLevelSelect = document.getElementById('filterMinLogLevel');
-            filterMinLogLevel = logLevelSelect ? parseInt(logLevelSelect.value) : 4;
+            filterMinLogLevel = logLevelSelect ? parseInt(logLevelSelect.value, 10) : 4;
 
+            resetSearch();
             refilterAndRenderLogs();
         }
 
@@ -4932,7 +5651,7 @@ class WebController(Controller):
                                     <option value="2">WARN</option>
                                     <option value="3">ERROR</option>
                                 </select>
-                                <button class="btn-apply-level" onclick="sendCommand('${node.name}', 'log_level', {level: parseInt(this.previousElementSibling.value)})">Apply</button>
+                                <button class="btn-apply-level" onclick="sendCommand('${node.name}', 'log_level', {level: parseInt(this.previousElementSibling.value, 10)})">Apply</button>
                                 <div class="log-status-text">${logStatusText}</div>
                             </div>
                         </div>
@@ -5152,16 +5871,10 @@ class WebController(Controller):
         }
 
         function updateUI(status) {
-            const badge = document.getElementById('journalBadge');
-            if (badge) {
-                badge.textContent = status.journal_enabled ? '✓ Journal Active' : '⚠️ Journal Disabled';
-                badge.className = status.journal_enabled ? 'badge-success' : 'badge-warning';
-            }
-
             updateCSSVariables(status);
 
-            const rows = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--grid-rows')) || 2;
-            const cols = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--grid-columns')) || 4;
+            const rows = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--grid-rows'), 10) || 2;
+            const cols = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--grid-columns'), 10) || 4;
             nodesPerPage = rows * cols;
 
             if (status.nodes && status.nodes.length > 0) {
@@ -5531,10 +6244,28 @@ class WebController(Controller):
         // Initialize debug window with scroll loading
         function initDebugWindow() {
             debugWindow = document.getElementById('debugWindow');
-            if (!debugWindow) {
-                console.error('debugWindow not found!');
-                return;
-            }
+            if (!debugWindow) return;
+
+            debugWindow.addEventListener('scroll', () => {
+                if (autoScrolling) {
+                    autoScrolling = false;
+                    // Clear any active cursor monitoring
+                    if (window._activeCursorElement && window._activeCursorElement._keepVisibleInterval) {
+                        clearInterval(window._activeCursorElement._keepVisibleInterval);
+                        window._activeCursorElement = null;
+                    }
+                }
+            });
+
+            debugWindow.addEventListener('wheel', () => {
+                if (autoScrolling) {
+                    autoScrolling = false;
+                    if (window._activeCursorElement && window._activeCursorElement._keepVisibleInterval) {
+                        clearInterval(window._activeCursorElement._keepVisibleInterval);
+                        window._activeCursorElement = null;
+                    }
+                }
+            });
 
             // Set up scroll event listener for infinite scroll
             debugWindow.addEventListener('scroll', handleDebugScroll);
@@ -5717,7 +6448,8 @@ class WebController(Controller):
             // Convert to internal format
             const newEntries = newLogs.map(log => ({
                 timestamp: log.timestamp,
-                message: log.message
+                message: log.message,
+                log_id: extractLogIdFromMessage(log.message)
             })).filter(log => shouldDisplayLog(log.message));
 
             // Create a Set of existing timestamps for quick lookup (with tolerance)
@@ -5754,7 +6486,7 @@ class WebController(Controller):
             rebuildDebugDisplay();
         }
 
-        // Add historical logs below existing logs
+        // Add historical logs above existing logs
         function addHistoricalLogsBelow(newLogs) {
             if (!newLogs.length) return;
 
@@ -5764,7 +6496,8 @@ class WebController(Controller):
                 if (shouldDisplayLog(log.message)) {
                     newEntries.push({
                         timestamp: log.timestamp,
-                        message: log.message
+                        message: log.message,
+                        log_id: extractLogIdFromMessage(log.message)
                     });
                 }
             }
@@ -5795,7 +6528,48 @@ class WebController(Controller):
             rebuildDebugDisplay();
         }
 
-        // Add a single new log (from stream)
+        // Add historical logs below existing logs
+        function addHistoricalLogsBelow(newLogs) {
+            if (!newLogs.length) return;
+
+            // Convert to internal format and filter
+            const newEntries = [];
+            for (const log of newLogs) {
+                if (shouldDisplayLog(log.message)) {
+                    newEntries.push({
+                        timestamp: log.timestamp,
+                        message: log.message,
+                        log_id: extractLogIdFromMessage(log.message)
+                    });
+                }
+            }
+
+            if (newEntries.length === 0) return;
+
+            // Update maxNormalGapSeconds for consecutive entries within the new batch
+            for (let i = 1; i < newEntries.length; i++) {
+                updateMaxNormalGap(newEntries[i].timestamp, newEntries[i-1].timestamp);
+            }
+
+            // Also check gap between last existing log and first new log
+            if (logBuffer.length > 0 && newEntries.length > 0) {
+                const lastExisting = logBuffer[logBuffer.length - 1].timestamp;
+                const firstNew = newEntries[0].timestamp;
+                updateMaxNormalGap(firstNew, lastExisting);
+            }
+
+            // Add to buffer
+            for (const entry of newEntries) {
+                logBuffer.push(entry);
+            }
+
+            // Sort by timestamp
+            logBuffer.sort((a, b) => a.timestamp - b.timestamp);
+
+            // Rebuild display
+            rebuildDebugDisplay();
+        }
+
         function addNewLog(logData) {
             // Handle both old string format and new object format
             let message, timestamp;
@@ -5821,7 +6595,6 @@ class WebController(Controller):
             }
 
             // Check if we already have this exact message (prevent duplicates)
-            // Use message + recent timestamp as duplicate detection
             const isDuplicate = logBuffer.some(log =>
                 log.message === message && Math.abs(log.timestamp - timestamp) < 2
             );
@@ -5835,10 +6608,14 @@ class WebController(Controller):
                 updateMaxNormalGap(timestamp, lastTimestamp);
             }
 
+            // Extract log_id from message
+            const log_id = extractLogIdFromMessage(message);
+
             // Add to buffer
             logBuffer.push({
                 timestamp: timestamp,
-                message: message
+                message: message,
+                log_id: log_id
             });
 
             // Sort buffer by timestamp to maintain chronological order
@@ -5855,9 +6632,12 @@ class WebController(Controller):
                 const className = message.includes('[CTRL]') ? 'log-ctrl' : 'log-node';
                 const logDiv = document.createElement('div');
                 logDiv.className = className;
+                logDiv.setAttribute('data-timestamp', timestamp);
+                logDiv.setAttribute('data-log_id', log_id);
 
                 const highlightedContent = applyHighlighting(message);
                 logDiv.innerHTML = highlightedContent;
+                logDiv.addEventListener('click', handleLogClick(logDiv));
 
                 debugWindow.appendChild(logDiv);
                 logElements.push(logDiv);
@@ -5976,6 +6756,12 @@ class WebController(Controller):
 
         // Rebuild entire debug display (used after bulk adds)
         function rebuildDebugDisplay() {
+            console.log('rebuildDebugDisplay: logBuffer entries with log_id:');
+            for (let i = 0; i < logBuffer.length; i++) {
+                if (logBuffer[i].log_id) {
+                    console.log(`  index ${i}: timestamp=${logBuffer[i].timestamp}, log_id=${logBuffer[i].log_id}`);
+                }
+            }
             if (!debugWindow) return;
 
             const shouldScrollToBottom = !autoScrollLocked && isAtBottom;
@@ -6123,9 +6909,14 @@ class WebController(Controller):
                     const className = log.message.includes('[CTRL]') ? 'log-ctrl' : 'log-node';
                     const logDiv = document.createElement('div');
                     logDiv.className = className;
-
+                    logDiv.setAttribute('data-timestamp', log.timestamp);
+                    logDiv.setAttribute('data-log_id', log.log_id || '0');
+                    if (log.log_id && log.log_id !== 0) {
+                        console.log(`rebuildDebugDisplay: Setting log_id=${log.log_id} for message: ${log.message.substring(0, 50)}...`);
+                    }
                     const highlightedContent = applyHighlighting(log.message);
                     logDiv.innerHTML = highlightedContent
+                    logDiv.addEventListener('click', handleLogClick(logDiv));
 
                     debugWindow.appendChild(logDiv);
                     logElements.push(logDiv);
@@ -6177,7 +6968,25 @@ class WebController(Controller):
         }
 
         // Scroll to a specific timestamp
-        async function scrollToTimestamp(timestamp) {
+        async function scrollToTimestamp(timestamp, targetLogId = null) {
+            console.log('scrollToTimestamp: started with timestamp', timestamp, 'targetLogId', targetLogId);
+
+            // DEBUG: Dump all log_ids currently in the buffer
+            if (targetLogId) {
+                console.log('=== Current buffer log_ids ===');
+                for (let i = 0; i < logElements.length; i++) {
+                    const rid = logElements[i].getAttribute('data-log_id');
+                    if (rid && parseInt(rid) !== 0) {
+                        console.log(`  element ${i}: log_id=${rid}, timestamp=${logTimestamps[i]}`);
+                    }
+                }
+            }
+
+            if (!timestamp) {
+                console.error('scrollToTimestamp: No timestamp provided');
+                return;
+            }
+
             if (!timestamp) {
                 console.error('scrollToTimestamp: No timestamp provided');
                 return;
@@ -6194,24 +7003,56 @@ class WebController(Controller):
                     closestIndex = i;
                 }
             }
+            console.log('scrollToTimestamp: closest in buffer distance', closestDistance);
 
-            // If we have logs within 60 seconds, just scroll to that point
-            if (closestIndex !== -1 && closestDistance < 60) {
-                const targetElement = logElements[closestIndex];
-                if (targetElement) {
-                    targetElement.scrollIntoView({ block: 'center', behavior: 'smooth' });
-                    targetElement.style.backgroundColor = '#4a4a4a';
-                    setTimeout(() => {
-                        targetElement.style.backgroundColor = '';
-                    }, 3000);
-                    return;
+            // If we have logs within 60 seconds and a target log_id, check if it exists
+            if (closestIndex !== -1 && closestDistance < 60 && targetLogId) {
+                console.log('scrollToTimestamp: found logs in buffer, distance', closestDistance);
+
+                // Check if exact log_id exists in buffer
+                let exactIndex = -1;
+                for (let i = 0; i < logElements.length; i++) {
+                    const rid = parseInt(logElements[i].getAttribute('data-log_id'));
+                    if (rid === targetLogId) {
+                        exactIndex = i;
+                        break;
+                    }
                 }
+
+                if (exactIndex !== -1) {
+                    // Exact log_id found - scroll directly to it
+                    console.log('scrollToTimestamp: exact log_id found in buffer at index', exactIndex);
+                    const exactElement = logElements[exactIndex];
+                    exactElement.scrollIntoView({ block: 'center', behavior: 'smooth' });
+                    exactElement.classList.add('log-cursor');
+                    exactElement.style.backgroundColor = '#4a4a4a';
+                    setTimeout(() => {
+                        if (exactElement) exactElement.style.backgroundColor = '';
+                    }, 3000);
+                    await new Promise(resolve => setTimeout(resolve, 500));
+                    console.log('scrollToTimestamp: scrolled to exact match in buffer');
+                    return;
+                } else {
+                    // Exact log_id not in buffer - go straight to journal fetch
+                    console.log('scrollToTimestamp: exact log_id not in buffer, falling back to journal');
+                    // Continue to journal fetch below
+                }
+            } else if (closestIndex !== -1 && closestDistance < 60 && !targetLogId) {
+                // No target log_id (Go to time button) - just scroll to closest
+                console.log('scrollToTimestamp: no target log_id, scrolling to closest');
+                const centerElement = logElements[closestIndex];
+                if (centerElement) {
+                    centerElement.scrollIntoView({ block: 'center', behavior: 'smooth' });
+                    await new Promise(resolve => setTimeout(resolve, 500));
+                }
+                return;
             }
 
             // Fetch logs around this timestamp from journal
             isLoading = true;
 
             try {
+                console.log('scrollToTimestamp: fetching from journal');
                 const response = await fetch('/api/journal/query', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -6222,6 +7063,7 @@ class WebController(Controller):
                     })
                 });
                 const data = await response.json();
+                console.log('scrollToTimestamp: fetch complete, logs count', data.logs?.length);
 
                 if (data.status === 'ok' && data.logs && data.logs.length > 0) {
                     // Get timestamps of new logs
@@ -6236,33 +7078,46 @@ class WebController(Controller):
                     logBuffer.sort((a, b) => a.timestamp - b.timestamp);
 
                     // Rebuild display with new merged buffer
+                    console.log('scrollToTimestamp: rebuilding display');
                     rebuildDebugDisplay();
+                    console.log('scrollToTimestamp: display rebuilt, logElements count', logElements.length);
 
-                    // Find and highlight the target log
-                    const targetLog = newLogs[data.target_index];
-                    if (targetLog) {
-                        // Find the element with matching timestamp
-                        for (let i = 0; i < logTimestamps.length; i++) {
-                            if (Math.abs(logTimestamps[i] - targetLog.timestamp) < 0.001) {
-                                const targetElement = logElements[i];
-                                if (targetElement) {
-                                    targetElement.scrollIntoView({ block: 'center', behavior: 'smooth' });
-                                    targetElement.style.backgroundColor = '#4a4a4a';
+                    // Scroll to the time range (center of the loaded logs)
+                    if (logElements.length > 0) {
+                        const centerIndex = Math.floor(logElements.length / 2);
+                        console.log('scrollToTimestamp: scrolling to time range');
+                        logElements[centerIndex].scrollIntoView({ block: 'center', behavior: 'smooth' });
+
+                        // Wait for scroll to settle
+                        await new Promise(resolve => setTimeout(resolve, 500));
+
+                        // If we have a target log_id, find and highlight the exact match
+                        if (targetLogId) {
+                            let found = false;
+                            for (let i = 0; i < logElements.length; i++) {
+                                const rid = parseInt(logElements[i].getAttribute('data-log_id'));
+                                if (rid === targetLogId) {
+                                    const exactElement = logElements[i];
+                                    exactElement.classList.add('log-cursor');
+                                    exactElement.style.backgroundColor = '#4a4a4a';
+                                    exactElement.scrollIntoView({ block: 'center', behavior: 'smooth' });
                                     setTimeout(() => {
-                                        targetElement.style.backgroundColor = '';
+                                        if (exactElement) exactElement.style.backgroundColor = '';
                                     }, 3000);
+                                    console.log('scrollToTimestamp: cursor set on exact match at index', i);
+                                    found = true;
                                     break;
                                 }
                             }
-                        }
-                    } else {
-                        // Just scroll to the first returned log
-                        if (logElements.length > 0) {
-                            logElements[0].scrollIntoView({ block: 'center', behavior: 'smooth' });
+                            if (!found) {
+                                console.log('scrollToTimestamp: exact log_id not found in loaded logs');
+                                // Fall back to message matching? Journal logs don't have log_id
+                                // So we might need to keep message matching as fallback
+                            }
                         }
                     }
                 } else {
-                    // Show notification that no logs available for this time
+                    console.log('scrollToTimestamp: no logs found');
                     const notification = document.createElement('div');
                     notification.style.cssText = 'position:fixed; bottom:100px; right:20px; background:#f44336; color:white; padding:10px; border-radius:5px; z-index:10000;';
                     notification.textContent = `No logs available for ${new Date(timestamp * 1000).toLocaleString()}`;
@@ -6273,6 +7128,7 @@ class WebController(Controller):
                 console.error('scrollToTimestamp: Error=', e);
             } finally {
                 isLoading = false;
+                console.log('scrollToTimestamp: finished');
             }
         }
 
@@ -6291,6 +7147,535 @@ class WebController(Controller):
             const timestamp = localDate.getTime() / 1000;
 
             scrollToTimestamp(timestamp);
+        }
+
+        async function scrollToMatch(timestamp, targetLogId = null) {
+            console.log('=== scrollToMatch ===');
+            console.log(`timestamp: ${timestamp}, targetLogId: ${targetLogId}`);
+
+            autoScrolling = true;
+            let targetElement = null;
+
+            if (targetLogId) {
+                console.log(`Looking for log_id=${targetLogId} in logElements...`);
+                for (let i = 0; i < logElements.length; i++) {
+                    const rid = parseInt(logElements[i].getAttribute('data-log_id'));
+                    console.log(`  element ${i}: data-log_id="${logElements[i].getAttribute('data-log_id')}" -> parsed=${rid}`);
+                    if (rid === targetLogId) {
+                        targetElement = logElements[i];
+                        console.log(`✓ Found by log_id at index ${i}`);
+                        break;
+                    }
+                }
+                if (!targetElement) {
+                    console.log(`✗ No element found with log_id=${targetLogId}`);
+                }
+            } else {
+                console.log('No targetLogId provided, falling back to timestamp matching');
+            }
+
+            if (targetElement) {
+                console.log('Scrolling to element...');
+                targetElement.scrollIntoView({ block: 'center' });
+                targetElement.classList.add('log-cursor');
+                targetElement.style.backgroundColor = '#ff9800';
+                setTimeout(() => {
+                    if (targetElement) targetElement.style.backgroundColor = '';
+                }, 300);
+                await new Promise(resolve => setTimeout(resolve, 500));
+            } else {
+                console.log(`Element not found by log_id, calling scrollToTimestamp(${timestamp}, ${targetLogId})`);
+                await scrollToTimestamp(timestamp, targetLogId);
+            }
+
+            setTimeout(() => {
+                autoScrolling = false;
+            }, 500);
+        }
+
+        function getVisibleTimestamp(edge) {
+            // edge: 'oldest' (top of viewport) or 'newest' (bottom of viewport)
+            const debugWindow = document.getElementById('debugWindow');
+            if (!debugWindow || logElements.length === 0) {
+                return edge === 'oldest' ? logTimestamps[0] : logTimestamps[logTimestamps.length - 1];
+            }
+
+            const viewportTop = debugWindow.scrollTop;
+            const viewportBottom = viewportTop + debugWindow.clientHeight;
+
+            if (edge === 'oldest') {
+                // Find first displayed element in viewport
+                for (let i = 0; i < logElements.length; i++) {
+                    const el = logElements[i];
+                    if (el.style.display === 'none') continue;
+                    const rect = el.getBoundingClientRect();
+                    if (rect.top >= viewportTop && rect.top <= viewportBottom) {
+                        const ts = el.getAttribute('data-timestamp');
+                        if (ts && ts !== 'gap') {
+                            return parseFloat(ts);
+                        }
+                    }
+                }
+                // Fallback to first timestamp in buffer
+                return logTimestamps[0];
+            } else {
+                // Find last displayed element in viewport
+                for (let i = logElements.length - 1; i >= 0; i--) {
+                    const el = logElements[i];
+                    if (el.style.display === 'none') continue;
+                    const rect = el.getBoundingClientRect();
+                    if (rect.bottom <= viewportBottom && rect.bottom >= viewportTop) {
+                        const ts = el.getAttribute('data-timestamp');
+                        if (ts && ts !== 'gap') {
+                            return parseFloat(ts);
+                        }
+                    }
+                }
+                // Fallback to last timestamp in buffer
+                return logTimestamps[logTimestamps.length - 1];
+            }
+        }
+
+        async function cancelSearch() {
+            if (activeSearchSession) {
+                try {
+                    await fetch('/api/search', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            action: 'cancel',
+                            session_id: activeSearchSession
+                        })
+                    });
+                } catch (e) {
+                    console.error('Cancel failed:', e);
+                }
+                activeSearchSession = null;
+            }
+        }
+
+        // Reset cursor when:
+        function resetSearch() {
+            searchCursor = null;
+            searchLogId = null;
+            lastSearchDirection = null;
+            autoScrolling = false;
+            activeSearchSession = null;
+            updateCursorHighlight();
+        }
+
+        function getCurrentSearchFilters() {
+            return {
+                exclude_ctrl: document.getElementById('filterExcludeCtrl')?.checked || false,
+                include_nodes: (() => {
+                    const input = document.getElementById('filterIncludeNodes');
+                    if (!input || !input.value) return [];
+                    const matches = input.value.match(/\\d+/g);
+                    return matches || [];
+                })(),
+                min_log_level: parseInt(document.getElementById('filterMinLogLevel')?.value || '4', 10)
+            };
+        }
+
+        async function performSearch(direction, forceReset = false) {
+            const searchInput = document.getElementById('searchInput');
+            const caseBtn = document.getElementById('searchCaseBtn');
+            const wordBtn = document.getElementById('searchWordBtn');
+            const prevBtn = document.getElementById('searchPrevBtn');
+            const nextBtn = document.getElementById('searchNextBtn');
+            const cancelBtn = document.getElementById('searchCancelBtn');
+
+            const searchTerm = searchInput.value.trim();
+
+            console.log('performSearch called, isSearching =', isSearching);
+
+            if (!searchTerm) {
+                showTemporaryMessage('⚠️ Enter search term', 'error');
+                return;
+            }
+
+            if (isSearching) {
+                console.log('Search already in progress, ignoring');
+                showTemporaryMessage('⏳ Search already in progress...', 'search');
+                return;
+            }
+
+            console.log('Setting isSearching = true, disabling buttons');
+            isSearching = true;
+            currentSearchAborted = false;
+
+            // Disable all except cancel button
+            searchInput.disabled = true;
+            caseBtn.disabled = true;
+            wordBtn.disabled = true;
+            prevBtn.disabled = true;
+            nextBtn.disabled = true;
+
+            console.log('Buttons disabled:', {
+                searchInput: searchInput.disabled,
+                caseBtn: caseBtn.disabled,
+                wordBtn: wordBtn.disabled,
+                prevBtn: prevBtn.disabled,
+                nextBtn: nextBtn.disabled
+            });
+
+            let fromTimestamp;
+
+            // Determine starting point
+            if (!forceReset && searchCursor !== null && !autoScrolling) {
+                fromTimestamp = searchCursor;
+                if (direction === 'next') {
+                    fromTimestamp += 0.1;
+                } else {
+                    fromTimestamp -= 0.1;
+                }
+                console.log(`Using cursor: ${fromTimestamp}`);
+            } else {
+                fromTimestamp = (direction === 'next')
+                    ? getVisibleTimestamp('oldest')
+                    : getVisibleTimestamp('newest');
+                console.log(`Using viewport: ${fromTimestamp}`);
+            }
+
+            showTemporaryMessage(`🔍 Searching for "${searchTerm}"...`, 'search');
+
+            // Get progress indicator
+            const progressSpan = document.getElementById('searchProgress');
+
+            try {
+                const filters = getCurrentSearchFilters();
+
+                // Start search
+                const startResponse = await fetch('/api/search', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        action: 'start',
+                        search: searchTerm,
+                        direction: direction,
+                        from_timestamp: fromTimestamp,
+                        case_sensitive: searchCaseSensitive,
+                        whole_word: searchWholeWord,
+                        exclude_ctrl: filters.exclude_ctrl,
+                        include_nodes: filters.include_nodes,
+                        min_log_level: filters.min_log_level,
+                        debug: true  // Always enabled for now
+                    })
+                });
+
+                const startData = await startResponse.json();
+
+                if (startData.error) {
+                    showTemporaryMessage(`❌ ${startData.error}`, 'error');
+                    return;
+                }
+
+                const session_id = startData.session_id;
+                activeSearchSession = session_id;
+
+                // Poll for results with bounded chunks
+                let found = false;
+                let finished = false;
+                let pollCount = 0;
+                const maxPolls = 600; // 5 minutes at 500ms intervals
+                let totalScanned = 0;
+                let dotCount = 0;
+
+                while (!found && !finished && pollCount < maxPolls && !currentSearchAborted) {
+                    await new Promise(resolve => setTimeout(resolve, 500));
+                    pollCount++;
+
+                    console.log(`Poll ${pollCount}: checking...`);
+
+                    if (currentSearchAborted) break;
+
+                    const pollResponse = await fetch('/api/search', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            action: 'poll',
+                            session_id: session_id,
+                            max_entries: 1000
+                        })
+                    });
+
+                    const pollData = await pollResponse.json();
+                    console.log(`Poll ${pollCount} response:`, pollData);
+
+                    // Update total scanned as soon as we have it
+                    if (pollData.total_scanned !== undefined) {
+                        totalScanned = pollData.total_scanned;
+                        const scannedK = (totalScanned / 1000).toFixed(1);
+                        progressSpan.textContent = `${scannedK}k`;
+                    }
+
+                    if (pollData.cancelled) {
+                        showTemporaryMessage('Search cancelled', 'search');
+                        break;
+                    }
+
+                    if (pollData.found) {
+                        console.log('MATCH FOUND in poll response!', pollData);
+                        console.log(`  timestamp: ${pollData.timestamp}`);
+                        console.log(`  log_id: ${pollData.log_id}`);
+                        console.log(`  message: ${pollData.message.substring(0, 100)}...`);
+                        found = true;
+                        searchCursor = pollData.timestamp;
+                        searchLogId = pollData.log_id;
+                        lastSearchDirection = direction;
+                        updateCursorHighlight();
+
+                        if (pollData.wrapped) {
+                            const wrapMsg = direction === 'next' ? '↺ Wrapped to earliest logs' : '↺ Wrapped to latest logs';
+                            showTemporaryMessage(wrapMsg, 'search');
+                        }
+
+                        const shortMsg = pollData.message.length > 80 ? pollData.message.substring(0, 77) + '...' : pollData.message;
+
+                        // NEW: Check if we have a valid log_id
+                        if (pollData.log_id && pollData.log_id > 0) {
+                            showTemporaryMessage(`✅ Found: ${shortMsg}`, 'search');
+                        } else {
+                            showTemporaryMessage(`⚠️ Found: ${shortMsg} (approximate position - old log)`, 'search');
+                        }
+
+                        // Wait for scroll to complete before breaking
+                        console.log('performSearch: calling scrollToMatch');
+                        await scrollToMatch(pollData.timestamp, pollData.log_id);
+                        console.log('performSearch: scrollToMatch completed');
+                        break;
+                    }
+
+                    if (pollData.finished) {
+                        console.log('Search finished (no more matches)');
+                        finished = true;
+                        break;
+                    }
+                }
+
+                console.log(`Loop ended: found=${found}, finished=${finished}, pollCount=${pollCount}, aborted=${currentSearchAborted}`);
+
+                if (!found && !finished && !currentSearchAborted) {
+                    showTemporaryMessage(`❌ Search timeout after ${maxPolls * 0.5} seconds`, 'search');
+                } else if (!found && finished && !currentSearchAborted) {
+                    const scannedMsg = totalScanned > 0 ? ` (scanned ${totalScanned.toLocaleString()} entries)` : '';
+                    showTemporaryMessage(`❌ No more matches for "${searchTerm}"${scannedMsg}`, 'search');
+                }
+
+            } catch (e) {
+                console.error('Search error:', e);
+                showTemporaryMessage(`❌ Search failed: ${e.message}`, 'search');
+            } finally {
+                console.log('Search finished, re-enabling buttons');
+                isSearching = false;
+                currentSearchAborted = false;
+                searchInput.disabled = false;
+                caseBtn.disabled = false;
+                wordBtn.disabled = false;
+                prevBtn.disabled = false;
+                nextBtn.disabled = false;
+
+                // Clear progress indicator
+                if (progressSpan) {
+                    progressSpan.textContent = '';
+                }
+            }
+        }
+
+        function clearSearch() {
+            activeSearchSession = null;
+            const searchInput = document.getElementById('searchInput');
+            if (searchInput) {
+                searchInput.value = '';
+                searchInput.placeholder = '🔍';
+            }
+        }
+
+        function updateCursorHighlight() {
+            // Remove cursor class from all logs
+            document.querySelectorAll('#debugWindow .log-ctrl, #debugWindow .log-node').forEach(el => {
+                el.classList.remove('log-cursor');
+            });
+
+            // Find and highlight the log with cursor timestamp
+            if (searchCursor !== null) {
+                for (let i = 0; i < logElements.length; i++) {
+                    const ts = parseFloat(logElements[i].getAttribute('data-timestamp'));
+                    if (Math.abs(ts - searchCursor) < 0.001) {
+                        logElements[i].classList.add('log-cursor');
+                        break;
+                    }
+                }
+            }
+        }
+
+        function initSearchUI() {
+            const debugHeader = document.querySelector('.debug-header');
+            const debugButtons = document.querySelector('.debug-buttons');
+
+            if (!debugHeader || !debugButtons) return;
+
+            // Check if search group already exists
+            if (document.querySelector('.search-group')) return;
+
+            // Create search group
+            const searchGroup = document.createElement('div');
+            searchGroup.className = 'search-group';
+            searchGroup.style.cssText = 'display: inline-flex; align-items: center; gap: 3px; margin: 0 4px;';
+
+            searchGroup.innerHTML = `
+                <input type="text" id="searchInput" placeholder="🔍"
+                    style="width: 70px; font-size: 10px; padding: 2px 4px; border: 1px solid #ccc; border-radius: 3px;">
+                <button id="searchCaseBtn" class="debug-toggle-btn" style="padding: 2px 4px; font-size: 9px; background: #6c757d;">Aa</button>
+                <button id="searchWordBtn" class="debug-toggle-btn" style="padding: 2px 4px; font-size: 9px; background: #6c757d;">ab</button>
+                <button id="searchPrevBtn" class="debug-toggle-btn" style="padding: 2px 6px; font-size: 12px;">▲</button>
+                <button id="searchNextBtn" class="debug-toggle-btn" style="padding: 2px 6px; font-size: 12px;">▼</button>
+                <button id="searchCancelBtn" class="debug-toggle-btn" style="padding: 2px 4px; font-size: 10px;">✕</button>
+                <span id="searchProgress" style="font-size: 9px; color: #495057; width: 40px; margin-left: 2px; font-family: monospace; display: inline-block; text-align: right;"></span>
+                <button id="jumpToCursorBtn" class="debug-toggle-btn" style="padding: 2px 4px; font-size: 10px;" title="Jump to cursor">📍</button>
+                <button id="cursorClearBtn" class="debug-toggle-btn" style="padding: 2px 4px; font-size: 10px;" title="Clear cursor">↺</button>
+            `;
+
+            // Insert before debug-buttons
+            debugHeader.insertBefore(searchGroup, debugButtons);
+
+            const searchInput = document.getElementById('searchInput');
+            const caseBtn = document.getElementById('searchCaseBtn');
+            const wordBtn = document.getElementById('searchWordBtn');
+            const prevBtn = document.getElementById('searchPrevBtn');
+            const nextBtn = document.getElementById('searchNextBtn');
+            const cancelBtn = document.getElementById('searchCancelBtn');
+            const jumpToCursorBtn = document.getElementById('jumpToCursorBtn');
+            const cursorClearBtn = document.getElementById('cursorClearBtn');
+
+            if (!searchInput) return;
+
+            // Ctrl+F handler
+            document.addEventListener('keydown', (e) => {
+                if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
+                    e.preventDefault();
+                    searchInput.focus();
+                    searchInput.select();
+                }
+                // Escape to clear search
+                if (e.key === 'Escape' && document.activeElement === searchInput) {
+                    cancelSearch();
+                    clearSearch();
+                    searchInput.blur();
+                    showTemporaryMessage('Search cancelled', 'search');
+                    // Re-enable buttons
+                    searchInput.disabled = false;
+                    cancelBtn.disabled = false;
+                    wordBtn.disabled = false;
+                    prevBtn.disabled = false;
+                    nextBtn.disabled = false;
+                }
+            });
+
+            // Expand on focus, shrink on blur
+            searchInput.addEventListener('focus', () => {
+                searchInput.style.width = '100px';
+                searchInput.placeholder = 'Search...';
+            });
+
+            searchInput.addEventListener('blur', () => {
+                if (!searchInput.value) {
+                    searchInput.style.width = '70px';
+                    searchInput.placeholder = '🔍';
+                }
+            });
+
+            // Enter key triggers search forward
+            searchInput.addEventListener('keypress', (e) => {
+                if (e.key === 'Enter') {
+                    resetSearch();  // Reset on new search
+                    performSearch('next');
+                }
+            });
+
+            caseBtn.addEventListener('click', () => {
+                resetSearch();
+                searchCaseSensitive = !searchCaseSensitive;
+                caseBtn.style.background = searchCaseSensitive ? '#28a745' : '#6c757d';
+                showTemporaryMessage(`Case ${searchCaseSensitive ? 'ON' : 'OFF'}`, 'search');
+            });
+
+            wordBtn.addEventListener('click', () => {
+                resetSearch();
+                searchWholeWord = !searchWholeWord;
+                wordBtn.style.background = searchWholeWord ? '#28a745' : '#6c757d';
+                showTemporaryMessage(`Whole word ${searchWholeWord ? 'ON' : 'OFF'}`, 'search');
+            });
+
+            // Navigation buttons
+            prevBtn.addEventListener('click', () => performSearch('prev'));
+            nextBtn.addEventListener('click', () => performSearch('next'));
+
+            // Cancel button - cancels search and returns buttons to normal
+            cancelBtn.addEventListener('click', async () => {
+                console.log('Cancel button clicked');
+                console.log('activeSearchSession:', activeSearchSession);
+
+                // Cancel the backend search session
+                if (activeSearchSession) {
+                    console.log('Sending cancel request...');
+                    try {
+                        const response = await fetch('/api/search', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                action: 'cancel',
+                                session_id: activeSearchSession
+                            })
+                        });
+                        console.log('Cancel response:', response);
+                    } catch (e) {
+                        console.error('Cancel failed:', e);
+                    }
+                    activeSearchSession = null;
+                }
+
+                if (isSearching) {
+                    currentSearchAborted = true;
+                }
+
+                // Reset search state BUT KEEP CURSOR
+                isSearching = false;
+                console.log('isSearching set to false');
+
+                // Re-enable buttons
+                searchInput.disabled = false;
+                caseBtn.disabled = false;
+                wordBtn.disabled = false;
+                prevBtn.disabled = false;
+                nextBtn.disabled = false;
+
+                // Keep the search term and cursor
+                searchInput.blur();
+
+                showTemporaryMessage('Search cancelled', 'search');
+                console.log('Cancel complete');
+            });
+
+            // Jump to cursor button
+            jumpToCursorBtn.addEventListener('click', () => {
+                if (searchCursor !== null) {
+                    scrollToTimestamp(searchCursor);
+                    showTemporaryMessage(`Jumped to cursor at ${new Date(searchCursor * 1000).toLocaleTimeString()}`, 'search');
+                } else {
+                    showTemporaryMessage('No cursor set', 'info');
+                }
+            });
+
+            // Cursor clear button
+            cursorClearBtn.addEventListener('click', () => {
+                searchCursor = null;
+                lastSearchDirection = null;
+                updateCursorHighlight();
+                showTemporaryMessage('Cursor cleared - next search will start from most recent log', 'search');
+            });
+
+            console.log('Search UI initialized with cancellation support');
         }
 
         // Toggle auto-scroll lock
@@ -6372,6 +7757,7 @@ class WebController(Controller):
         function initDebugWindowSystem() {
             setupDebugWindow();
             initDebugWindow();
+            initSearchUI();
         }
 
         // ============ GRAPH VIEW CODE ============
@@ -7020,10 +8406,10 @@ class WebController(Controller):
         // Set up modal close handlers
         function setupMinuteModal() {
             const modal = document.getElementById('minuteModal');
-            const closeBtn = document.querySelector('.minute-modal-close');
+            const cancelBtn = document.querySelector('.minute-modal-close');
 
-            if (closeBtn) {
-                closeBtn.onclick = function() {
+            if (cancelBtn) {
+                cancelBtn.onclick = function() {
                     modal.style.display = 'none';
                 };
             }
@@ -7417,8 +8803,8 @@ class WebController(Controller):
             }
 
             const sortedNodes = Object.entries(seriesData).sort((a, b) => {
-                const lastOctetA = parseInt(a[0].split('.').pop());
-                const lastOctetB = parseInt(b[0].split('.').pop());
+                const lastOctetA = parseInt(a[0].split('.').pop(), 10);
+                const lastOctetB = parseInt(b[0].split('.').pop(), 10);
                 return lastOctetA - lastOctetB;
             });
 
@@ -7945,7 +9331,7 @@ class WebController(Controller):
             selector.value = currentTimeRange.hours;
 
             selector.onchange = () => {
-                const hours = parseInt(selector.value);
+                const hours = parseInt(selector.value, 10);
                 const selected = TIME_RANGES.find(r => r.hours === hours);
                 if (selected) {
                     currentTimeRange = selected;

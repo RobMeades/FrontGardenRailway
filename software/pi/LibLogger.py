@@ -29,6 +29,9 @@ MODES:
 - Journal-only mode (no --db-path): Logs go ONLY to journal.
   No log_id coordination needed - simply omit the field.
 
+CRITICAL: In database mode, log_id is ALWAYS a sequential integer from the
+database. NO FALLBACK IDS. If a log_id cannot be obtained, an exception is raised.
+
 MULTI-WRITER COMPATIBILITY:
 - Uses BEGIN DEFERRED (not IMMEDIATE) for cooperative locking
 - WAL mode enabled for concurrent reads
@@ -89,8 +92,8 @@ class LibLogger:
             # Database mode only attributes (only used if db_path is set)
             self.log_id_buffer = []
             self.log_id_lock = threading.Lock()
-            self.batch_size = 100  # Reserve more IDs at once
-            self.refill_threshold = 50  # Refill when 50 or fewer remain (was 25)
+            self.batch_size = 100
+            self.refill_threshold = 50
             self._refill_in_progress = False
 
             # Thread-local storage for database connections
@@ -113,7 +116,7 @@ class LibLogger:
             print(f"[LibLogger] Database mode enabled: {self.db_path}")
             self._init_tables()
             self._start_writer_thread()
-            self._refill_log_id_buffer_sync()  # Runs in main thread
+            self._refill_log_id_buffer_sync()  # Runs in main thread, must succeed
             print(f"[LibLogger] Database mode ready with {len(self.log_id_buffer)} reserved IDs")
         else:
             # Journal-only mode
@@ -148,12 +151,13 @@ class LibLogger:
 
     def _refill_log_id_buffer_sync(self):
         """
-        Synchronously reserve a batch of log_ids (database mode only).
+        Synchronously reserve a batch of log_ids from the database sequence.
         Uses a global lock to serialize reservations across threads.
-        Only ONE thread can ever be in this function at a time.
+
+        Raises RuntimeError if IDs cannot be reserved.
         """
         if self.db_path is None:
-            return
+            raise RuntimeError("Cannot refill log_ids in journal-only mode")
 
         # Serialize all ID reservations - only one thread at a time
         with self._reserve_lock:
@@ -166,7 +170,8 @@ class LibLogger:
             conn = self._get_connection()
             cursor = conn.cursor()
 
-            for attempt in range(5):
+            # Retry with exponential backoff - but NEVER fall back to fake IDs
+            for attempt in range(10):  # 10 attempts, ~51 seconds total
                 try:
                     cursor.execute("""
                         UPDATE global_sequence
@@ -187,32 +192,32 @@ class LibLogger:
                         print(f"[LibLogger] Reserved log_ids {start}-{end} (buffer now: {buffer_len})")
                         return
                     else:
+                        # Should never happen - insert initial row and retry
                         cursor.execute("INSERT INTO global_sequence (id, next_seq) VALUES (1, 1)")
                         continue
 
                 except sqlite3.OperationalError as e:
-                    if "locked" in str(e) and attempt < 4:
-                        wait_time = 0.05 * (2 ** attempt)  # 50ms, 100ms, 200ms, 400ms
-                        print(f"[LibLogger] Database locked, retrying in {wait_time:.3f}s (attempt {attempt+1}/5)")
+                    if "locked" in str(e) and attempt < 9:
+                        wait_time = 0.05 * (2 ** attempt)  # 50ms, 100ms, 200ms, 400ms, 800ms, 1.6s, 3.2s, 6.4s, 12.8s
+                        print(f"[LibLogger] Database locked, retrying in {wait_time:.3f}s (attempt {attempt+1}/10)")
                         time.sleep(wait_time)
                         continue
-                    print(f"[LibLogger] Failed to reserve log_ids: {e}")
-                    # Fall back to time-based IDs
-                    with self.log_id_lock:
-                        fallback_id = int(time.time() * 1000000) + (hash(threading.current_thread()) % 10000)
-                        self.log_id_buffer.append(fallback_id)
-                    return
+                    # Failed to get lock after all retries
+                    raise RuntimeError(f"Failed to reserve log_ids after {attempt+1} attempts: {e}")
                 except Exception as e:
-                    print(f"[LibLogger] Failed to reserve log_ids: {e}")
-                    with self.log_id_lock:
-                        fallback_id = int(time.time() * 1000000) + (hash(threading.current_thread()) % 10000)
-                        self.log_id_buffer.append(fallback_id)
-                    return
+                    raise RuntimeError(f"Failed to reserve log_ids: {e}")
+
+            # Should never get here
+            raise RuntimeError("Failed to reserve log_ids after maximum retries")
 
     def _refill_log_id_buffer_sync_wrapper(self):
         """Wrapper that ensures cleanup of thread tracking and connection."""
         try:
             self._refill_log_id_buffer_sync()
+        except Exception as e:
+            print(f"[LibLogger] Refill thread failed: {e}")
+            # Re-raise to make thread crash visible
+            raise
         finally:
             # Remove from tracking
             with self._refill_threads_lock:
@@ -227,22 +232,21 @@ class LibLogger:
 
     def _ensure_log_id_buffer(self):
         """
-        Ensure buffer has IDs available (database mode only).
-        Returns True if IDs available.
-        Uses strict coordination to prevent thundering herd.
+        Ensure buffer has IDs available.
+        Raises RuntimeError if IDs cannot be obtained.
         """
         if self.db_path is None:
-            return False
+            raise RuntimeError("Cannot get log_id in journal-only mode")
 
         # Fast path - if we have enough, return immediately
         with self.log_id_lock:
             if len(self.log_id_buffer) > self.refill_threshold:
-                return True
+                return
 
         # Need more IDs. Try to start a background refill if not already in progress
         with self.log_id_lock:
             if self._refill_in_progress:
-                # Another thread is already refilling, wait a moment
+                # Another thread is already refilling, wait for it
                 pass
             elif len(self.log_id_buffer) > 0:
                 # Buffer is low but not empty - start async refill
@@ -255,21 +259,22 @@ class LibLogger:
                 with self._refill_threads_lock:
                     self._refill_threads.append(refill_thread)
                 refill_thread.start()
-                return True
+                return
             else:
                 # Buffer is EMPTY - need synchronous refill
                 pass
 
         # Buffer is empty - do synchronous refill (this blocks)
-        # But ensure only ONE thread does this by checking again under lock
         with self.log_id_lock:
+            # Double-check buffer after potential lock wait
             if len(self.log_id_buffer) > 0:
-                return True
+                return
             # Double-check refill flag
             if self._refill_in_progress:
                 # Wait for async refill to complete
                 time.sleep(0.01)
-                return len(self.log_id_buffer) > 0
+                if len(self.log_id_buffer) > 0:
+                    return
             self._refill_in_progress = True
 
         try:
@@ -279,16 +284,18 @@ class LibLogger:
             with self.log_id_lock:
                 self._refill_in_progress = False
 
+        # After refill, verify we have IDs
         with self.log_id_lock:
-            return len(self.log_id_buffer) > 0
+            if not self.log_id_buffer:
+                raise RuntimeError("Failed to refill log_id buffer - database sequence unavailable")
 
-    def _get_next_log_id(self) -> Optional[int]:
+    def _get_next_log_id(self) -> int:
         """
-        Get next log_id (database mode only).
-        Returns None if in journal-only mode.
+        Get next log_id. ALWAYS returns a valid sequential ID.
+        Raises RuntimeError if no IDs available.
         """
         if self.db_path is None:
-            return None
+            raise RuntimeError("Cannot get log_id in journal-only mode")
 
         self._ensure_log_id_buffer()
 
@@ -296,9 +303,7 @@ class LibLogger:
             if self.log_id_buffer:
                 return self.log_id_buffer.pop(0)
             else:
-                # Should never get here, but just in case
-                print(f"[LibLogger] CRITICAL: No log_ids available, using time-based ID")
-                return int(time.time() * 1000000) + (hash(threading.current_thread()) % 10000)
+                raise RuntimeError("No log_ids available - database sequence is broken")
 
     def _start_writer_thread(self):
         """Start the single database writer thread (database mode only)."""
@@ -324,7 +329,7 @@ class LibLogger:
 
                 # Settings for your traffic pattern
                 MAX_BATCH_SIZE = 50      # Flush when we reach this many
-                FLUSH_INTERVAL = 1.0     # Flush every 1 second (was 0.5) to reduce tiny batches
+                FLUSH_INTERVAL = 1.0     # Flush every 1 second
 
                 while not self._stop_writer.is_set():
                     try:
@@ -381,7 +386,7 @@ class LibLogger:
                             batch_count = 0
 
                     except queue.Empty:
-                        # No new logs - flush anything pending immediately (no waiting)
+                        # No new logs - flush anything pending immediately
                         if batch_count > 0:
                             try:
                                 conn.execute("BEGIN")
@@ -507,18 +512,20 @@ class LibLogger:
             message: str,
             log_level: int = 1,
             log_tag: str = None,
-            message_type: str = "LOG") -> Optional[int]:
+            message_type: str = "LOG") -> int:
         """
         Write a log entry.
 
         Returns:
-            - Database mode: log_id (always int)
-            - Journal-only mode: None
+            log_id (always int in database mode)
+
+        Raises:
+            RuntimeError: If in database mode and log_id cannot be obtained
         """
         if not self._initialized:
             raise RuntimeError("LibLogger not initialized. Call init() first.")
 
-        # Get log_id only if in database mode
+        # Get log_id - will raise RuntimeError if unavailable
         log_id = self._get_next_log_id() if self.db_path is not None else None
 
         # Database write (only if in database mode)
@@ -544,9 +551,10 @@ class LibLogger:
             try:
                 self.write_queue.put_nowait((query, params))
             except queue.Full:
-                print(f"[LibLogger] CRITICAL: Queue full, log_id {log_id} will be journal-only")
+                # Queue full - this is a critical error
+                raise RuntimeError(f"Log queue full (50000), cannot accept log_id {log_id}")
 
-        # Journal write (always)
+        # Journal write (always, but only if we have a log_id)
         if HAS_SYSTEMD:
             extra_fields = {
                 'SYSLOG_IDENTIFIER': 'fgr-log-server',
@@ -614,7 +622,6 @@ class LibLogger:
 
             return [dict(row) for row in cursor.fetchall()]
         finally:
-            # Don't close - keep for this thread
             pass
 
     def get_logs_by_timestamp(self, timestamp: float,
