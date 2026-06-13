@@ -154,7 +154,7 @@ For isolation, the Raspberry Pi should be installed on a VLAN of the home networ
 - Now, assuming port 8060 is open, `log_server.py` can provide links that allow the local script `crash_decoder.py` to decode crash dumps (unfortunately there is no pre-compiled version of the Espressif tools for the Raspberry Pi Zero).  To enable this, `sudo nano /lib/systemd/system/log_server.service` and change the `ExecStart` line to something like:
 
   ```
-  ExecStart=python log_server.py --web-port 8060 --web-bind 10.10.2.10 --port 5001 --db-path /mnt/ssd/logs.db --node-cfg ../esp32/nodes_esp32_deploy.json --staging /mnt/ssd/fw
+  ExecStart=python log_server.py --web-port 8060 --web-bind 10.10.2.10 --port 5001 --db-path /mnt/ssd/logs.db --node-cfg ../esp32/nodes_esp32_deploy.json
   ```
 
   ...followed by `sudo systemctl deamon-reload`, `sudo systemctl restart log_server`.  There are then several details steps required to set up `crash_decoder.py`: see the top of that file for what they are, and, finally, set `crash_decoder.py` to run as a service on the local PC with `sudo nano /lib/systemd/system/fgr_crash_decoder.service` with the following contents:

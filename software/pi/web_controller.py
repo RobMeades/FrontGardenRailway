@@ -795,23 +795,49 @@ class WebController(Controller):
         except Exception as e:
             self._admin_log(f"Error saving node grid layout: {e}")
 
-    def _add_log(self, prefix: str, message: str, journal_ts: float = None):
-        """Add a log message to the buffer with automatic trimming"""
+    def _format_log_for_display(self, timestamp_str: str, source: str, node_ip: str,
+                                log_level: int, message: str) -> str:
+        """
+        Format a log message for display.
+        THIS IS THE ONLY PLACE THAT SHOULD FORMAT LOGS FOR DISPLAY.
+        """
+        if source == 'CTRL':
+            return f"[{timestamp_str}] [CTRL] {message}"
+        elif source == 'ADMIN':
+            return f"[{timestamp_str}] [ADMIN] {message}"
+        elif source == 'NODE':
+            ip_part = f" [{node_ip}]" if node_ip else ""
+            # Message already contains the level letter (D/I/W/E) from LibLogger
+            return f"[{timestamp_str}] [NODE]{ip_part} {message}"
+        else:
+            # Fallback for unknown source
+            return f"[{timestamp_str}] {message}"
+
+    def _add_log_raw(self, source: str, node_ip: str, log_level: int,
+                    message: str, journal_ts: float = None):
+        """Add a log message - THIS IS THE ONLY FORMATTING LOCATION"""
+
+        # Generate timestamp string
         if journal_ts:
             dt = datetime.fromtimestamp(journal_ts)
-            timestamp = dt.strftime('%d/%m %H:%M:%S')
+            timestamp_str = dt.strftime('%d/%m %H:%M:%S')
         else:
-            timestamp = datetime.now().strftime('%d/%m %H:%M:%S')
+            timestamp_str = datetime.now().strftime('%d/%m %H:%M:%S')
 
+        # FORMAT HERE - single source of truth
+        formatted_message = self._format_log_for_display(
+            timestamp_str, source, node_ip, log_level, message
+        )
+
+        # Apply linkification (URL detection)
+        linkified_message = linkify_log_line(formatted_message)
+
+        # Store with components preserved for filtering
         version = self._log_counter
         self._log_counter += 1
-        linkified_message = linkify_log_line(message)
-        formatted_message = f"[{timestamp}] {prefix} {linkified_message}"
+        self.log_entries.append((version, linkified_message, journal_ts, source))
 
-        # Store with timestamp for streaming
-        self.log_entries.append((version, formatted_message, journal_ts))
-
-        # Trim if needed
+        # Trim
         while len(self.log_entries) > self.max_log_entries:
             self.log_entries.pop(0)
 
@@ -899,114 +925,74 @@ class WebController(Controller):
             j.seek_tail()
             j.get_previous(100)
 
-            backfill_count = 0
             for entry in j:
                 if not self.journal_running:
                     break
                 message = entry.get('MESSAGE', '')
                 if message:
                     message = message.rstrip()
-                    backfill_count += 1
 
                     journal_ts = entry.get('__REALTIME_TIMESTAMP')
                     journal_ts_value = journal_ts.timestamp() if journal_ts else None
 
-                    # Get custom fields (may be missing for old logs)
+                    # Get custom fields
                     source = entry.get('FGR_SOURCE', '')
                     node_ip = entry.get('FGR_NODE_IP', '')
+                    log_level = entry.get('FGR_LOG_LEVEL', None)
+                    if log_level is not None:
+                        try:
+                            log_level = int(log_level)
+                        except (ValueError, TypeError):
+                            log_level = None
 
-                    # Fallback for old logs: determine source from message content
-                    if not source:
-                        if message.startswith('[CTRL]'):
-                            source = 'CTRL'
-                        elif message.startswith('[ADMIN]'):
-                            source = 'ADMIN'
-                        else:
-                            source = 'NODE'
-                            # For node logs, extract IP from message (old format)
-                            if not node_ip:
-                                node_match = re.search(r'^\[([0-9.]+)\]', message)
-                                if node_match:
-                                    node_ip = node_match.group(1)
-
-                    # Determine prefix based on source (for display only)
-                    if source == 'CTRL':
-                        prefix = '[CTRL]'
-                    elif source == 'ADMIN':
-                        prefix = '[ADMIN]'
-                    else:
-                        prefix = '[NODE]'
-
-                    # Parse metrics from node logs (use node_ip from custom field or fallback)
+                    # Parse metrics from node logs
                     if source == 'NODE' and node_ip:
                         metrics_result = self._parse_metrics_from_log(message, node_ip)
                         if metrics_result:
                             node_ip, metrics_data = metrics_result
                             self._update_node_metrics(node_ip, metrics_data)
 
-                    self._add_log(prefix, message, journal_ts_value)
+                    # Store raw components - let _add_log_raw handle formatting
+                    self._add_log_raw(source, node_ip, log_level, message, journal_ts_value)
 
-            # Now follow new entries using the cursor
+            # Now follow new entries
             if last_cursor:
                 j.seek_cursor(last_cursor)
                 j.get_next(1)
 
-            # Use a short timeout to allow checking the running flag frequently
-            append_count = 0
             while self.journal_running:
-                # Use a very short timeout (100ms) to be responsive to stop signal
-                # wait() takes microseconds: 100,000 microseconds = 0.1 seconds
-                ret = j.wait(100000)  # 0.1 second timeout
+                ret = j.wait(100000)
 
                 if not self.journal_running:
                     break
 
-                if ret == journal.APPEND:  # New entries available
+                if ret == journal.APPEND:
                     for entry in j:
                         if not self.journal_running:
                             break
                         message = entry.get('MESSAGE', '')
                         if message:
                             message = message.rstrip()
-                            append_count += 1
 
-                            journal_ts = entry.get('__REALTIME_TIMESTAMP')
-                            journal_ts_value = journal_ts.timestamp() if journal_ts else None
+                        journal_ts = entry.get('__REALTIME_TIMESTAMP')
+                        journal_ts_value = journal_ts.timestamp() if journal_ts else None
 
-                            # Get custom fields (may be missing for old logs)
-                            source = entry.get('FGR_SOURCE', '')
-                            node_ip = entry.get('FGR_NODE_IP', '')
+                        source = entry.get('FGR_SOURCE', '')
+                        node_ip = entry.get('FGR_NODE_IP', '')
+                        log_level = entry.get('FGR_LOG_LEVEL', None)
+                        if log_level is not None:
+                            try:
+                                log_level = int(log_level)
+                            except (ValueError, TypeError):
+                                log_level = None
 
-                            # Fallback for old logs: determine source from message content
-                            if not source:
-                                if message.startswith('[CTRL]'):
-                                    source = 'CTRL'
-                                elif message.startswith('[ADMIN]'):
-                                    source = 'ADMIN'
-                                else:
-                                    source = 'NODE'
-                                    # For node logs, extract IP from message (old format)
-                                    if not node_ip:
-                                        node_match = re.search(r'^\[([0-9.]+)\]', message)
-                                        if node_match:
-                                            node_ip = node_match.group(1)
+                        if source == 'NODE' and node_ip:
+                            metrics_result = self._parse_metrics_from_log(message, node_ip)
+                            if metrics_result:
+                                node_ip, metrics_data = metrics_result
+                                self._update_node_metrics(node_ip, metrics_data)
 
-                            # Determine prefix based on source (for display only)
-                            if source == 'CTRL':
-                                prefix = '[CTRL]'
-                            elif source == 'ADMIN':
-                                prefix = '[ADMIN]'
-                            else:
-                                prefix = '[NODE]'
-
-                            # Parse metrics from node logs (use node_ip from custom field or fallback)
-                            if source == 'NODE' and node_ip:
-                                metrics_result = self._parse_metrics_from_log(message, node_ip)
-                                if metrics_result:
-                                    node_ip, metrics_data = metrics_result
-                                    self._update_node_metrics(node_ip, metrics_data)
-
-                            self._add_log(prefix, message, journal_ts_value)
+                        self._add_log_raw(source, node_ip, log_level, message, journal_ts_value)
 
         except Exception as e:
             self._admin_log(f"Journal reader error: {e}")
@@ -1048,10 +1034,10 @@ class WebController(Controller):
         if 'metrics:' not in log_line:
             return None
 
-        # Use provided node_ip if available (from custom field), otherwise parse from log_line
+        # Use provided node_ip if available
         if not node_ip:
-            # Extract node IP - log line starts with [IP]
-            node_match = re.search(r'^\[([0-9.]+)\]', log_line)
+            # Extract node IP from [NODE] [IP] format
+            node_match = re.search(r'\[NODE\]\s+\[([0-9.]+)\]', log_line)
             if not node_match:
                 return None
             node_ip = node_match.group(1)
@@ -1062,7 +1048,7 @@ class WebController(Controller):
             return None
 
         # Get everything after 'metrics:'
-        after_metrics = log_line[metrics_pos + 8:]  # Skip 'metrics:'
+        after_metrics = log_line[metrics_pos + 8:]
 
         # Find the first '{'
         json_start = after_metrics.find('{')
@@ -1076,7 +1062,7 @@ class WebController(Controller):
         try:
             metrics_data = json.loads(json_str)
             return (node_ip, metrics_data)
-        except json.JSONDecodeError as e:
+        except json.JSONDecodeError:
             return None
 
     def _check_metric_importance(self, key: str, data: dict, all_metrics: dict) -> bool:
@@ -1706,29 +1692,38 @@ class WebController(Controller):
         try:
             await response.write(f"event: reset\ndata: reset\n\n".encode())
         except (ConnectionResetError, BrokenPipeError, RuntimeError):
-            # Client disconnected before we even started
             return response
 
         try:
             while self.web_running:
-                # Only send if we have new logs since last_version
                 if self.log_entries and self.log_entries[-1][0] > last_version:
-                    # Find all new logs
                     new_logs = []
-                    for version, msg, ts in self.log_entries:
+                    for entry in self.log_entries:
+                        version = entry[0]
                         if version > last_version:
-                            new_logs.append({"message": msg, "timestamp": ts})
+                            source = entry[3] if len(entry) > 3 else None
+                            # Skip ADMIN logs - they shouldn't appear in debug window
+                            if source != 'ADMIN':
+                                # Extract log_id from the formatted message if present
+                                log_id = 0
+                                log_id_match = re.search(r'\[LOG_ID=(\d+)\]', entry[1])
+                                if log_id_match:
+                                    log_id = int(log_id_match.group(1))
+
+                                new_logs.append({
+                                    "message": entry[1],
+                                    "timestamp": entry[2],
+                                    "source": source,
+                                    "log_id": log_id
+                                })
                             last_version = version
                     if new_logs:
                         try:
                             await response.write(f"data: {json.dumps(new_logs)}\n\n".encode())
                         except (ConnectionResetError, BrokenPipeError, RuntimeError):
-                            # Client disconnected - exit cleanly
                             break
-
                 await asyncio.sleep(0.5)
         except (ConnectionResetError, BrokenPipeError, RuntimeError):
-            # Client disconnected - normal, don't log
             pass
         except Exception as e:
             self._admin_log(f"Log stream error: {e}")
@@ -1808,26 +1803,36 @@ class WebController(Controller):
             ts = entry.get('__REALTIME_TIMESTAMP')
             if ts:
                 dt = datetime.fromtimestamp(ts.timestamp())
-                time_str = dt.strftime('%d/%m %H:%M:%S')
+                timestamp_str = dt.strftime('%d/%m %H:%M:%S')
             else:
-                time_str = '00:00:00'
+                timestamp_str = '00:00:00'
 
-            # Get custom fields (these are the source of truth)
-            log_id_str = entry.get('FGR_LOG_ID', '0')
+            # Get custom fields
+            log_id = entry.get('FGR_LOG_ID', 0)
             try:
-                log_id = int(log_id_str) if log_id_str else 0
+                log_id = int(log_id) if log_id else 0
             except ValueError:
                 log_id = 0
 
             source = entry.get('FGR_SOURCE', '')
             node_ip = entry.get('FGR_NODE_IP', '')
+            log_level = entry.get('FGR_LOG_LEVEL', None)
+            if log_level is not None:
+                try:
+                    log_level = int(log_level)
+                except (ValueError, TypeError):
+                    log_level = None
+            raw_message = entry.get('MESSAGE', '')
 
-            # Get the message (already correctly formatted by LibLogger)
-            message = entry.get('MESSAGE', '')
-            linkify_message = linkify_log_line(message)
+            # USE THE SAME FORMATTING FUNCTION
+            formatted_message = self._format_log_for_display(
+                timestamp_str, source, node_ip, log_level, raw_message
+            )
+
+            linkified_message = linkify_log_line(formatted_message)
 
             return {
-                'message': f"[{time_str}] {linkify_message}",
+                'message': linkified_message,
                 'timestamp': ts.timestamp() if ts else None,
                 'log_id': log_id,
                 'source': source,
@@ -1846,7 +1851,7 @@ class WebController(Controller):
             # Collect AFTER logs first (cursor moves forward)
             after_logs = []
             if after > 0 and center:
-                entry = j.get_next()  # First after center
+                entry = j.get_next()
                 while entry and len(after_logs) < after:
                     after_logs.append(_format_log_entry(entry))
                     entry = j.get_next()
@@ -1854,8 +1859,8 @@ class WebController(Controller):
             # Reposition to center for BEFORE logs
             j.seek_realtime(target_dt)
             j.add_match(SYSLOG_IDENTIFIER='fgr-log-server')
-            j.get_next()  # Move to center
-            entry = j.get_previous()  # Move to log before center
+            j.get_next()
+            entry = j.get_previous()
 
             before_logs = []
             if before > 0 and center:
@@ -5106,7 +5111,8 @@ class WebController(Controller):
 
         // Parse node IP last octet from log line
         function extractNodeLastOctet(logLine) {
-            const bracketMatch = logLine.match(/\\[NODE\\]\\s+\\[([^\\]]+)\\]/);
+            // Match [NODE] [10.10.3.1] format
+            const bracketMatch = logLine.match(/\\[NODE\\]\\s+\\[([0-9.]+)\\]/);
             if (bracketMatch && bracketMatch[1]) {
                 const ipParts = bracketMatch[1].split('.');
                 if (ipParts.length === 4) {
@@ -5116,11 +5122,12 @@ class WebController(Controller):
             return null;
         }
 
-        // Extract log level from NODE log line
         function extractLogLevel(logLine) {
             if (!logLine.includes('[NODE]')) return null;
 
-            const match = logLine.match(/\\[NODE\\].*?\\[[\\d.]+\\]\\s*([DIWE])\\s/);
+            // Match [NODE] [IP] D/I/W/E (level is the first word after the IP)
+            // Format: "[timestamp] [NODE] [10.10.3.5] I (12345) message..."
+            const match = logLine.match(/\\[NODE\\]\\s+\\[[\\d.]+\\]\\s+([DIWE])\\s/);
             if (match && match[1]) {
                 const levelChar = match[1];
                 if (levelChar === 'D') return 0;  // DEBUG
@@ -5132,6 +5139,11 @@ class WebController(Controller):
         }
 
         function shouldDisplayLog(logLine) {
+            // ADMIN logs should NEVER appear in debug window
+            if (logLine.includes('[ADMIN]')) {
+                return false;
+            }
+
             const isCtrl = logLine.includes('[CTRL]');
             const isNode = logLine.includes('[NODE]');
 
@@ -5149,7 +5161,7 @@ class WebController(Controller):
             }
 
             // Minimum log level filter (NODE logs only)
-            if (isNode && filterMinLogLevel < 4) {  // 4 = OFF
+            if (isNode && filterMinLogLevel < 4) {
                 const logLevel = extractLogLevel(logLine);
                 if (logLevel !== null && logLevel < filterMinLogLevel) {
                     return false;
@@ -6571,30 +6583,42 @@ class WebController(Controller):
         }
 
         function addNewLog(logData) {
-            // Handle both old string format and new object format
-            let message, timestamp;
+            let message, timestamp, source, log_id;
             if (typeof logData === 'string') {
                 message = logData;
                 timestamp = Date.now() / 1000;
+                source = '';
+                log_id = 0;
             } else {
                 message = logData.message;
                 timestamp = logData.timestamp;
+                source = logData.source || '';
+                log_id = logData.log_id || 0;
             }
 
-            // If timestamp is null/undefined (CTRL logs without journal time), try to parse from message or use current time
+            // Skip ADMIN logs entirely
+            if (source === 'ADMIN' || message.includes('[ADMIN]')) {
+                return;
+            }
+
+            // If timestamp is null/undefined, try to parse from message
             if (!timestamp) {
-                const timeMatch = message.match(/\\[(\\d{2}:\\d{2}:\\d{2})\\]/);
+                const timeMatch = message.match(/^\\[(\\d{2}\\/\\d{2}\\s+\\d{2}:\\d{2}:\\d{2})\\]/);
                 if (timeMatch) {
-                    const [h, m, s] = timeMatch[1].split(':').map(Number);
+                    const timeStr = timeMatch[1];
+                    const [datePart, timePart] = timeStr.split(' ');
+                    const [day, month] = datePart.split('/');
+                    const [hours, minutes, seconds] = timePart.split(':');
                     const now = new Date();
-                    now.setHours(h, m, s, 0);
-                    timestamp = now.getTime() / 1000;
+                    const parsedDate = new Date(now.getFullYear(), parseInt(month) - 1, parseInt(day),
+                                                parseInt(hours), parseInt(minutes), parseInt(seconds));
+                    timestamp = parsedDate.getTime() / 1000;
                 } else {
                     timestamp = Date.now() / 1000;
                 }
             }
 
-            // Check if we already have this exact message (prevent duplicates)
+            // Check for duplicate
             const isDuplicate = logBuffer.some(log =>
                 log.message === message && Math.abs(log.timestamp - timestamp) < 2
             );
@@ -6602,31 +6626,27 @@ class WebController(Controller):
                 return;
             }
 
-            // Update maxNormalGapSeconds by comparing with the last log in buffer
+            // Update maxNormalGapSeconds
             if (logBuffer.length > 0) {
                 const lastTimestamp = logBuffer[logBuffer.length - 1].timestamp;
                 updateMaxNormalGap(timestamp, lastTimestamp);
             }
 
-            // Extract log_id from message
-            const log_id = extractLogIdFromMessage(message);
-
             // Add to buffer
             logBuffer.push({
                 timestamp: timestamp,
                 message: message,
-                log_id: log_id
+                log_id: log_id,
+                source: source
             });
 
-            // Sort buffer by timestamp to maintain chronological order
+            // Sort and trim
             logBuffer.sort((a, b) => a.timestamp - b.timestamp);
-
-            // Trim buffer if too large (keep last 2000)
             while (logBuffer.length > 2000) {
                 logBuffer.shift();
             }
 
-            // Add to DOM efficiently (append only)
+            // Add to DOM if it passes filters
             if (shouldDisplayLog(message)) {
                 const shouldScroll = !autoScrollLocked && isAtBottom;
                 const className = message.includes('[CTRL]') ? 'log-ctrl' : 'log-node';

@@ -14,709 +14,509 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Written by DeepSeek :-)
-
 """
-LibLogger - Shared logging module for FGR system.
+FGR Log Server - Receives logs from nodes via FGR protocol.
 
-Provides a single source of truth for writing logs to both SQLite database
-and systemd journal, with log_id as the universal identifier.
-
-MODES:
-- Database mode (--db-path provided): Logs go to both database and journal.
-  log_ids are reserved from database sequence for correlation.
-
-- Journal-only mode (no --db-path): Logs go ONLY to journal.
-  No log_id coordination needed - simply omit the field.
-
-MULTI-WRITER COMPATIBILITY:
-- Uses BEGIN DEFERRED (not IMMEDIATE) for cooperative locking
-- WAL mode enabled for concurrent reads
-- Short transactions (50 logs or 1 second)
-- Retries on lock conflicts
+This script listens for FGR protocol log messages from nodes, writes
+them to both SQLite database and systemd journal using LibLogger,
+and provides crash dump capture and web serving functionality.
 """
 
-import sqlite3
-import threading
+import sys
+import os
+import socket
+import argparse
+import signal
 import time
-import queue
-from datetime import datetime
+import threading
+import base64
+import json
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Optional, Dict, Tuple
+from datetime import datetime, timezone
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import urlparse, parse_qs
 
-# Import systemd journal with fallback
+# Add the protocol directory to Python path
+script_dir = Path(__file__).resolve().parent
+protocol_dir = script_dir.parent / 'protocol'
+sys.path.insert(0, str(protocol_dir))
+
+# Import the generated FGR protocol module
 try:
-    import systemd.journal
-    HAS_SYSTEMD = True
-except ImportError:
-    HAS_SYSTEMD = False
-    print("[LibLogger] Warning: python-systemd not installed, journal logging disabled")
+    from fgr_protocol import (
+        FGRMsg, FGRMsgType, FGRLogLevel, receive_message, send_message
+    )
+except ImportError as e:
+    print(f"Error: Cannot import fgr_protocol module: {e}")
+    sys.exit(1)
+
+# Import LibLogger
+from LibLogger import LibLogger
 
 
-class LibLogger:
-    """
-    Shared logger for database and journal.
+class FGRLogServer:
+    """FGR Protocol Log Server with crash dump capture"""
 
-    In database mode: Uses log_id (from database sequence) as universal identifier.
-    In journal-only mode: Simply writes to journal without IDs.
-    """
+    def __init__(self, bind_address: str = '0.0.0.0', web_bind: str = '10.10.2.10',
+                 port: int = 5001, web_port: int = 8060, db_path: str = None,
+                 retention_days: int = 30, node_cfg_path: str = None, staging_path: str = '.'):
+        self.bind_address = bind_address
+        self.web_bind = web_bind
+        self.port = port
+        self.web_port = web_port
+        self.db_path = Path(db_path) if db_path else None
+        self.retention_days = retention_days
+        self.staging_path = staging_path
 
-    _instance = None
-    _lock = threading.Lock()
+        # Load configuration map if available
+        self.node_cfg_path = node_cfg_path or str(script_dir / "nodes_esp32_deploy.json")
+        self.node_cfg = {}
+        self._load_node_config()
 
-    def __new__(cls):
-        if cls._instance is None:
-            with cls._lock:
-                if cls._instance is None:
-                    cls._instance = super().__new__(cls)
-        return cls._instance
+        # Initialize LibLogger
+        self.logger = LibLogger()
+        self.logger.init(self.db_path)
 
-    def __init__(self):
-        if not hasattr(self, '_initialized'):
-            self._initialized = False
-            self.db_path = None
-            self.write_queue = None
-            self.writer_thread = None
-            self._stop_writer = threading.Event()
+        # Server state
+        self.server_socket: Optional[socket.socket] = None
+        self.client_threads: Dict[socket.socket, threading.Thread] = {}
+        self.active_crashes: Dict[str, dict] = {}
+        self.running = True
 
-            # Track refill threads for clean shutdown
-            self._refill_threads = []
-            self._refill_threads_lock = threading.Lock()
+        # Statistics
+        self.stats = {
+            'connections': 0,
+            'log_messages': 0,
+            'errors': 0,
+            'crashes': 0
+        }
+        self.lock = threading.Lock()
 
-            # Serialize ID reservations (SQLite doesn't allow concurrent writes)
-            self._reserve_lock = threading.Lock()
+        # Initialize crash dump tables
+        self._init_crash_tables()
 
-            # Database mode only attributes (only used if db_path is set)
-            self.log_id_buffer = []
-            self.log_id_lock = threading.Lock()
-            self.batch_size = 100  # Reserve more IDs at once
-            self.refill_threshold = 50  # Refill when 50 or fewer remain (was 25)
-            self._refill_in_progress = False
+        # Start crash dump cleanup thread
+        self._start_cleanup_thread()
 
-            # Thread-local storage for database connections
-            self._thread_local = threading.local()
+        # Launch the web server for crash dumps
+        self._start_web_server()
 
-    def init(self, db_path: Optional[Path] = None) -> None:
-        """
-        Initialize the logger.
+        signal.signal(signal.SIGINT, self._signal_handler)
+        signal.signal(signal.SIGTERM, self._signal_handler)
 
-        Args:
-            db_path: If provided, enables database mode with log_id correlation.
-                     If None, runs in journal-only mode (no database writes, no IDs).
-        """
-        if self._initialized:
-            return
+    def _signal_handler(self, signum: int, frame) -> None:
+        print(f"\nReceived signal {signum}, shutting down...")
+        self.running = False
 
-        if db_path:
-            # Database mode
-            self.db_path = Path(db_path)
-            print(f"[LibLogger] Database mode enabled: {self.db_path}")
-            self._init_tables()
-            self._start_writer_thread()
-            self._refill_log_id_buffer_sync()  # Runs in main thread
-            print(f"[LibLogger] Database mode ready with {len(self.log_id_buffer)} reserved IDs")
-        else:
-            # Journal-only mode
-            self.db_path = None
-            print("[LibLogger] Journal-only mode (no database, no log_id coordination)")
+    def _get_level_name(self, level: int) -> str:
+        level_names = {
+            FGRLogLevel.FGR_LOG_LEVEL_DEBUG: 'DEBUG',
+            FGRLogLevel.FGR_LOG_LEVEL_INFO: 'INFO',
+            FGRLogLevel.FGR_LOG_LEVEL_WARN: 'WARN',
+            FGRLogLevel.FGR_LOG_LEVEL_ERROR: 'ERROR',
+        }
+        return level_names.get(level, f'LEVEL_{level}')
 
-        self._initialized = True
-        print("[LibLogger] Initialization complete")
-
-    def _get_connection(self):
-        """
-        Get a database connection for the current thread.
-        Creates one per thread and reuses it.
-        """
-        if not hasattr(self._thread_local, 'conn') or self._thread_local.conn is None:
-            self._thread_local.conn = sqlite3.connect(str(self.db_path), timeout=5.0, isolation_level=None)
-            self._thread_local.conn.execute("PRAGMA journal_mode=WAL")
-            self._thread_local.conn.execute("PRAGMA synchronous=NORMAL")
-            # Cooperative timeout for multi-writer scenarios
-            self._thread_local.conn.execute("PRAGMA busy_timeout=10000")
-        return self._thread_local.conn
-
-    def _close_connection(self):
-        """Close the database connection for the current thread."""
-        if hasattr(self._thread_local, 'conn') and self._thread_local.conn is not None:
-            try:
-                self._thread_local.conn.close()
-            except Exception:
-                pass
-            finally:
-                self._thread_local.conn = None
-
-    def _refill_log_id_buffer_sync(self):
-        """
-        Synchronously reserve a batch of log_ids (database mode only).
-        Uses a global lock to serialize reservations across threads.
-        Only ONE thread can ever be in this function at a time.
-        """
-        if self.db_path is None:
-            return
-
-        # Serialize all ID reservations - only one thread at a time
-        with self._reserve_lock:
-            # Double-check if buffer was refilled while we were waiting for the lock
-            with self.log_id_lock:
-                if len(self.log_id_buffer) > self.refill_threshold:
-                    print(f"[LibLogger] Buffer already refilled by another thread, skipping")
-                    return
-
-            conn = self._get_connection()
-            cursor = conn.cursor()
-
-            for attempt in range(5):
-                try:
-                    cursor.execute("""
-                        UPDATE global_sequence
-                        SET next_seq = next_seq + ?
-                        WHERE id = 1
-                        RETURNING next_seq - ? + 1, next_seq
-                    """, (self.batch_size, self.batch_size))
-
-                    result = cursor.fetchone()
-                    if result:
-                        start, end = result
-                        new_ids = list(range(start, end + 1))
-
-                        with self.log_id_lock:
-                            self.log_id_buffer.extend(new_ids)
-                            buffer_len = len(self.log_id_buffer)
-
-                        print(f"[LibLogger] Reserved log_ids {start}-{end} (buffer now: {buffer_len})")
-                        return
-                    else:
-                        cursor.execute("INSERT INTO global_sequence (id, next_seq) VALUES (1, 1)")
-                        continue
-
-                except sqlite3.OperationalError as e:
-                    if "locked" in str(e) and attempt < 4:
-                        wait_time = 0.05 * (2 ** attempt)  # 50ms, 100ms, 200ms, 400ms
-                        print(f"[LibLogger] Database locked, retrying in {wait_time:.3f}s (attempt {attempt+1}/5)")
-                        time.sleep(wait_time)
-                        continue
-                    print(f"[LibLogger] Failed to reserve log_ids: {e}")
-                    # Fall back to time-based IDs
-                    with self.log_id_lock:
-                        fallback_id = int(time.time() * 1000000) + (hash(threading.current_thread()) % 10000)
-                        self.log_id_buffer.append(fallback_id)
-                    return
-                except Exception as e:
-                    print(f"[LibLogger] Failed to reserve log_ids: {e}")
-                    with self.log_id_lock:
-                        fallback_id = int(time.time() * 1000000) + (hash(threading.current_thread()) % 10000)
-                        self.log_id_buffer.append(fallback_id)
-                    return
-
-    def _refill_log_id_buffer_sync_wrapper(self):
-        """Wrapper that ensures cleanup of thread tracking and connection."""
+    def _load_node_config(self):
+        """Load the inventory deployment layout mapping definitions."""
         try:
-            self._refill_log_id_buffer_sync()
-        finally:
-            # Remove from tracking
-            with self._refill_threads_lock:
-                current = threading.current_thread()
-                if current in self._refill_threads:
-                    self._refill_threads.remove(current)
-            # Clear refill flag
-            with self.log_id_lock:
-                self._refill_in_progress = False
-            # Close this thread's database connection
-            self._close_connection()
-
-    def _ensure_log_id_buffer(self):
-        """
-        Ensure buffer has IDs available (database mode only).
-        Returns True if IDs available.
-        Uses strict coordination to prevent thundering herd.
-        """
-        if self.db_path is None:
-            return False
-
-        # Fast path - if we have enough, return immediately
-        with self.log_id_lock:
-            if len(self.log_id_buffer) > self.refill_threshold:
-                return True
-
-        # Need more IDs. Try to start a background refill if not already in progress
-        with self.log_id_lock:
-            if self._refill_in_progress:
-                # Another thread is already refilling, wait a moment
-                pass
-            elif len(self.log_id_buffer) > 0:
-                # Buffer is low but not empty - start async refill
-                self._refill_in_progress = True
-                refill_thread = threading.Thread(
-                    target=self._refill_log_id_buffer_sync_wrapper,
-                    daemon=False,
-                    name="LibLogger-Refill"
-                )
-                with self._refill_threads_lock:
-                    self._refill_threads.append(refill_thread)
-                refill_thread.start()
-                return True
-            else:
-                # Buffer is EMPTY - need synchronous refill
-                pass
-
-        # Buffer is empty - do synchronous refill (this blocks)
-        # But ensure only ONE thread does this by checking again under lock
-        with self.log_id_lock:
-            if len(self.log_id_buffer) > 0:
-                return True
-            # Double-check refill flag
-            if self._refill_in_progress:
-                # Wait for async refill to complete
-                time.sleep(0.01)
-                return len(self.log_id_buffer) > 0
-            self._refill_in_progress = True
-
-        try:
-            print(f"[LibLogger] Buffer empty, performing synchronous refill")
-            self._refill_log_id_buffer_sync()
-        finally:
-            with self.log_id_lock:
-                self._refill_in_progress = False
-
-        with self.log_id_lock:
-            return len(self.log_id_buffer) > 0
-
-    def _get_next_log_id(self) -> Optional[int]:
-        """
-        Get next log_id (database mode only).
-        Returns None if in journal-only mode.
-        """
-        if self.db_path is None:
-            return None
-
-        self._ensure_log_id_buffer()
-
-        with self.log_id_lock:
-            if self.log_id_buffer:
-                return self.log_id_buffer.pop(0)
-            else:
-                # Should never get here, but just in case
-                print(f"[LibLogger] CRITICAL: No log_ids available, using time-based ID")
-                return int(time.time() * 1000000) + (hash(threading.current_thread()) % 10000)
-
-    def _start_writer_thread(self):
-        """Start the single database writer thread (database mode only)."""
-        if self.db_path is None:
-            return
-
-        self.write_queue = queue.Queue(maxsize=50000)
-        self._stop_writer.clear()
-
-        def writer_loop():
-            """Writer thread with cooperative locking for multi-writer scenarios."""
-            try:
-                conn = self._get_connection()
-                # Cooperative timeout for multi-writer scenarios
-                conn.execute("PRAGMA busy_timeout=10000")
-                conn.execute("PRAGMA wal_autocheckpoint=500")
-                cursor = conn.cursor()
-
-                print("[LibLogger] Writer thread started")
-                batch = []
-                batch_count = 0
-                last_flush_time = time.time()
-
-                # Settings for your traffic pattern
-                MAX_BATCH_SIZE = 50      # Flush when we reach this many
-                FLUSH_INTERVAL = 1.0     # Flush every 1 second (was 0.5) to reduce tiny batches
-
-                while not self._stop_writer.is_set():
-                    try:
-                        query, params = self.write_queue.get(timeout=0.1)
-
-                        if query is None and params is None:
-                            print("[LibLogger] Writer thread received shutdown signal")
-                            break
-
-                        batch.append((query, params))
-                        batch_count += 1
-                        now = time.time()
-
-                        # Flush if: batch full OR (any logs AND it's been FLUSH_INTERVAL seconds)
-                        if (batch_count >= MAX_BATCH_SIZE or
-                            (batch_count > 0 and (now - last_flush_time) >= FLUSH_INTERVAL)):
-                            # Small delay before retry if we were locked before
-                            retry_delay = 0
-                            max_retries = 3
-                            for retry in range(max_retries):
-                                try:
-                                    if retry > 0:
-                                        time.sleep(retry_delay)
-                                        retry_delay = 0.05 * (2 ** retry)
-
-                                    # Use BEGIN DEFERRED for cooperative locking
-                                    conn.execute("BEGIN")
-                                    for q, p in batch:
-                                        cursor.execute(q, p)
-                                    conn.commit()
-                                    last_flush_time = now
-                                    if batch_count >= 10:
-                                        print(f"[LibLogger] Committed batch of {len(batch)} logs")
-                                    break  # Success
-                                except sqlite3.OperationalError as e:
-                                    conn.rollback()
-                                    if "locked" in str(e) and retry < max_retries - 1:
-                                        print(f"[LibLogger] Database busy, retrying batch of {len(batch)} logs (attempt {retry+1}/{max_retries})")
-                                        continue
-                                    else:
-                                        print(f"[LibLogger] Batch write error after {retry+1} attempts: {e}")
-                                        # Put batch back in queue for later
-                                        for q, p in reversed(batch):
-                                            try:
-                                                self.write_queue.put_nowait((q, p))
-                                            except queue.Full:
-                                                pass
-                                        break
-                                except Exception as e:
-                                    conn.rollback()
-                                    print(f"[LibLogger] Batch write error: {e}")
-                                    break
-                            batch = []
-                            batch_count = 0
-
-                    except queue.Empty:
-                        # No new logs - flush anything pending immediately (no waiting)
-                        if batch_count > 0:
-                            try:
-                                conn.execute("BEGIN")
-                                for q, p in batch:
-                                    cursor.execute(q, p)
-                                conn.commit()
-                                # Don't log tiny flushes
-                            except sqlite3.OperationalError as e:
-                                conn.rollback()
-                                if "locked" in str(e):
-                                    # Put batch back for later
-                                    for q, p in reversed(batch):
-                                        try:
-                                            self.write_queue.put_nowait((q, p))
-                                        except queue.Full:
-                                            pass
-                                else:
-                                    print(f"[LibLogger] Idle flush error: {e}")
-                            except Exception as e:
-                                conn.rollback()
-                                print(f"[LibLogger] Idle flush error: {e}")
-                            finally:
-                                batch = []
-                                batch_count = 0
-                        continue
-                    except Exception as e:
-                        print(f"[LibLogger] Writer thread error: {e}")
-                        time.sleep(0.1)
-
-                # Final flush on shutdown
-                if batch:
-                    try:
-                        conn.execute("BEGIN")
-                        for q, p in batch:
-                            cursor.execute(q, p)
-                        conn.commit()
-                        print(f"[LibLogger] Final flush: {len(batch)} logs")
-                    except Exception as e:
-                        conn.rollback()
-                        print(f"[LibLogger] Final flush error: {e}")
-
-            except Exception as e:
-                print(f"[LibLogger] Writer thread fatal error: {e}")
-            finally:
-                # Close this thread's connection
-                self._close_connection()
-                print("[LibLogger] Writer thread stopped")
-
-        self.writer_thread = threading.Thread(target=writer_loop, daemon=False, name="LibLogger-Writer")
-        self.writer_thread.start()
-
-    def _init_tables(self) -> None:
-        """Create necessary tables (database mode only)."""
-        if self.db_path is None:
-            return
-
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        try:
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS logs (
-                    rowid INTEGER PRIMARY KEY,
-                    log_id INTEGER NOT NULL UNIQUE,
-                    node_ip TEXT NOT NULL,
-                    timestamp_utc TEXT NOT NULL,
-                    epoch_time REAL NOT NULL,
-                    log_level INTEGER NOT NULL,
-                    log_tag TEXT,
-                    message_type TEXT NOT NULL,
-                    message TEXT NOT NULL,
-                    extracted_json TEXT,
-                    epoch_time_real REAL
-                )
-            """)
-
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_logs_node_ip ON logs(node_ip)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_logs_epoch ON logs(epoch_time)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_logs_tag ON logs(log_tag)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_logs_epoch_real ON logs(epoch_time_real)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_logs_message_type ON logs(message_type)")
-            cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_logs_log_id ON logs(log_id)")
-
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS global_sequence (
-                    id INTEGER PRIMARY KEY CHECK (id = 1),
-                    next_seq INTEGER NOT NULL DEFAULT 1
-                )
-            """)
-            cursor.execute("INSERT OR IGNORE INTO global_sequence (id, next_seq) VALUES (1, 1)")
-
-            cursor.execute("""
-                CREATE VIRTUAL TABLE IF NOT EXISTS logs_fts USING fts5(message)
-            """)
-
-            cursor.execute("""
-                CREATE TRIGGER IF NOT EXISTS logs_ai AFTER INSERT ON logs BEGIN
-                    INSERT INTO logs_fts(rowid, message) VALUES (new.rowid, new.message);
-                END
-            """)
-            cursor.execute("""
-                CREATE TRIGGER IF NOT EXISTS logs_ad AFTER DELETE ON logs BEGIN
-                    INSERT INTO logs_fts(logs_fts, rowid, message) VALUES ('delete', old.rowid, old.message);
-                END
-            """)
-            cursor.execute("""
-                CREATE TRIGGER IF NOT EXISTS logs_au AFTER UPDATE ON logs BEGIN
-                    INSERT INTO logs_fts(logs_fts, rowid, message) VALUES ('delete', old.rowid, old.message);
-                    INSERT INTO logs_fts(rowid, message) VALUES (new.rowid, new.message);
-                END
-            """)
-
-            conn.commit()
-            print("[LibLogger] Tables ready")
+            if os.path.exists(self.node_cfg_path):
+                with open(self.node_cfg_path, "r") as f:
+                    self.node_cfg = json.load(f)
+                    print(f"[LogServer] Loaded node config from {self.node_cfg_path}")
         except Exception as e:
-            print(f"[LibLogger] Failed to initialize tables: {e}")
-            self.db_path = None
-            raise
-        # Don't close connection - keep it for this thread (main thread)
+            print(f"[LogServer] Warning: Failed to load node mappings: {e}")
 
-    def log(self,
-            source: str,
-            node_ip: str,
-            message: str,
-            log_level: int = 1,
-            log_tag: str = None,
-            message_type: str = "LOG") -> Optional[int]:
-        """
-        Write a log entry.
+    def _init_crash_tables(self):
+        """Create crash_dumps table if it doesn't exist (database mode only)."""
+        if not self.logger.is_db_available():
+            print("[LogServer] Database not available, crash dumps will not be saved")
+            return
 
-        Returns:
-            - Database mode: log_id (always int)
-            - Journal-only mode: None
-        """
-        if not self._initialized:
-            raise RuntimeError("LibLogger not initialized. Call init() first.")
-
-        # Get log_id only if in database mode
-        log_id = self._get_next_log_id() if self.db_path is not None else None
-
-        # Database write (only if in database mode)
-        if self.db_path is not None and self.write_queue:
-            timestamp = time.time()
-            query = """
-                INSERT INTO logs (
-                    log_id, node_ip, timestamp_utc, epoch_time, log_level, log_tag,
-                    message_type, message
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """
-            params = (
-                log_id,
-                node_ip,
-                datetime.fromtimestamp(timestamp).isoformat() + 'Z',
-                timestamp,
-                log_level,
-                log_tag,
-                message_type,
-                message
+        self.logger.execute_sql("""
+            CREATE TABLE IF NOT EXISTS crash_dumps (
+                crash_id TEXT PRIMARY KEY,
+                timestamp_utc TEXT NOT NULL,
+                ip TEXT NOT NULL,
+                fw_hash TEXT NOT NULL,
+                core_blob BLOB NOT NULL
             )
+        """)
 
-            try:
-                self.write_queue.put_nowait((query, params))
-            except queue.Full:
-                print(f"[LibLogger] CRITICAL: Queue full, log_id {log_id} will be journal-only")
+        # Create index for performance
+        self.logger.execute_sql("CREATE INDEX IF NOT EXISTS idx_crash_ip ON crash_dumps(ip)")
+        self.logger.execute_sql("CREATE INDEX IF NOT EXISTS idx_crash_time ON crash_dumps(timestamp_utc)")
 
-        # Journal write (always)
-        if HAS_SYSTEMD:
-            extra_fields = {
-                'SYSLOG_IDENTIFIER': 'fgr-log-server',
-                'PRIORITY': log_level,
-                'FGR_SOURCE': source,
-                'FGR_NODE_IP': node_ip,
-                'FGR_MESSAGE_TYPE': message_type,
-            }
+        print("[LogServer] Crash dump tables ready")
 
-            if log_id is not None:
-                extra_fields['FGR_LOG_ID'] = str(log_id)
+    def _start_cleanup_thread(self):
+        """Start background thread to clean up old crash dumps."""
+        def cleanup_loop():
+            while self.running:
+                time.sleep(86400)  # Once per day
 
-            if log_tag:
-                extra_fields['FGR_LOG_TAG'] = log_tag
+                if self.logger.is_db_available() and self.retention_days > 0:
+                    # Keep only last 1000 crash dumps regardless of age
+                    # (crash dumps are important, but we don't need millions)
+                    try:
+                        self.logger.execute_sql("""
+                            DELETE FROM crash_dumps
+                            WHERE crash_id NOT IN (
+                                SELECT crash_id FROM crash_dumps
+                                ORDER BY timestamp_utc DESC
+                                LIMIT 1000
+                            )
+                        """)
+                        print("[LogServer] Cleaned up old crash dumps")
+                    except Exception as e:
+                        print(f"[LogServer] Cleanup error: {e}")
 
-            systemd.journal.send(message, **extra_fields)
-        else:
-            # Fallback to console
-            id_str = f"[{log_id}]" if log_id is not None else "[NO_ID]"
-            print(f"[{source}] {id_str} {message}")
+        cleanup_thread = threading.Thread(target=cleanup_loop, daemon=True)
+        cleanup_thread.start()
 
-        return log_id
-
-    def admin_log(self, message: str, log_level: int = 6) -> None:
+    def _intercept_and_parse_crash(self, ip: str, line: str):
         """
-        Admin-only log - goes to journal only, never database.
+        State machine parsing standard firmware crashes across shared connections.
         """
-        if HAS_SYSTEMD:
-            extra_fields = {
-                'SYSLOG_IDENTIFIER': 'fgr-log-server',
-                'PRIORITY': log_level,
-                'FGR_SOURCE': 'ADMIN',
-            }
-            systemd.journal.send(message, **extra_fields)
-        else:
-            print(f"[ADMIN] {message}")
+        # 1. Catch the unique firmware hash signature
+        if "BACKTRACE:" in line:
+            parts = line.split("BACKTRACE:")
+            if len(parts) > 1:
+                # Extracts raw SHA256 build footprint hash emitted right after crash boot
+                fw_hash = parts[1].strip().split()[0]
+                if len(fw_hash) == 64:  # Validate it is a standard sha256 sequence
+                    self.active_crashes[ip] = {"hash": fw_hash, "lines": []}
+                    print(f"[LogServer] Started capturing crash for {ip}, hash={fw_hash[:16]}...")
 
-    def is_db_available(self) -> bool:
-        """Return True if in database mode and ready for queries."""
-        return self.db_path is not None and self.write_queue is not None
+        # 2. Slice and pack the Base64 stream lines
+        elif "CORE_DUMP:" in line and ip in self.active_crashes:
+            if "START" in line:
+                return
+            elif "END" in line:
+                crash_data = self.active_crashes.pop(ip, None)
+                if crash_data and crash_data["lines"]:
+                    # Format crash_id as: timestamp_node_ip (e.g., 1781301107_10.10.3.5)
+                    crash_id = f"{int(time.time())}_{ip}"
+                    raw_b64 = "".join(crash_data["lines"])  # Concatenate raw B64
 
-    def get_logs_by_log_id(self, target_log_id: int,
-                           before: int = 100, after: int = 100) -> List[Dict[str, Any]]:
-        """
-        Retrieve logs around a specific log_id (database mode only).
-        Returns empty list if in journal-only mode.
-        """
-        if self.db_path is None:
-            print("[LibLogger] Warning: get_logs_by_log_id called in journal-only mode")
-            return []
+                    try:
+                        core_binary = base64.b64decode(raw_b64)  # Decode on-the-fly
 
-        conn = self._get_connection()
-        conn.row_factory = sqlite3.Row
-        try:
-            cursor = conn.cursor()
-            start_id = max(1, target_log_id - before)
-            end_id = target_log_id + after
+                        # Insert into Database using LibLogger's SQL executor
+                        if self.logger.is_db_available():
+                            insert_sql = """
+                                INSERT INTO crash_dumps (crash_id, timestamp_utc, ip, fw_hash, core_blob)
+                                VALUES (?, ?, ?, ?, ?)
+                            """
+                            self.logger.execute_sql(insert_sql, (
+                                crash_id,
+                                datetime.now(timezone.utc).isoformat(),
+                                ip,
+                                crash_data["hash"],
+                                core_binary
+                            ))
 
-            cursor.execute("""
-                SELECT log_id, epoch_time, message, node_ip, log_level, log_tag, message_type
-                FROM logs
-                WHERE log_id BETWEEN ? AND ?
-                ORDER BY log_id ASC
-            """, (start_id, end_id))
+                            with self.lock:
+                                self.stats['crashes'] += 1
 
-            return [dict(row) for row in cursor.fetchall()]
-        finally:
-            # Don't close - keep for this thread
-            pass
 
-    def get_logs_by_timestamp(self, timestamp: float,
-                              before: int = 100, after: int = 100) -> List[Dict[str, Any]]:
-        """
-        Retrieve logs around a specific timestamp (database mode only).
-        Returns empty list if in journal-only mode.
-        """
-        if self.db_path is None:
-            print("[LibLogger] Warning: get_logs_by_timestamp called in journal-only mode")
-            return []
+                            # Journal Link (The trigger for your PC)
+                            # The URL protocol handler will pick this up!
+                            # and crash_decoder.py, when triggered, will
+                            # know what to do
+                            link_msg = f"🛑 CRASH! Decode: http://127.0.0.1:8080//{crash_id}"
+                            self.logger.admin_log(link_msg, log_level=3)  # ERROR level
+                            print(f"[LogServer] Crash captured: {crash_id} -> {link_msg}")
+                        else:
+                            print(f"[LogServer] Database not available, crash {crash_id} not saved")
 
-        conn = self._get_connection()
-        conn.row_factory = sqlite3.Row
-        try:
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT log_id
-                FROM logs
-                WHERE epoch_time <= ?
-                ORDER BY epoch_time DESC
-                LIMIT 1
-            """, (timestamp,))
-
-            row = cursor.fetchone()
-            if not row:
-                return []
-
-            closest_id = row['log_id']
-            return self.get_logs_by_log_id(closest_id, before, after)
-        finally:
-            pass
-
-    def execute_sql(self, query: str, params: tuple = ()) -> Optional[List[Dict]]:
-        """
-        Execute a read-only SQL query (database mode only).
-        Returns None in journal-only mode.
-        """
-        if self.db_path is None:
-            return None
-
-        conn = self._get_connection()
-        conn.row_factory = sqlite3.Row
-        try:
-            cursor = conn.cursor()
-            cursor.execute(query, params)
-            if query.strip().upper().startswith('SELECT'):
-                return [dict(row) for row in cursor.fetchall()]
-            conn.commit()
-            return None
-        except Exception as e:
-            print(f"[LibLogger] SQL error: {e}")
-            return None
-        finally:
-            pass
-
-    def shutdown(self, timeout: float = 10.0) -> None:
-        """
-        Gracefully shut down (database mode only).
-        """
-        if self.db_path is None:
-            print("[LibLogger] Journal-only mode, nothing to shut down")
-            return
-
-        print("[LibLogger] Shutting down...")
-        start_time = time.time()
-
-        # 1. Stop accepting new work
-        self._stop_writer.set()
-
-        # 2. Wait for pending refill threads to complete
-        with self._refill_threads_lock:
-            active_refills = list(self._refill_threads)
-
-        if active_refills:
-            remaining_timeout = timeout - (time.time() - start_time)
-            if remaining_timeout > 0:
-                print(f"[LibLogger] Waiting for {len(active_refills)} refill threads...")
-                for thread in active_refills:
-                    thread.join(timeout=remaining_timeout / len(active_refills))
-
-        # 3. Shutdown writer thread
-        if self.writer_thread and self.writer_thread.is_alive():
-            pending = self.write_queue.qsize() if self.write_queue else 0
-            print(f"[LibLogger] Writer thread: {pending} pending writes")
-
-            if self.write_queue:
-                try:
-                    self.write_queue.put_nowait((None, None))
-                except queue.Full:
-                    pass
-
-            remaining_timeout = timeout - (time.time() - start_time)
-            if remaining_timeout > 0:
-                self.writer_thread.join(timeout=remaining_timeout)
-
-            if self.writer_thread.is_alive():
-                print("[LibLogger] WARNING: Writer thread did not stop within timeout")
+                    except Exception as e:
+                        print(f"[LogServer] Failed to decode crash for {ip}: {e}")
+                        with self.lock:
+                            self.stats['errors'] += 1
             else:
-                print("[LibLogger] Writer thread stopped cleanly")
+                # Isolate clean base64 data string chunk discarding trailing console layout arrows
+                clean_chunk = line.split("CORE_DUMP:")[1].strip().rstrip(">")
+                self.active_crashes[ip]["lines"].append(clean_chunk)
 
-        # 4. Close main thread's connection
-        self._close_connection()
+    def _start_web_server(self):
+        """Start minimal web server for crash data endpoints."""
+        server_instance = self
 
-        print("[LibLogger] Shutdown complete")
+        class CrashDataHandler(BaseHTTPRequestHandler):
+            def log_message(self, format, *args):
+                pass  # Suppress web requests
+
+            def do_GET(self):
+                try:
+                    path = self.path
+
+                    # Handle /data/{crash_id} - returns raw binary core dump
+                    if path.startswith('/data/'):
+                        crash_id = path.split('/')[-1]
+                        print(f"[LogServer] /data/ request for crash ID {crash_id}")
+
+                        if not server_instance.logger.is_db_available():
+                            self.send_error(503, "Database not available")
+                            return
+
+                        result = server_instance.logger.execute_sql(
+                            "SELECT core_blob FROM crash_dumps WHERE crash_id = ?",
+                            (crash_id,)
+                        )
+
+                        if result and len(result) > 0:
+                            self.send_response(200)
+                            self.send_header("Content-Type", "application/octet-stream")
+                            self.end_headers()
+                            self.wfile.write(result[0]['core_blob'])
+                            print(f"[LogServer] Returned {len(result[0]['core_blob'])} byte(s)")
+                        else:
+                            self.send_error(404, "Crash dump not found")
+                        return
+
+                    # Handle /meta/{crash_id} - returns JSON metadata
+                    elif path.startswith('/meta/'):
+                        crash_id = path.split('/')[-1]
+                        print(f"[LogServer] /meta/ request for crash ID {crash_id}")
+
+                        if not server_instance.logger.is_db_available():
+                            self.send_error(503, "Database not available")
+                            return
+
+                        result = server_instance.logger.execute_sql(
+                            "SELECT fw_hash FROM crash_dumps WHERE crash_id = ?",
+                            (crash_id,)
+                        )
+
+                        if result and len(result) > 0:
+                            self.send_response(200)
+                            self.send_header("Content-Type", "application/json")
+                            self.end_headers()
+                            response = json.dumps({"fw_hash": result[0]['fw_hash']})
+                            self.wfile.write(response.encode('utf-8'))
+                            print(f"[LogServer] Returned metadata for {crash_id}")
+                        else:
+                            self.send_error(404, "Crash dump not found")
+                        return
+
+                    # Anything else -> 404
+                    else:
+                        self.send_error(404, "Not found")
+
+                except Exception as e:
+                    server_instance.logger.admin_log(f"Web API error: {str(e)}", log_level=3)
+                    self.send_response(500)
+                    self.send_header("Content-Type", "text/plain")
+                    self.end_headers()
+                    self.wfile.write(str(e).encode('utf-8'))
+
+        def web_worker():
+            try:
+                httpd = HTTPServer((self.web_bind, self.web_port), CrashDataHandler)
+                print(f"[LogServer] Crash data endpoints:")
+                print(f"[LogServer]   - Core dump: http://{self.web_bind}:{self.web_port}/data/{{crash_id}}")
+                print(f"[LogServer]   - Metadata:  http://{self.web_bind}:{self.web_port}/meta/{{crash_id}}")
+
+                self.logger.admin_log(f"Web server started on {self.web_bind}:{self.web_port}", log_level=6)
+
+                while self.running:
+                    httpd.handle_request()
+            except Exception as e:
+                self.logger.admin_log(f"Web server died: {str(e)}", log_level=3)
+                print(f"[LogServer] Web server fatal failure: {e}")
+
+        web_thread = threading.Thread(target=web_worker, daemon=True)
+        web_thread.start()
+
+    def _handle_client(self, client_socket: socket.socket, client_address: tuple) -> None:
+        """Handle a single client connection."""
+        ip = client_address[0]
+        port = client_address[1]
+
+        client_socket.settimeout(1.0)
+        print(f"[LogServer] New connection from {ip}:{port}")
+
+        try:
+            while self.running:
+                try:
+                    msg = receive_message(client_socket, timeout=1.0)
+                    if msg is None:
+                        # Check if socket is still alive
+                        try:
+                            client_socket.setblocking(False)
+                            if not client_socket.recv(1, socket.MSG_PEEK):
+                                break
+                        except (BlockingIOError, socket.timeout):
+                            pass
+                        except (OSError, ConnectionError):
+                            break
+                        finally:
+                            client_socket.setblocking(True)
+                        continue
+
+                    log_text = msg.get_log_message()
+                    log_level = msg.reference
+
+                    with self.lock:
+                        self.stats['log_messages'] += 1
+
+                    # Check for crash dump data
+                    self._intercept_and_parse_crash(ip, log_text)
+
+                    # FIX: Determine message_type based on content (restoring old behavior)
+                    message_type = 'LOG'
+                    if 'metrics:' in log_text:
+                        message_type = 'METRIC'
+
+                    # Log to journal and database using LibLogger
+                    self.logger.log(
+                        source='NODE',
+                        node_ip=ip,
+                        message=log_text,
+                        log_level=log_level,
+                        log_tag=self._get_level_name(log_level),
+                        message_type=message_type
+                    )
+
+                except socket.timeout:
+                    continue
+                except (ConnectionResetError, BrokenPipeError):
+                    break
+                except Exception as e:
+                    with self.lock:
+                        self.stats['errors'] += 1
+                    print(f"[LogServer] Client handling exception [{ip}]: {e}")
+                    continue
+
+        finally:
+            try:
+                client_socket.shutdown(socket.SHUT_RDWR)
+            except:
+                pass
+            try:
+                client_socket.close()
+            except:
+                pass
+            with self.lock:
+                if client_socket in self.client_threads:
+                    del self.client_threads[client_socket]
+            print(f"[LogServer] Connection closed from {ip}:{port}")
+
+    def start(self) -> None:
+        """Start the log server."""
+        # Create server socket
+        self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
+        try:
+            self.server_socket.bind((self.bind_address, self.port))
+            self.server_socket.listen(5)
+            self.server_socket.settimeout(1.0)
+
+            print(f"\n{'='*60}")
+            print("FGR Log Server with Crash Capture")
+            print(f"{'='*60}")
+            print(f"Log server listening on: {self.bind_address}:{self.port}")
+            print(f"Web interface: http://{self.web_bind}:{self.web_port}/")
+            print(f"Database: {self.db_path if self.db_path else 'disabled'}")
+            print(f"Crash URL format: http://{self.web_bind}:{self.web_port}/{{crash_id}}")
+            print(f"{'='*60}")
+            print("Press Ctrl+C to stop\n")
+
+            while self.running:
+                try:
+                    client_socket, client_address = self.server_socket.accept()
+
+                    with self.lock:
+                        self.stats['connections'] += 1
+                        client_thread = threading.Thread(
+                            target=self._handle_client,
+                            args=(client_socket, client_address),
+                            daemon=True,
+                            name=f"Client-{client_address[0]}"
+                        )
+                        self.client_threads[client_socket] = client_thread
+                        client_thread.start()
+
+                except socket.timeout:
+                    continue
+                except OSError as e:
+                    if self.running:
+                        print(f"[LogServer] Socket error: {e}")
+                    break
+
+        finally:
+            self.stop()
+
+    def stop(self) -> None:
+        """Stop the log server."""
+        print("\n[LogServer] Shutting down...")
+        self.running = False
+
+        if self.server_socket:
+            try:
+                self.server_socket.close()
+            except:
+                pass
+
+        # Shutdown LibLogger
+        self.logger.shutdown()
+
+        print("\n=== Final Server Statistics ===")
+        print(f"Total Client Connections  : {self.stats['connections']}")
+        print(f"Log Messages Ingested     : {self.stats['log_messages']}")
+        print(f"Crashes Captured          : {self.stats['crashes']}")
+        print(f"Errors                    : {self.stats['errors']}")
+        print("========================================")
+        print("Server shutdown complete.")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="FGR Protocol Log Server with Crash Capture",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+    parser.add_argument('--port', '-p', type=int, default=5001,
+                        help='Port to listen on for log streams')
+    parser.add_argument('--web-port', '-w', type=int, default=8060,
+                        help='Port for crash web dashboard')
+    parser.add_argument('--bind-address', '-b', type=str, default='0.0.0.0',
+                        help='Address to bind log server to')
+    parser.add_argument('--web-bind', type=str, default='10.10.2.10',
+                        help='Explicit IP address for web interface')
+    parser.add_argument('--db-path', '-d', type=str, default=None,
+                        help='Path to SQLite database file')
+    parser.add_argument('--retention-days', '-r', type=int, default=30,
+                        help='Crash dump retention (0 = unlimited)')
+    parser.add_argument('--node-cfg', default=None,
+                        help='Path to nodes_esp32_deploy.json for ELF mapping')
+
+    args = parser.parse_args()
+
+    if args.port < 1 or args.port > 65535:
+        print(f"Error: Invalid port {args.port}")
+        sys.exit(1)
+
+    server = FGRLogServer(
+        bind_address=args.bind_address,
+        web_bind=args.web_bind,
+        port=args.port,
+        web_port=args.web_port,
+        db_path=args.db_path,
+        retention_days=args.retention_days,
+        node_cfg_path=args.node_cfg
+    )
+
+    try:
+        server.start()
+    except KeyboardInterrupt:
+        server.stop()
+    except Exception as e:
+        print(f"Fatal server failure: {e}")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
