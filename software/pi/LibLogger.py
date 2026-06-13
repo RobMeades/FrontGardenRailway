@@ -195,7 +195,7 @@ class LibLogger:
     def attach_to_root_logger(self, node_ip: str = "0.0.0.0",
                                source: str = "CTRL",
                                level: int = logging.INFO,
-                               format_str: str = '%(asctime)s - %(name)s - %(levelname)s - %(message)s') -> None:
+                               format_str: str = '') -> None:
         """
         Attach a LibLogger handler to the root logger.
         This will capture ALL logs from the entire application.
@@ -220,7 +220,7 @@ class LibLogger:
 
     def attach_to_logger(self, logger: logging.Logger, node_ip: str = "0.0.0.0",
                          source: str = "CTRL", level: int = logging.INFO,
-                         format_str: str = '%(asctime)s - %(name)s - %(levelname)s - %(message)s') -> None:
+                         format_str: str = '') -> None:
         """
         Attach a LibLogger handler to a specific logger.
 

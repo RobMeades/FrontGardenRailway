@@ -301,6 +301,7 @@ class SearchIterator:
 
             cursor.execute(query, (fts_query, self.current_timestamp, max_entries))
             rows = cursor.fetchall()
+            original_rows = rows  # Store original rows before filtering
 
             self._log_debug(f"FTS returned {len(rows)} candidate rows")
 
@@ -360,13 +361,12 @@ class SearchIterator:
                 self._log_debug(f"Whole word filter: {original_count} -> {len(rows)} rows")
 
             if not rows:
-                # No matches in this chunk after filtering - advance timestamp and continue
-                if rows_original:  # We had rows from FTS but they were filtered out
-                    # Use the last timestamp from the FTS results
-                    last_ts = rows_original[-1]['epoch_time']
+                # No matches in this chunk after filtering - advance timestamp to the last original row
+                if original_rows:
+                    last_ts = original_rows[-1]['epoch_time']
                     self.current_timestamp = last_ts
                     self._log_debug(f"No matches after filtering, moving to timestamp: {last_ts}")
-                return (None, None, False, len(rows_original) if rows_original else 0, self.entries_checked, 0)
+                return (None, None, False, len(original_rows) if original_rows else 0, self.entries_checked, 0)
 
             scanned = 0
             last_timestamp = self.current_timestamp
