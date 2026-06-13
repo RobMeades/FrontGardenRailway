@@ -230,6 +230,8 @@ class SearchIterator:
         self.debug = params.get('debug', False)
         self.db_path = db_path
         self.using_sqlite = False  # Track which backend we're using
+        self.starting_timestamp = start_timestamp
+        self.has_wrapped = False
 
         # Don't open journal immediately - we'll try SQLite first
         self.journal = None
@@ -260,32 +262,19 @@ class SearchIterator:
 
         self._log_debug(f"=== Starting SQLite search ===")
         self._log_debug(f"Search string: {repr(self.search_string)}")
-        self._log_debug(f"Search string length: {len(self.search_string)}")
-        self._log_debug(f"Search string bytes: {self.search_string.encode('utf-8')}")
+        self._log_debug(f"Case sensitive: {self.case_sensitive}")
+        self._log_debug(f"Whole word: {self.whole_word}")
         self._log_debug(f"Current timestamp: {self.current_timestamp}")
+        self._log_debug(f"Starting timestamp: {self.starting_timestamp}")
+        self._log_debug(f"Has wrapped: {self.has_wrapped}")
         self._log_debug(f"Direction: {self.direction}")
         self._log_debug(f"Max entries: {max_entries}")
-
-        # Log each character to catch invisible chars
-        for i, ch in enumerate(self.search_string):
-            self._log_debug(f"  char[{i}]: {repr(ch)} (ord={ord(ch)})")
 
         conn = None
         try:
             conn = sqlite3.connect(str(self.db_path))
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
-
-            self._log_debug("Database connected successfully")
-
-            # Test MATCH in isolation first
-            try:
-                cursor.execute("SELECT rowid FROM logs_fts WHERE logs_fts MATCH ? LIMIT 1", (self.search_string,))
-                test_row = cursor.fetchone()
-                self._log_debug(f"MATCH test successful, got rowid: {test_row['rowid'] if test_row else 'None'}")
-            except Exception as e:
-                self._log_debug(f"MATCH test FAILED: {e}")
-                raise
 
             # Direction and ordering
             if self.direction == 'next':
@@ -295,9 +284,9 @@ class SearchIterator:
                 operator = '<='
                 order = 'DESC'
 
-            self._log_debug(f"Operator: {operator}, Order: {order}")
+            # Build FTS query - this is our pre-filter
+            fts_query = self.search_string
 
-            # ORDER BY rowid for chronological order
             query = f"""
                 SELECT d.log_id, d.epoch_time, d.message, d.node_ip
                 FROM logs d
@@ -310,15 +299,74 @@ class SearchIterator:
                 LIMIT ?
             """
 
-            self._log_debug(f"Query: {query}")
-
-            cursor.execute(query, (self.search_string, self.current_timestamp, max_entries))
+            cursor.execute(query, (fts_query, self.current_timestamp, max_entries))
             rows = cursor.fetchall()
 
-            self._log_debug(f"Query returned {len(rows)} rows")
+            self._log_debug(f"FTS returned {len(rows)} candidate rows")
+
+            # Handle case where no rows returned
+            if not rows:
+                # Find the next log in this direction to advance timestamp
+                if self.direction == 'next':
+                    cursor.execute("SELECT MIN(epoch_time) FROM logs WHERE epoch_time > ?", (self.current_timestamp,))
+                else:
+                    cursor.execute("SELECT MAX(epoch_time) FROM logs WHERE epoch_time < ?", (self.current_timestamp,))
+
+                next_ts = cursor.fetchone()[0]
+
+                if next_ts is not None:
+                    # Jump to the next log's timestamp
+                    self.current_timestamp = next_ts
+                    self._log_debug(f"No rows in chunk, jumping to next timestamp: {next_ts}")
+                    # Return marker to continue searching (no match in this chunk)
+                    return (None, None, False, 0, self.entries_checked, 0)
+                else:
+                    # No more logs in this direction - need to wrap
+                    if self.direction == 'next':
+                        cursor.execute("SELECT MIN(epoch_time) FROM logs")
+                    else:
+                        cursor.execute("SELECT MAX(epoch_time) FROM logs")
+
+                    wrap_ts = cursor.fetchone()[0]
+
+                    if wrap_ts is None:
+                        # No logs at all in database
+                        return None
+
+                    # Check if we've already wrapped and are back to the start
+                    if self.has_wrapped and abs(wrap_ts - self.starting_timestamp) < 0.001:
+                        self._log_debug("Search complete: wrapped and returned to start")
+                        return None  # finished=True
+                    else:
+                        self.has_wrapped = True
+                        self.current_timestamp = wrap_ts
+                        self._log_debug(f"Wrapping to {'earliest' if self.direction == 'next' else 'latest'} timestamp: {wrap_ts}")
+                        # Return wrapped marker
+                        return (None, None, True, 0, self.entries_checked, 0)
+
+            # Apply post-filtering for case sensitivity
+            if self.case_sensitive and self.search_string:
+                original_count = len(rows)
+                rows = [row for row in rows if self.search_string in row['message']]
+                self._log_debug(f"Case-sensitive filter: {original_count} -> {len(rows)} rows")
+
+            # Apply whole word post-filtering
+            if self.whole_word and rows:
+                import re
+                pattern = rf'\b{re.escape(self.search_string)}\b'
+                flags = 0 if self.case_sensitive else re.IGNORECASE
+                original_count = len(rows)
+                rows = [row for row in rows if re.search(pattern, row['message'], flags)]
+                self._log_debug(f"Whole word filter: {original_count} -> {len(rows)} rows")
 
             if not rows:
-                return None
+                # No matches in this chunk after filtering - advance timestamp and continue
+                if rows_original:  # We had rows from FTS but they were filtered out
+                    # Use the last timestamp from the FTS results
+                    last_ts = rows_original[-1]['epoch_time']
+                    self.current_timestamp = last_ts
+                    self._log_debug(f"No matches after filtering, moving to timestamp: {last_ts}")
+                return (None, None, False, len(rows_original) if rows_original else 0, self.entries_checked, 0)
 
             scanned = 0
             last_timestamp = self.current_timestamp
@@ -333,15 +381,17 @@ class SearchIterator:
                 last_timestamp = timestamp
                 last_log_id = log_id
 
-                # Apply filters
+                # Apply exclude CTRL filter
                 if self.exclude_ctrl and message.startswith('[CTRL]'):
                     continue
 
+                # Apply node filter
                 if self.include_nodes:
                     last_octet = node_ip.split('.')[-1] if node_ip else None
                     if not last_octet or last_octet not in self.include_nodes:
                         continue
 
+                # Apply log level filter
                 if self.min_log_level < 4:
                     match = re.search(r'\[(?:NODE|CTRL)\].*?\[[\d.]+\]\s*([DIWE])\s', message)
                     if match:
@@ -353,26 +403,22 @@ class SearchIterator:
                 self.current_timestamp = timestamp
                 self.entries_checked += scanned
                 result_tuple = (timestamp, message, False, scanned, self.entries_checked, log_id)
-                self._log_debug(f"Returning result tuple: type={type(result_tuple)}, len={len(result_tuple)}")
-                self._log_debug(f"  elements: ts={timestamp}, msg_len={len(message)}, wrapped=False, scanned={scanned}, total={self.entries_checked}, log_id={log_id}")
+                self._log_debug(f"Returning match: log_id={log_id}, timestamp={timestamp}")
+                return result_tuple
 
-                return (timestamp, message, False, scanned, self.entries_checked, log_id)
-
-            # No match in this chunk
+            # No match in this chunk after all filters
             if rows:
                 self.current_timestamp = last_timestamp
                 self.entries_checked += scanned
-
-                result_tuple = (None, None, False, scanned, self.entries_checked, last_log_id)
-                self._log_debug(f"Returning result tuple: type={type(result_tuple)}, len={len(result_tuple)}")
-                self._log_debug(f"  elements: ts=None, msg_len=0, wrapped=False, scanned={scanned}, total={self.entries_checked}, log_id={last_log_id}")
-
+                self._log_debug(f"No match in this chunk, updated timestamp to {last_timestamp}")
                 return (None, None, False, scanned, self.entries_checked, last_log_id)
             else:
                 return None
 
         except Exception as e:
             self._log_debug(f"SQLite search error: {e}")
+            import traceback
+            self._log_debug(traceback.format_exc())
             return None
         finally:
             if conn:
@@ -561,7 +607,7 @@ class WebController(Controller):
                  nodes_dir: str = None, cfg_file: str = None,
                  http_port: int = HTTP_PORT_DEFAULT,
                  db_path: Path = None):
-        super().__init__(listen_ip, port, nodes_dir, cfg_file)
+        super().__init__(listen_ip, port, nodes_dir, cfg_file, db_path)
 
         self.http_port = http_port
 
@@ -576,13 +622,10 @@ class WebController(Controller):
 
         self.db_path = db_path
         self.graphs_enabled = db_path is not None and db_path.exists()
-        # Initialize shared logger (works with or without database)
-        self.liblogger = LibLogger()
-        self.liblogger.init(self.db_path)
         if not self.graphs_enabled:
-            self._admin_log(f"Graphs disabled - database not found at {db_path}")
+            self._log_admin(f"Graphs disabled - database not found at {db_path}")
         else:
-            self._admin_log(f"Graphs enabled using database: {db_path}")
+            self._log_admin(f"Graphs enabled using database: {db_path}")
 
         self.web_app = None
         self.web_runner = None
@@ -614,7 +657,7 @@ class WebController(Controller):
         if HAS_SYSTEMD:
             self._start_journal_reader()
         else:
-            self._admin_log("Journal reading disabled - node logs will not appear")
+            self._log_admin("Journal reading disabled - node logs will not appear")
 
         # Override the logger to capture controller logs
         self._setup_log_capture()
@@ -758,9 +801,9 @@ class WebController(Controller):
             cursor.execute("DELETE FROM metrics_history WHERE epoch_time < ?", (cutoff,))
             conn.commit()
             if cursor.rowcount > 0:
-                self._admin_log(f"Trimmed {cursor.rowcount} rows from metrics_history older than {days} days")
+                self._log_admin(f"Trimmed {cursor.rowcount} rows from metrics_history older than {days} days")
         except Exception as e:
-            self._admin_log(f"Error trimming metrics_history: {e}")
+            self._log_admin(f"Error trimming metrics_history: {e}")
         finally:
             conn.close()
 
@@ -775,7 +818,7 @@ class WebController(Controller):
 
         trimmer_thread = threading.Thread(target=trimmer_loop, daemon=True)
         trimmer_thread.start()
-        self._admin_log("Metrics trimmer started (runs daily)")
+        self._log_admin("Metrics trimmer started (runs daily)")
 
     def _load_node_grid_layout(self) -> Dict[str, Any]:
         """Load node grid layout from config file"""
@@ -784,7 +827,7 @@ class WebController(Controller):
                 with open(NODE_GRID_CONFIG, 'r') as f:
                     return json.load(f)
             except Exception as e:
-                self._admin_log(f"Error loading node grid layout: {e}")
+                self._log_admin(f"Error loading node grid layout: {e}")
         return {'order': [], 'pages': {}, 'columns': 4, 'rows': 2}
 
     def _save_node_grid_layout(self):
@@ -793,7 +836,7 @@ class WebController(Controller):
             with open(NODE_GRID_CONFIG, 'w') as f:
                 json.dump(self.node_grid_layout, f, indent=2)
         except Exception as e:
-            self._admin_log(f"Error saving node grid layout: {e}")
+            self._log_admin(f"Error saving node grid layout: {e}")
 
     def _format_log_for_display(self, timestamp_str: str, source: str, node_ip: str,
                                 log_level: int, message: str) -> str:
@@ -870,7 +913,7 @@ class WebController(Controller):
 
     def _log_message(self, message: str):
         """Add a message to the journal via shared logger"""
-        self.liblogger.log(
+        self.lib_logger.log(
             source='CTRL',
             node_ip='0.0.0.0',
             message=message,
@@ -878,33 +921,33 @@ class WebController(Controller):
             message_type='CONTROL'
         )
 
-    def _admin_log(self, message: str, log_level: int = 6):
+    def _log_admin(self, message: str, log_level: int = 6):
         """
         Admin-only log - not shown in debug view, only journal.
         For ephemeral messages that shouldn't clutter the UI.
         """
-        self.liblogger.admin_log(message, log_level)
+        self.lib_logger.log_admin(message, log_level)
 
     def _start_journal_reader(self):
         """Start background thread to read logs from journal"""
         self.journal_running = True
         self.journal_thread = threading.Thread(target=self._journal_reader_loop, daemon=True)
         self.journal_thread.start()
-        self._admin_log(f"Journal reader started, monitoring '{JOURNAL_IDENTIFIER}'")
+        self._log_admin(f"Journal reader started, monitoring '{JOURNAL_IDENTIFIER}'")
 
     def _stop_journal_reader(self):
         """Stop the journal reader thread"""
-        self._admin_log("Stopping journal reader...")
+        self._log_admin("Stopping journal reader...")
         self.journal_running = False
 
         # Give the thread time to notice the flag and exit
         if self.journal_thread and self.journal_thread.is_alive():
-            self._admin_log("Waiting for journal reader thread to exit...")
+            self._log_admin("Waiting for journal reader thread to exit...")
             self.journal_thread.join(timeout=1.0)
             if self.journal_thread.is_alive():
-                self._admin_log("Journal reader thread still alive (daemon will kill it)")
+                self._log_admin("Journal reader thread still alive (daemon will kill it)")
             else:
-                self._admin_log("Journal reader thread exited cleanly")
+                self._log_admin("Journal reader thread exited cleanly")
 
     def _journal_reader_loop(self):
         """Background thread to read logs from systemd journal"""
@@ -995,17 +1038,17 @@ class WebController(Controller):
                         self._add_log_raw(source, node_ip, log_level, message, journal_ts_value)
 
         except Exception as e:
-            self._admin_log(f"Journal reader error: {e}")
+            self._log_admin(f"Journal reader error: {e}")
         finally:
-            self._admin_log("Journal reader stopped")
+            self._log_admin("Journal reader stopped")
 
     def _get_node_name_by_ip(self, ip: str) -> Optional[str]:
         """Get node name from IP address"""
         for name, node in self.nodes.items():
             if node.ip == ip:
                 return name
-        self._admin_log(f"Could not find node name for IP: {ip}")
-        self._admin_log(f"Available node IPs: {[node.ip for node in self.nodes.values()]}")
+        self._log_admin(f"Could not find node name for IP: {ip}")
+        self._log_admin(f"Available node IPs: {[node.ip for node in self.nodes.values()]}")
         return None
 
     def _format_duration_compact(self, seconds: int) -> str:
@@ -1324,7 +1367,7 @@ class WebController(Controller):
                 }
                 self.node_card_html[node_name] = node.handler.get_card_html(node_name, node_data)
             except Exception as e:
-                self._admin_log(f"Error getting card HTML for {node_name}: {e}")
+                self._log_admin(f"Error getting card HTML for {node_name}: {e}")
 
     def set_node_notification(self, node_name: str, message: str, is_sent: bool = True, is_success: bool = True):
         """Set a notification for a node (sent/received message)
@@ -1537,7 +1580,7 @@ class WebController(Controller):
             session['running'] = False
 
         except Exception as e:
-            self._admin_log(f"Search error for session {session_id}: {e}")
+            self._log_admin(f"Search error for session {session_id}: {e}")
             session['running'] = False
         finally:
             # Don't delete session immediately - let cleanup thread handle it
@@ -1600,7 +1643,7 @@ class WebController(Controller):
             )
 
         except Exception as e:
-            self._admin_log(f"Search error for session {session_id}: {e}")
+            self._log_admin(f"Search error for session {session_id}: {e}")
             session['error'] = str(e)
             session['running'] = False
 
@@ -1618,7 +1661,7 @@ class WebController(Controller):
                     if sid in self.search_sessions:
                         self.search_sessions[sid]['iterator'].close()
                         del self.search_sessions[sid]
-                        self._admin_log(f"Cleaned up expired search session {sid}")
+                        self._log_admin(f"Cleaned up expired search session {sid}")
 
         cleanup_thread = threading.Thread(target=cleanup_loop, daemon=True)
         cleanup_thread.start()
@@ -1657,7 +1700,7 @@ class WebController(Controller):
             # Client disconnected - normal
             pass
         except Exception as e:
-            self._admin_log(f"Status stream error: {e}")
+            self._log_admin(f"Status stream error: {e}")
         finally:
             self.sse_clients.discard(response)
 
@@ -1726,7 +1769,7 @@ class WebController(Controller):
         except (ConnectionResetError, BrokenPipeError, RuntimeError):
             pass
         except Exception as e:
-            self._admin_log(f"Log stream error: {e}")
+            self._log_admin(f"Log stream error: {e}")
 
         return response
 
@@ -1795,8 +1838,11 @@ class WebController(Controller):
         timestamp = data.get('timestamp')
         before = data.get('before', 0)
         after = data.get('after', 0)
+        since = data.get('since')  # NEW: timestamp in seconds
+        until = data.get('until')  # NEW: timestamp in seconds
 
-        if timestamp is None:
+        # Require either timestamp or (since+until)
+        if timestamp is None and since is None:
             return web.json_response({'status': 'ok', 'logs': []})
 
         def _format_log_entry(entry):
@@ -1840,11 +1886,29 @@ class WebController(Controller):
             }
 
         def _query():
-            target_dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
-
             j = journal.Reader(path='/var/log/journal')
-            j.seek_realtime(target_dt)
             j.add_match(SYSLOG_IDENTIFIER='fgr-log-server')
+
+            # NEW: Use since/until time range if provided
+            if since is not None and until is not None:
+                since_dt = datetime.fromtimestamp(since, tz=timezone.utc)
+                until_dt = datetime.fromtimestamp(until, tz=timezone.utc)
+                j.seek_realtime(since_dt)
+
+                logs = []
+                for entry in j:
+                    ts = entry.get('__REALTIME_TIMESTAMP')
+                    if ts and ts.timestamp() > until:
+                        break
+                    logs.append(_format_log_entry(entry))
+
+                # For time-range queries, target_index is -1 (not applicable)
+                # has_more is false since we have a fixed window
+                return logs, -1, False
+
+            # Original behavior: query by timestamp with before/after counts
+            target_dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
+            j.seek_realtime(target_dt)
 
             center = j.get_next()
 
@@ -1883,11 +1947,12 @@ class WebController(Controller):
                 elif before == 0 and after > 0:
                     target_index = 0
 
-            return logs, target_index
+            # Check if there might be more logs beyond what we fetched
+            has_more = len(logs) >= (before if before > 0 else after)
+            return logs, target_index, has_more
 
         try:
-            logs, target_index = await asyncio.to_thread(_query)
-            has_more = len(logs) >= (before if before > 0 else after)
+            logs, target_index, has_more = await asyncio.to_thread(_query)
             return web.json_response({
                 'status': 'ok',
                 'logs': logs,
@@ -1986,13 +2051,49 @@ class WebController(Controller):
             if session_id and session_id in self.search_sessions:
                 session = self.search_sessions[session_id]
                 session['cancelled'] = True
-                self._admin_log(f"Search session {session_id} cancelled by user")
+                self._log_admin(f"Search session {session_id} cancelled by user")
                 return web.json_response({'status': 'cancelled'})
             else:
                 return web.json_response({'error': 'Session not found'}, status=404)
 
         else:
             return web.json_response({'error': 'Invalid action'}, status=400)
+
+    async def handle_api_logs_lookup(self, request):
+        """Look up a log by log_id and return its database timestamp"""
+        data = await request.json() if request.body_exists else {}
+        log_id = data.get('log_id')
+
+        if not log_id:
+            return web.json_response({'error': 'Missing log_id'}, status=400)
+
+        if not self.graphs_enabled:
+            return web.json_response({'error': 'Database not available'}, status=503)
+
+        conn = self._get_metrics_db_connection()
+        if not conn:
+            return web.json_response({'error': 'Database connection failed'}, status=503)
+
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT epoch_time FROM logs WHERE log_id = ?", (log_id,))
+            row = cursor.fetchone()
+
+            if row:
+                return web.json_response({
+                    'status': 'ok',
+                    'log_id': log_id,
+                    'timestamp': row[0]
+                })
+            else:
+                return web.json_response({
+                    'status': 'not_found',
+                    'log_id': log_id
+                }, status=404)
+        except Exception as e:
+            return web.json_response({'error': str(e)}, status=500)
+        finally:
+            conn.close()
 
     async def handle_api_command(self, request):
         """Handle command requests to nodes"""
@@ -2419,7 +2520,7 @@ class WebController(Controller):
             })
 
         except Exception as e:
-            self._admin_log(f"Error querying raw minute data: {e}")
+            self._log_admin(f"Error querying raw minute data: {e}")
             import traceback
             traceback.print_exc()
             return web.json_response({'error': str(e)}, status=500)
@@ -2445,7 +2546,7 @@ class WebController(Controller):
                 }
                 node_specific_html = node.handler.get_expanded_html(node_name, node_data)
             except Exception as e:
-                self._admin_log(f"Error getting expanded HTML from handler: {e}")
+                self._log_admin(f"Error getting expanded HTML from handler: {e}")
                 node_specific_html = '<div class="expanded-section"><h4>Error</h4><pre>Failed to load node data</pre></div>'
         else:
             node_specific_html = f'''
@@ -2760,11 +2861,11 @@ class WebController(Controller):
                 result[node_ip].sort(key=lambda x: x[0])
 
             total_points = sum(len(v) for v in result.values())
-            self._admin_log(f"{metric_column} (deltas): {total_points} event points from {len(result)} nodes")
+            self._log_admin(f"{metric_column} (deltas): {total_points} event points from {len(result)} nodes")
             return result
 
         except Exception as e:
-            self._admin_log(f"Error querying {metric_column}: {e}")
+            self._log_admin(f"Error querying {metric_column}: {e}")
             import traceback
             traceback.print_exc()
             return {}
@@ -2814,7 +2915,7 @@ class WebController(Controller):
             return result
 
         except Exception as e:
-            self._admin_log(f"Error querying RSSI: {e}")
+            self._log_admin(f"Error querying RSSI: {e}")
             return {}
         finally:
             conn.close()
@@ -2873,7 +2974,7 @@ class WebController(Controller):
             return result
 
         except Exception as e:
-            self._admin_log(f"Error querying heap: {e}")
+            self._log_admin(f"Error querying heap: {e}")
             return {}
         finally:
             conn.close()
@@ -2914,7 +3015,7 @@ class WebController(Controller):
                 'max_time': row[1] if row[1] else None
             })
         except Exception as e:
-            self._admin_log(f"Error querying time range: {e}")
+            self._log_admin(f"Error querying time range: {e}")
             return web.json_response({'min_time': None, 'max_time': None})
         finally:
             conn.close()
@@ -2934,18 +3035,19 @@ class WebController(Controller):
         self.web_app.router.add_post('/api/node/data', self.handle_api_node_data)
         self.web_app.router.add_post('/api/node/html', self.handle_api_node_html)
         self.web_app.router.add_post('/api/search', self.handle_api_search)
+        self.web_app.router.add_post('/api/logs/lookup', self.handle_api_logs_lookup)
         if HAS_SYSTEMD:
             self.web_app.router.add_post('/api/journal/query', self.handle_api_journal_query)
             self.web_app.router.add_get('/api/journal/range', self.handle_api_journal_time_range)
-            self._admin_log("Journal API endpoints enabled")
+            self._log_admin("Journal API endpoints enabled")
         if self.graphs_enabled:
             self.web_app.router.add_post('/api/graph/data', self.handle_api_graph_data)
             self.web_app.router.add_post('/api/graph/raw_minute_data', self.handle_api_raw_minute_data)
             self.web_app.router.add_get('/api/graph/nodes', self.handle_api_graph_nodes)
             self.web_app.router.add_get('/api/graph/time_range', self.handle_api_graph_time_range)
-            self._admin_log(f"Graph endpoints enabled")
+            self._log_admin(f"Graph endpoints enabled")
         else:
-            self._admin_log(f"Graph endpoints disabled (use --db-path to enable)")
+            self._log_admin(f"Graph endpoints disabled (use --db-path to enable)")
 
         # Event to signal the web thread to stop
         self.web_stop_event = threading.Event()
@@ -4537,7 +4639,8 @@ class WebController(Controller):
         let searchCaseSensitive = false;
         let searchWholeWord = false;
         let isSearching = false;
-        let searchCursor = null;           // Timestamp of last found match
+        let searchCursor = null;
+        let searchCursorDb = null;
         let searchLogId = null;
         let lastSearchDirection = null;    // 'next' or 'prev'
         let autoScrolling = false;         // Are we auto-scrolling to a match?
@@ -5103,12 +5206,6 @@ class WebController(Controller):
             alert('Copied to clipboard');
         }
 
-        // Extract log_id from a log message (returns integer, 0 if not found)
-        function extractLogIdFromMessage(message) {
-            const match = message.match(/\\[LOG_ID=(\\d+)\\]/);
-            return match ? parseInt(match[1], 10) : 0;
-        }
-
         // Parse node IP last octet from log line
         function extractNodeLastOctet(logLine) {
             // Match [NODE] [10.10.3.1] format
@@ -5207,25 +5304,36 @@ class WebController(Controller):
         }
 
         function handleLogClick(logDiv, timestamp) {
-            return (e) => {
+            return async (e) => {
                 e.stopPropagation();
                 const ts = parseFloat(logDiv.getAttribute('data-timestamp'));
+                const logId = parseInt(logDiv.getAttribute('data-log_id'), 10);
+
                 if (ts) {
-                    // If clicking on the current cursor line, clear it
-                    if (searchCursor !== null && Math.abs(ts - searchCursor) < 0.001) {
-                        resetSearch();
-                        showTemporaryMessage('Cursor cleared', 'search');
+                    resetSearch();
+                    searchCursor = ts;  // Journal timestamp for display
+
+                    // Fetch database timestamp for this log_id
+                    if (logId && logId > 0) {
+                        const dbTs = await getDbTimestampByLogId(logId);
+                        if (dbTs) {
+                            searchCursorDb = dbTs;
+                            console.log(`Cursor set: journal=${ts}, db=${dbTs}`);
+                        } else {
+                            searchCursorDb = ts;  // Fallback
+                        }
                     } else {
-                        resetSearch();
-                        searchCursor = ts;
-                        showTemporaryMessage(`Cursor set to ${new Date(ts * 1000).toLocaleTimeString()}`, 'search');
-                        updateCursorHighlight();
-                        // Flash the clicked line
-                        logDiv.style.backgroundColor = '#4a4a4a';
-                        setTimeout(() => {
-                            if (logDiv) logDiv.style.backgroundColor = '';
-                        }, 500);
+                        searchCursorDb = ts;
                     }
+
+                    showTemporaryMessage(`Cursor set to ${new Date(ts * 1000).toLocaleTimeString()}`, 'search');
+                    updateCursorHighlight();
+
+                    // Flash the clicked line
+                    logDiv.style.backgroundColor = '#4a4a4a';
+                    setTimeout(() => {
+                        if (logDiv) logDiv.style.backgroundColor = '';
+                    }, 500);
                 }
             };
         }
@@ -6461,7 +6569,7 @@ class WebController(Controller):
             const newEntries = newLogs.map(log => ({
                 timestamp: log.timestamp,
                 message: log.message,
-                log_id: extractLogIdFromMessage(log.message)
+                log_id: log.log_id || 0
             })).filter(log => shouldDisplayLog(log.message));
 
             // Create a Set of existing timestamps for quick lookup (with tolerance)
@@ -6509,7 +6617,7 @@ class WebController(Controller):
                     newEntries.push({
                         timestamp: log.timestamp,
                         message: log.message,
-                        log_id: extractLogIdFromMessage(log.message)
+                        log_id: log.log_id || 0
                     });
                 }
             }
@@ -6551,7 +6659,7 @@ class WebController(Controller):
                     newEntries.push({
                         timestamp: log.timestamp,
                         message: log.message,
-                        log_id: extractLogIdFromMessage(log.message)
+                        log_id: log.log_id || 0
                     });
                 }
             }
@@ -6670,6 +6778,55 @@ class WebController(Controller):
             }
         }
 
+        async function getDbTimestampByLogId(logId) {
+            if (!logId || logId === 0) return null;
+
+            try {
+                const response = await fetch('/api/logs/lookup', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ log_id: logId })
+                });
+                const data = await response.json();
+                if (data.status === 'ok' && data.timestamp) {
+                    return data.timestamp;
+                }
+            } catch (e) {
+                console.warn('getDbTimestampByLogId failed:', e);
+            }
+            return null;
+        }
+
+        async function getJournalTimestampByLogId(logId, approxTimestamp) {
+            if (!logId || logId === 0) return approxTimestamp;
+
+            try {
+                // Use a 10-second window around the approximate timestamp
+                const response = await fetch('/api/journal/query', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        since: approxTimestamp - 10,
+                        until: approxTimestamp + 10
+                    })
+                });
+                const data = await response.json();
+
+                if (data.status === 'ok' && data.logs) {
+                    const match = data.logs.find(log => log.log_id === logId);
+                    if (match && match.timestamp) {
+                        console.log(`Found journal timestamp ${match.timestamp} for log_id ${logId} (was ${approxTimestamp})`);
+                        return match.timestamp;
+                    } else {
+                        console.log(`No match found for log_id ${logId} in ${data.logs.length} logs between ${approxTimestamp - 10} and ${approxTimestamp + 10}`);
+                    }
+                }
+            } catch (e) {
+                console.warn('getJournalTimestampByLogId failed:', e);
+            }
+            return approxTimestamp;
+        }
+
         // Fill a gap by fetching logs in a specific direction
         async function fillGapDirectional(edgeTimestamp, direction, gapMarkerElement) {
             const gapKey = gapMarkerElement.dataset.gapKey;
@@ -6777,11 +6934,6 @@ class WebController(Controller):
         // Rebuild entire debug display (used after bulk adds)
         function rebuildDebugDisplay() {
             console.log('rebuildDebugDisplay: logBuffer entries with log_id:');
-            for (let i = 0; i < logBuffer.length; i++) {
-                if (logBuffer[i].log_id) {
-                    console.log(`  index ${i}: timestamp=${logBuffer[i].timestamp}, log_id=${logBuffer[i].log_id}`);
-                }
-            }
             if (!debugWindow) return;
 
             const shouldScrollToBottom = !autoScrollLocked && isAtBottom;
@@ -6991,17 +7143,6 @@ class WebController(Controller):
         async function scrollToTimestamp(timestamp, targetLogId = null) {
             console.log('scrollToTimestamp: started with timestamp', timestamp, 'targetLogId', targetLogId);
 
-            // DEBUG: Dump all log_ids currently in the buffer
-            if (targetLogId) {
-                console.log('=== Current buffer log_ids ===');
-                for (let i = 0; i < logElements.length; i++) {
-                    const rid = logElements[i].getAttribute('data-log_id');
-                    if (rid && parseInt(rid) !== 0) {
-                        console.log(`  element ${i}: log_id=${rid}, timestamp=${logTimestamps[i]}`);
-                    }
-                }
-            }
-
             if (!timestamp) {
                 console.error('scrollToTimestamp: No timestamp provided');
                 return;
@@ -7078,8 +7219,8 @@ class WebController(Controller):
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         timestamp: timestamp,
-                        before: 100,
-                        after: 100
+                        before: 500,  // Nice and wide as the journal entry
+                        after: 500    // and the database may be far apart
                     })
                 });
                 const data = await response.json();
@@ -7173,6 +7314,17 @@ class WebController(Controller):
             console.log('=== scrollToMatch ===');
             console.log(`timestamp: ${timestamp}, targetLogId: ${targetLogId}`);
 
+            // Dump all log_ids in current DOM for comparison
+            if (targetLogId > 0) {
+                console.log('Current DOM log_ids:');
+                for (let i = 0; i < logElements.length; i++) {
+                    const rid = logElements[i].getAttribute('data-log_id');
+                    if (rid && rid !== '0') {
+                        console.log(`  [${i}] data-log_id="${rid}"`);
+                    }
+                }
+            }
+
             autoScrolling = true;
             let targetElement = null;
 
@@ -7180,7 +7332,6 @@ class WebController(Controller):
                 console.log(`Looking for log_id=${targetLogId} in logElements...`);
                 for (let i = 0; i < logElements.length; i++) {
                     const rid = parseInt(logElements[i].getAttribute('data-log_id'));
-                    console.log(`  element ${i}: data-log_id="${logElements[i].getAttribute('data-log_id')}" -> parsed=${rid}`);
                     if (rid === targetLogId) {
                         targetElement = logElements[i];
                         console.log(`✓ Found by log_id at index ${i}`);
@@ -7277,6 +7428,7 @@ class WebController(Controller):
         // Reset cursor when:
         function resetSearch() {
             searchCursor = null;
+            searchCursorDb = null;
             searchLogId = null;
             lastSearchDirection = null;
             autoScrolling = false;
@@ -7342,14 +7494,14 @@ class WebController(Controller):
             let fromTimestamp;
 
             // Determine starting point
-            if (!forceReset && searchCursor !== null && !autoScrolling) {
-                fromTimestamp = searchCursor;
+            if (!forceReset && searchCursorDb !== null && !autoScrolling) {
+                fromTimestamp = searchCursorDb;
                 if (direction === 'next') {
-                    fromTimestamp += 0.1;
+                    fromTimestamp += 0.001;
                 } else {
-                    fromTimestamp -= 0.1;
+                    fromTimestamp -= 0.001;
                 }
-                console.log(`Using cursor: ${fromTimestamp}`);
+                console.log(`Using cursor with offset (db timestamp): ${fromTimestamp}`);
             } else {
                 fromTimestamp = (direction === 'next')
                     ? getVisibleTimestamp('oldest')
@@ -7439,8 +7591,18 @@ class WebController(Controller):
                         console.log(`  timestamp: ${pollData.timestamp}`);
                         console.log(`  log_id: ${pollData.log_id}`);
                         console.log(`  message: ${pollData.message.substring(0, 100)}...`);
+
                         found = true;
-                        searchCursor = pollData.timestamp;
+
+                        // Get accurate journal timestamp for scrolling
+                        let scrollTimestamp = pollData.timestamp;
+                        if (pollData.log_id && pollData.log_id > 0) {
+                            scrollTimestamp = await getJournalTimestampByLogId(pollData.log_id, pollData.timestamp);
+                            console.log(`  Using scroll timestamp: ${scrollTimestamp}`);
+                        }
+
+                        searchCursor = scrollTimestamp;
+                        searchCursorDb = pollData.timestamp;
                         searchLogId = pollData.log_id;
                         lastSearchDirection = direction;
                         updateCursorHighlight();
@@ -7452,16 +7614,14 @@ class WebController(Controller):
 
                         const shortMsg = pollData.message.length > 80 ? pollData.message.substring(0, 77) + '...' : pollData.message;
 
-                        // NEW: Check if we have a valid log_id
                         if (pollData.log_id && pollData.log_id > 0) {
                             showTemporaryMessage(`✅ Found: ${shortMsg}`, 'search');
                         } else {
                             showTemporaryMessage(`⚠️ Found: ${shortMsg} (approximate position - old log)`, 'search');
                         }
 
-                        // Wait for scroll to complete before breaking
                         console.log('performSearch: calling scrollToMatch');
-                        await scrollToMatch(pollData.timestamp, pollData.log_id);
+                        await scrollToMatch(scrollTimestamp, pollData.log_id);
                         console.log('performSearch: scrollToMatch completed');
                         break;
                     }

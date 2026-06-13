@@ -75,8 +75,8 @@ class FGRLogServer:
         self._load_node_config()
 
         # Initialize LibLogger
-        self.logger = LibLogger()
-        self.logger.init(self.db_path)
+        self.lib_logger = LibLogger()
+        self.lib_logger.init(self.db_path)
 
         # Server state
         self.server_socket: Optional[socket.socket] = None
@@ -130,11 +130,11 @@ class FGRLogServer:
 
     def _init_crash_tables(self):
         """Create crash_dumps table if it doesn't exist (database mode only)."""
-        if not self.logger.is_db_available():
+        if not self.lib_logger.is_db_available():
             print("[LogServer] Database not available, crash dumps will not be saved")
             return
 
-        self.logger.execute_sql("""
+        self.lib_logger.execute_sql("""
             CREATE TABLE IF NOT EXISTS crash_dumps (
                 crash_id TEXT PRIMARY KEY,
                 timestamp_utc TEXT NOT NULL,
@@ -145,8 +145,8 @@ class FGRLogServer:
         """)
 
         # Create index for performance
-        self.logger.execute_sql("CREATE INDEX IF NOT EXISTS idx_crash_ip ON crash_dumps(ip)")
-        self.logger.execute_sql("CREATE INDEX IF NOT EXISTS idx_crash_time ON crash_dumps(timestamp_utc)")
+        self.lib_logger.execute_sql("CREATE INDEX IF NOT EXISTS idx_crash_ip ON crash_dumps(ip)")
+        self.lib_logger.execute_sql("CREATE INDEX IF NOT EXISTS idx_crash_time ON crash_dumps(timestamp_utc)")
 
         print("[LogServer] Crash dump tables ready")
 
@@ -156,11 +156,11 @@ class FGRLogServer:
             while self.running:
                 time.sleep(86400)  # Once per day
 
-                if self.logger.is_db_available() and self.retention_days > 0:
+                if self.lib_logger.is_db_available() and self.retention_days > 0:
                     # Keep only last 1000 crash dumps regardless of age
                     # (crash dumps are important, but we don't need millions)
                     try:
-                        self.logger.execute_sql("""
+                        self.lib_logger.execute_sql("""
                             DELETE FROM crash_dumps
                             WHERE crash_id NOT IN (
                                 SELECT crash_id FROM crash_dumps
@@ -204,12 +204,12 @@ class FGRLogServer:
                         core_binary = base64.b64decode(raw_b64)  # Decode on-the-fly
 
                         # Insert into Database using LibLogger's SQL executor
-                        if self.logger.is_db_available():
+                        if self.lib_logger.is_db_available():
                             insert_sql = """
                                 INSERT INTO crash_dumps (crash_id, timestamp_utc, ip, fw_hash, core_blob)
                                 VALUES (?, ?, ?, ?, ?)
                             """
-                            self.logger.execute_sql(insert_sql, (
+                            self.lib_logger.execute_sql(insert_sql, (
                                 crash_id,
                                 datetime.now(timezone.utc).isoformat(),
                                 ip,
@@ -226,7 +226,7 @@ class FGRLogServer:
                             # and crash_decoder.py, when triggered, will
                             # know what to do
                             link_msg = f"🛑 CRASH! Decode: http://127.0.0.1:8080//{crash_id}"
-                            self.logger.admin_log(link_msg, log_level=3)  # ERROR level
+                            self.lib_logger.log(link_msg, log_level=3)  # ERROR level
                             print(f"[LogServer] Crash captured: {crash_id} -> {link_msg}")
                         else:
                             print(f"[LogServer] Database not available, crash {crash_id} not saved")
@@ -257,11 +257,11 @@ class FGRLogServer:
                         crash_id = path.split('/')[-1]
                         print(f"[LogServer] /data/ request for crash ID {crash_id}")
 
-                        if not server_instance.logger.is_db_available():
+                        if not server_instance.lib_logger.is_db_available():
                             self.send_error(503, "Database not available")
                             return
 
-                        result = server_instance.logger.execute_sql(
+                        result = server_instance.lib_logger.execute_sql(
                             "SELECT core_blob FROM crash_dumps WHERE crash_id = ?",
                             (crash_id,)
                         )
@@ -281,11 +281,11 @@ class FGRLogServer:
                         crash_id = path.split('/')[-1]
                         print(f"[LogServer] /meta/ request for crash ID {crash_id}")
 
-                        if not server_instance.logger.is_db_available():
+                        if not server_instance.lib_logger.is_db_available():
                             self.send_error(503, "Database not available")
                             return
 
-                        result = server_instance.logger.execute_sql(
+                        result = server_instance.lib_logger.execute_sql(
                             "SELECT fw_hash FROM crash_dumps WHERE crash_id = ?",
                             (crash_id,)
                         )
@@ -306,7 +306,7 @@ class FGRLogServer:
                         self.send_error(404, "Not found")
 
                 except Exception as e:
-                    server_instance.logger.admin_log(f"Web API error: {str(e)}", log_level=3)
+                    server_instance.lib_logger.log_admin(f"Web API error: {str(e)}", log_level=3)
                     self.send_response(500)
                     self.send_header("Content-Type", "text/plain")
                     self.end_headers()
@@ -319,12 +319,12 @@ class FGRLogServer:
                 print(f"[LogServer]   - Core dump: http://{self.web_bind}:{self.web_port}/data/{{crash_id}}")
                 print(f"[LogServer]   - Metadata:  http://{self.web_bind}:{self.web_port}/meta/{{crash_id}}")
 
-                self.logger.admin_log(f"Web server started on {self.web_bind}:{self.web_port}", log_level=6)
+                self.lib_logger.log_admin(f"Web server started on {self.web_bind}:{self.web_port}", log_level=6)
 
                 while self.running:
                     httpd.handle_request()
             except Exception as e:
-                self.logger.admin_log(f"Web server died: {str(e)}", log_level=3)
+                self.lib_logger.log_admin(f"Web server died: {str(e)}", log_level=3)
                 print(f"[LogServer] Web server fatal failure: {e}")
 
         web_thread = threading.Thread(target=web_worker, daemon=True)
@@ -371,7 +371,7 @@ class FGRLogServer:
                         message_type = 'METRIC'
 
                     # Log to journal and database using LibLogger
-                    self.logger.log(
+                    self.lib_logger.log(
                         source='NODE',
                         node_ip=ip,
                         message=log_text,
@@ -462,7 +462,7 @@ class FGRLogServer:
                 pass
 
         # Shutdown LibLogger
-        self.logger.shutdown()
+        self.lib_logger.shutdown()
 
         print("\n=== Final Server Statistics ===")
         print(f"Total Client Connections  : {self.stats['connections']}")

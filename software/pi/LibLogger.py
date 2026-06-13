@@ -18,11 +18,16 @@
 LibLogger - Shared logging module for FGR system.
 
 DESIGN:
-- Writer thread owns the ONLY database connection
+- Writer thread owns the only long-lived write connection
 - Client threads NEVER touch the database
 - log_ids come from a shared buffer (deque)
 - Writer thread refills buffer before it gets low
 - No per-thread connections, no connection leaks
+
+INTEGRATION:
+- Provides a logging.Handler subclass to capture all standard Python logging
+- Use attach_to_root_logger() to automatically capture all logs
+- Use admin_log() for logs that should NOT go to the database
 """
 
 import sqlite3
@@ -30,6 +35,7 @@ import threading
 import time
 import queue
 import collections
+import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, List, Dict, Any
@@ -40,6 +46,64 @@ try:
 except ImportError:
     HAS_SYSTEMD = False
     print("[LibLogger] Warning: python-systemd not installed")
+
+
+class LibLoggerHandler(logging.Handler):
+    """
+    Custom logging handler that sends all log records through LibLogger.
+    Attach to root logger to capture everything automatically.
+    """
+
+    def __init__(self, liblogger: 'LibLogger', node_ip: str = "0.0.0.0",
+                 source: str = "CTRL"):
+        super().__init__()
+        self.liblogger = liblogger
+        self.node_ip = node_ip
+        self.source = source
+        self._closed = False
+
+    def emit(self, record: logging.LogRecord):
+        """Send log record to LibLogger"""
+        if self._closed:
+            return
+
+        # Don't try to log during shutdown
+        if hasattr(self.liblogger, '_stop_writer') and self.liblogger._stop_writer.is_set():
+            return
+
+        # Map Python logging levels to LibLogger levels
+        # LibLogger: 0=DEBUG, 1=INFO, 2=WARN, 3=ERROR
+        level_map = {
+            logging.DEBUG: 0,
+            logging.INFO: 1,
+            logging.WARNING: 2,
+            logging.ERROR: 3,
+            logging.CRITICAL: 3
+        }
+
+        log_level = level_map.get(record.levelno, 1)
+
+        # Format the message
+        msg = self.format(record)
+
+        # Send to LibLogger
+        try:
+            self.liblogger.log(
+                source=self.source,
+                node_ip=self.node_ip,
+                message=msg,
+                log_level=log_level,
+                log_tag=record.name,  # Logger name becomes the tag
+                message_type='LOG'
+            )
+        except Exception as e:
+            # Fallback to avoid recursion
+            print(f"LibLoggerHandler failed: {e}")
+
+    def close(self):
+        """Close the handler - prevents further logging"""
+        self._closed = True
+        super().close()
 
 
 class LibLogger:
@@ -61,6 +125,9 @@ class LibLogger:
             self.writer_thread = None
             self._stop_writer = threading.Event()
             self._reserve_lock = threading.Lock()
+            self._attached_handlers = []  # Track attached handlers for cleanup
+            self._db_conn = None
+            self._db_conn_lock = threading.Lock()
 
             # Shared buffer for log_ids (deque is thread-safe for append/popleft)
             self.log_id_buffer = collections.deque()
@@ -81,9 +148,7 @@ class LibLogger:
             self._start_writer_thread()
 
             # Aggressively pre-fill buffer for burst handling
-            conn = sqlite3.connect(str(self.db_path), timeout=5.0)
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA synchronous=NORMAL")
+            conn = self._get_temp_connection()
             try:
                 for _ in range(3):  # 3 refills = 6000 IDs
                     self._refill_buffer(conn)
@@ -99,24 +164,114 @@ class LibLogger:
         self._initialized = True
         print("[LibLogger] Initialization complete")
 
+    def _get_temp_connection(self):
+        """Create a temporary database connection WITH auto-commit"""
+        conn = sqlite3.connect(str(self.db_path), timeout=5.0, isolation_level=None)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        return conn
+
+    def _get_connection(self):
+        """Get the shared database connection (for writer thread only)"""
+        with self._db_conn_lock:
+            if self._db_conn is None:
+                self._db_conn = sqlite3.connect(str(self.db_path), timeout=5.0, isolation_level=None)
+                self._db_conn.execute("PRAGMA journal_mode=WAL")
+                self._db_conn.execute("PRAGMA synchronous=NORMAL")
+                self._db_conn.execute("PRAGMA busy_timeout=10000")
+            return self._db_conn
+
+    def _close_connection(self):
+        """Close the shared database connection"""
+        with self._db_conn_lock:
+            if self._db_conn is not None:
+                try:
+                    self._db_conn.close()
+                except Exception:
+                    pass
+                finally:
+                    self._db_conn = None
+
+    def attach_to_root_logger(self, node_ip: str = "0.0.0.0",
+                               source: str = "CTRL",
+                               level: int = logging.INFO,
+                               format_str: str = '%(asctime)s - %(name)s - %(levelname)s - %(message)s') -> None:
+        """
+        Attach a LibLogger handler to the root logger.
+        This will capture ALL logs from the entire application.
+
+        Args:
+            node_ip: Default node_ip for logs (use '0.0.0.0' for controller)
+            source: Default source identifier (e.g., 'CTRL', 'WEB')
+            level: Minimum log level to capture
+            format_str: Format string for log messages
+        """
+        if not self._initialized:
+            raise RuntimeError("[LibLogger] LibLogger not initialized. Call init() first.")
+
+        handler = LibLoggerHandler(self, node_ip=node_ip, source=source)
+        handler.setLevel(level)
+        handler.setFormatter(logging.Formatter(format_str))
+
+        logging.root.addHandler(handler)
+        self._attached_handlers.append(handler)
+
+        print(f"[LibLogger] Attached to root logger (source={source}, node_ip={node_ip})")
+
+    def attach_to_logger(self, logger: logging.Logger, node_ip: str = "0.0.0.0",
+                         source: str = "CTRL", level: int = logging.INFO,
+                         format_str: str = '%(asctime)s - %(name)s - %(levelname)s - %(message)s') -> None:
+        """
+        Attach a LibLogger handler to a specific logger.
+
+        Args:
+            logger: The logger to attach to
+            node_ip: Default node_ip for logs
+            source: Default source identifier
+            level: Minimum log level to capture
+            format_str: Format string for log messages
+        """
+        if not self._initialized:
+            raise RuntimeError("[LibLogger] LibLogger not initialized. Call init() first.")
+
+        handler = LibLoggerHandler(self, node_ip=node_ip, source=source)
+        handler.setLevel(level)
+        handler.setFormatter(logging.Formatter(format_str))
+
+        logger.addHandler(handler)
+        self._attached_handlers.append(handler)
+
+        print(f"[LibLogger] Attached to logger '{logger.name}' (source={source}, node_ip={node_ip})")
+
+    def detach_all(self) -> None:
+        """Remove all attached LibLogger handlers"""
+        for handler in self._attached_handlers:
+            # Close the handler first to prevent further logging
+            handler.close()
+            # Remove from root logger
+            logging.root.removeHandler(handler)
+
+        self._attached_handlers.clear()
+        print("[LibLogger] Detached all handlers")
+
     def _init_tables(self) -> None:
         """Create tables if needed - uses temporary connection."""
         if self.db_path is None:
             return
 
-        # Temporary connection - closed after use
-        conn = sqlite3.connect(str(self.db_path), timeout=5.0)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
+        conn = self._get_temp_connection()
         cursor = conn.cursor()
 
         try:
             cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='logs'")
             if cursor.fetchone():
                 # Tables exist - ensure sequence has initial row
-                cursor.execute("INSERT OR IGNORE INTO global_sequence (id, next_seq) VALUES (1, 1)")
-                conn.commit()
-                print("[LibLogger] Database schema already exists")
+                cursor.execute("SELECT next_seq FROM global_sequence WHERE id = 1")
+                row = cursor.fetchone()
+                if row:
+                    print("[LibLogger] Database schema already exists")
+                else:
+                    raise RuntimeError("[LibLogger] Existing database is missing global_sequence row")
                 return
 
             print("[LibLogger] Creating database schema...")
@@ -189,8 +344,7 @@ class LibLogger:
                         print(f"[LibLogger] Refilled buffer: {start}-{end} (now {len(self.log_id_buffer)} IDs)")
                         return
                     else:
-                        cursor.execute("INSERT INTO global_sequence (id, next_seq) VALUES (1, 1)")
-                        continue
+                        raise RuntimeError("[LibLogger] global_sequence row missing")
                 except sqlite3.OperationalError as e:
                     if "locked" in str(e) and attempt < 2:
                         time.sleep(0.05 * (2 ** attempt))
@@ -200,7 +354,7 @@ class LibLogger:
     def _get_next_log_id(self) -> int:
         """Get next log_id from buffer - called by ANY thread."""
         if self.db_path is None:
-            raise RuntimeError("Cannot get log_id in journal-only mode")
+            raise RuntimeError("[LibLogger] Cannot get log_id in journal-only mode")
 
         # Try to pop from buffer
         with self.buffer_lock:
@@ -216,7 +370,7 @@ class LibLogger:
                     return self.log_id_buffer.popleft()
             time.sleep(0.001)
 
-        raise RuntimeError("No log_ids available - buffer underrun")
+        raise RuntimeError("[LibLogger] No log_ids available - buffer underrun")
 
     def _start_writer_thread(self):
         """Start the writer thread - owns the ONLY database connection."""
@@ -224,11 +378,8 @@ class LibLogger:
         self._stop_writer.clear()
 
         def writer_loop():
-            # Use autocommit mode to avoid nested transaction errors
-            conn = sqlite3.connect(str(self.db_path), timeout=5.0, isolation_level=None)
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA synchronous=NORMAL")
-            conn.execute("PRAGMA busy_timeout=10000")
+            # Writer thread creates its own connection
+            conn = self._get_connection()
             cursor = conn.cursor()
 
             print("[LibLogger] Writer thread started")
@@ -307,7 +458,6 @@ class LibLogger:
                 except Exception as e:
                     print(f"[LibLogger] Final flush error: {e}")
 
-            conn.close()
             print("[LibLogger] Writer thread stopped")
 
         self.writer_thread = threading.Thread(target=writer_loop, daemon=False, name="LibLogger-Writer")
@@ -318,7 +468,11 @@ class LibLogger:
             message_type: str = "LOG") -> int:
         """Write a log entry - called by ANY thread."""
         if not self._initialized:
-            raise RuntimeError("LibLogger not initialized")
+            raise RuntimeError("[LibLogger] LibLogger not initialized")
+
+        # Don't accept new logs during shutdown
+        if self._stop_writer.is_set():
+            return -1
 
         log_id = self._get_next_log_id() if self.db_path is not None else None
 
@@ -335,7 +489,7 @@ class LibLogger:
             try:
                 self.write_queue.put_nowait((query, params))
             except queue.Full:
-                raise RuntimeError(f"Queue full, log_id {log_id} lost")
+                raise RuntimeError(f"[LibLogger] Queue full, log_id {log_id} lost")
 
         if HAS_SYSTEMD:
             extra = {
@@ -351,9 +505,9 @@ class LibLogger:
                 extra['FGR_LOG_TAG'] = log_tag
             systemd.journal.send(message, **extra)
 
-        return log_id
+        return log_id if log_id is not None else 0
 
-    def admin_log(self, message: str, log_level: int = 6) -> None:
+    def log_admin(self, message: str, log_level: int = 6) -> None:
         """Admin log - journal only."""
         if HAS_SYSTEMD:
             systemd.journal.send(message, SYSLOG_IDENTIFIER='fgr-log-server',
@@ -415,23 +569,42 @@ class LibLogger:
             conn.close()
 
     def shutdown(self, timeout: float = 5.0) -> None:
+        """
+        Gracefully shut down LibLogger and all attached handlers.
+        """
         if self.db_path is None:
+            print("[LibLogger] Journal-only mode, nothing to shut down")
             return
 
         print("[LibLogger] Shutting down...")
+
+        # 1. Detach all handlers FIRST to prevent new logs from entering
+        self.detach_all()
+
+        # 2. Stop accepting new work
         self._stop_writer.set()
 
+        # 3. Send sentinel to writer thread
         if self.write_queue:
             try:
                 self.write_queue.put_nowait((None, None))
             except queue.Full:
                 pass
 
+        # 4. Wait for writer thread to finish processing queued logs
         if self.writer_thread and self.writer_thread.is_alive():
-            self.writer_thread.join(timeout=2.0)
+            pending = self.write_queue.qsize() if self.write_queue else 0
+            if pending > 0:
+                print(f"[LibLogger] Waiting for {pending} queued logs...")
+
+            self.writer_thread.join(timeout=timeout)
+
             if self.writer_thread.is_alive():
-                print("[LibLogger] WARNING: Writer thread did not stop")
+                print("[LibLogger] WARNING: Writer thread did not stop within timeout")
             else:
                 print("[LibLogger] Writer thread stopped cleanly")
+
+        # 5. Close database connection
+        self._close_connection()
 
         print("[LibLogger] Shutdown complete")

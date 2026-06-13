@@ -59,6 +59,8 @@ from dataclasses import dataclass, field
 from enum import IntEnum
 from pathlib import Path
 
+from LibLogger import LibLogger
+
 # ============================================================================
 # Setup paths for protocol import
 # ============================================================================
@@ -514,10 +516,14 @@ class Controller:
     """
 
     def __init__(self, listen_ip: str = "10.10.3.1", port: int = 5000,
-                 nodes_dir: str = None, cfg_file: str = None):
+                 nodes_dir: str = None, cfg_file: str = None, db_path: str = None):
         self.listen_ip = listen_ip
         self.port = port
         self.logger = logging.getLogger("Controller")
+        self.lib_logger = LibLogger()
+        self.lib_logger.init(Path(db_path))
+        # Attach to logger - captures ALL logs automatically
+        self.lib_logger.attach_to_logger(self.logger, source='CTRL')
 
         if nodes_dir is None:
             self.nodes_dir = SCRIPT_DIR / "nodes"
@@ -806,6 +812,7 @@ class Controller:
             self.heartbeat_thread.join(timeout=2)
 
         self.logger.info("Controller stopped")
+        self.lib_logger.shutdown()
 
     def _accept_loop(self) -> None:
         """Accept incoming connections with global rate limiting and per-IP staggering"""
