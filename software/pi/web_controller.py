@@ -42,7 +42,7 @@ import re
 import logging
 import sqlite3
 import uuid
-import systemd.journal
+import traceback
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
@@ -417,7 +417,6 @@ class SearchIterator:
 
         except Exception as e:
             self._log_debug(f"SQLite search error: {e}")
-            import traceback
             self._log_debug(traceback.format_exc())
             return None
         finally:
@@ -784,7 +783,6 @@ class WebController(Controller):
 
         except Exception as e:
             print(f"Error initializing metrics_history: {e}")
-            import traceback
             traceback.print_exc()
         finally:
             conn.close()
@@ -1823,7 +1821,6 @@ class WebController(Controller):
             })
 
         except Exception as e:
-            import traceback
             traceback.print_exc()
             return web.json_response({'error': str(e)}, status=500)
 
@@ -1963,13 +1960,14 @@ class WebController(Controller):
             return web.json_response({'error': str(e)}, status=500)
 
     async def handle_api_search(self, request):
-        """Handle search requests - non-blocking with thread-safe iterator"""
-        # Search requires database
-        if not self.graphs_enabled:
-            return web.json_response({'error': 'Search requires database. Use --db-path to enable.'}, status=503)
+        """Handle search requests - limited fetch database search"""
 
-        data = await request.json()
+        data = await request.json() if request.body_exists else {}
         action = data.get('action')
+
+        # Search must have database
+        if not self.db_path or not self.db_path.exists():
+            return web.json_response({'error': 'Search requires database. Use --db-path to enable.'}, status=503)
 
         if action == 'start':
             params = {
@@ -1980,43 +1978,178 @@ class WebController(Controller):
                 'exclude_ctrl': data.get('exclude_ctrl', False),
                 'include_nodes': data.get('include_nodes', []),
                 'min_log_level': data.get('min_log_level', 4),
-                'debug': data.get('debug', False)
             }
-            start_timestamp = data.get('from_timestamp')
+            from_timestamp = data.get('from_timestamp')
+            fetch_limit = data.get('fetch_limit', 200)  # Fetch 200 matches at a time
 
             if not params['search']:
                 return web.json_response({'error': 'No search term'}, status=400)
 
-            if not start_timestamp:
+            if not from_timestamp:
                 return web.json_response({'error': 'No starting timestamp'}, status=400)
 
-            # Create session WITHOUT iterator (will be created in thread pool)
-            session_id = str(uuid.uuid4())
-            self.search_sessions[session_id] = {
-                'last_access': time.time(),
-                'result': None,
-                'running': True,
-                'cancelled': False,
-                'finished': False,
-                'params': params,
-                'start_timestamp': start_timestamp,
-                'iterator': None,  # Will be created in thread pool
-                'total_scanned': 0
-            }
+            def do_search():
+                start_total = time.time()
+                conn = None
+                try:
+                    conn = sqlite3.connect(str(self.db_path))
+                    conn.row_factory = sqlite3.Row
+                    cursor = conn.cursor()
+                    search_term = params['search']
 
-            # Start background search task (creates iterator in thread pool)
-            asyncio.create_task(self._run_search_in_thread(session_id))
+                    # Build FTS query
+                    if params['whole_word']:
+                        fts_query = f'"{search_term.replace('"', '""')}"'
+                    else:
+                        fts_query = search_term
 
-            # Return immediately with session_id
-            return web.json_response({
-                'session_id': session_id,
-                'status': 'searching'
-            })
+                    # First, check if term exists at all (quick count)
+                    cursor.execute("SELECT COUNT(*) FROM logs_fts WHERE logs_fts MATCH ?", (fts_query,))
+                    total_matches = cursor.fetchone()[0]
+
+                    if total_matches == 0:
+                        return {'found': False, 'finished': True, 'total_matches': 0}
+
+                    # Find the rowid closest to the starting timestamp
+                    if params['direction'] == 'next':
+                        cursor.execute("SELECT rowid FROM logs WHERE epoch_time >= ? ORDER BY epoch_time ASC LIMIT 1", (from_timestamp,))
+                    else:
+                        cursor.execute("SELECT rowid FROM logs WHERE epoch_time <= ? ORDER BY epoch_time DESC LIMIT 1", (from_timestamp,))
+
+                    start_rowid_row = cursor.fetchone()
+                    if not start_rowid_row:
+                        # No logs at or after the timestamp - wrap around
+                        if params['direction'] == 'next':
+                            cursor.execute("SELECT MIN(rowid) FROM logs")
+                        else:
+                            cursor.execute("SELECT MAX(rowid) FROM logs")
+                        start_rowid_row = cursor.fetchone()
+
+                    start_rowid = start_rowid_row[0]
+
+                    # Determine operator and order for the FTS query
+                    if params['direction'] == 'next':
+                        operator = '>='
+                        order = 'ASC'
+                    else:
+                        operator = '<='
+                        order = 'DESC'
+
+                    # Step 1: Get matching rowids from FTS (fast!)
+                    fts_query_sql = f"""
+                        SELECT rowid FROM logs_fts
+                        WHERE logs_fts MATCH ?
+                        AND rowid {operator} ?
+                        ORDER BY rowid {order}
+                        LIMIT ?
+                    """
+                    cursor.execute(fts_query_sql, (fts_query, start_rowid, fetch_limit))
+                    rowids = [row[0] for row in cursor.fetchall()]
+
+                    # Handle wrap if no matches
+                    wrapped = False
+                    if not rowids:
+                        if params['direction'] == 'next':
+                            cursor.execute("SELECT MIN(rowid) FROM logs")
+                        else:
+                            cursor.execute("SELECT MAX(rowid) FROM logs")
+                        wrap_rowid = cursor.fetchone()[0]
+                        cursor.execute(fts_query_sql, (fts_query, wrap_rowid, fetch_limit))
+                        rowids = [row[0] for row in cursor.fetchall()]
+                        wrapped = True
+
+                    if not rowids:
+                        return {'found': False, 'finished': True, 'total_matches': 0}
+
+                    # Step 2: Fetch full log details for those rowids (fast with IN)
+                    placeholders = ','.join(['?'] * len(rowids))
+                    cursor.execute(f"""
+                        SELECT log_id, epoch_time, message, node_ip, log_level, rowid
+                        FROM logs
+                        WHERE rowid IN ({placeholders})
+                        ORDER BY rowid {'ASC' if params['direction'] == 'next' else 'DESC'}
+                    """, rowids)
+                    rows = cursor.fetchall()
+
+                    # Apply filters (only if needed)
+                    if params['case_sensitive'] or params['whole_word'] or params['exclude_ctrl'] or params['include_nodes'] or params['min_log_level'] < 4:
+                        filter_params = {
+                            'search_term': search_term,
+                            'exclude_ctrl': params['exclude_ctrl'],
+                            'include_nodes': params['include_nodes'],
+                            'min_log_level': params['min_log_level'],
+                            'case_sensitive': params['case_sensitive'],
+                            'whole_word': params['whole_word']
+                        }
+                        filtered_matches = self._apply_search_filters(rows, filter_params)
+                    else:
+                        # No filtering needed - use rows directly
+                        filtered_matches = []
+                        for row in rows:
+                            filtered_matches.append({
+                                'log_id': row['log_id'],
+                                'epoch_time': row['epoch_time'],
+                                'message': row['message'],
+                                'node_ip': row['node_ip'],
+                                'rowid': row['rowid']
+                            })
+
+                    if not filtered_matches:
+                        return {'found': False, 'finished': True, 'total_matches': 0}
+
+                    # Create session
+                    session_id = str(uuid.uuid4())
+                    self.search_sessions[session_id] = {
+                        'last_access': time.time(),
+                        'matches': filtered_matches,
+                        'total_matches': total_matches,
+                        'current_index': 0,
+                        'direction': params['direction'],
+                        'search_term': search_term,
+                        'fts_query': fts_query,
+                        'fetch_limit': fetch_limit,
+                        'last_fetched_rowid': rowids[-1] if rowids else None,
+                        'has_more': len(filtered_matches) == fetch_limit,
+                        'exclude_ctrl': params['exclude_ctrl'],
+                        'include_nodes': params['include_nodes'],
+                        'min_log_level': params['min_log_level'],
+                        'case_sensitive': params['case_sensitive'],
+                        'whole_word': params['whole_word']
+                    }
+
+                    # Return the first match
+                    first_match = filtered_matches[0]
+                    return {
+                        'session_id': session_id,
+                        'found': True,
+                        'timestamp': first_match['epoch_time'],
+                        'message': first_match['message'],
+                        'log_id': first_match['log_id'],
+                        'wrapped': wrapped,
+                        'total_matches': total_matches,
+                        'current_index': 0,
+                        'has_more': self.search_sessions[session_id]['has_more']
+                    }
+
+                except Exception as e:
+                    self._log_admin(f"Search error: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    return {'error': str(e)}
+                finally:
+                    if conn:
+                        conn.close()
+
+            result = await asyncio.get_event_loop().run_in_executor(None, do_search)
+
+            if 'error' in result:
+                return web.json_response({'error': result['error']}, status=500)
+
+            return web.json_response(result)
 
         elif action == 'poll':
-            import time as time_module
             session_id = data.get('session_id')
-            max_entries = data.get('max_entries', 1000)
+            direction = data.get('direction')
 
             if not session_id or session_id not in self.search_sessions:
                 return web.json_response({'error': 'Invalid or expired session'}, status=404)
@@ -2024,40 +2157,207 @@ class WebController(Controller):
             session = self.search_sessions[session_id]
             session['last_access'] = time.time()
 
-            if session.get('cancelled'):
-                return web.json_response({'found': False, 'cancelled': True})
+            # Use requested direction or session direction
+            search_direction = direction if direction else session['direction']
 
-            result = session.get('result')
-            if result:
-                timestamp, message, wrapped, scanned_this, total_scanned, log_id = result
-                return web.json_response({
-                    'found': True,
-                    'timestamp': timestamp,
-                    'message': message,
-                    'wrapped': wrapped,
-                    'scanned_this': scanned_this,
-                    'total_scanned': total_scanned,
-                    'log_id': log_id
-                })
+            # Calculate next index
+            if search_direction == 'next':
+                session['current_index'] += 1
             else:
-                return web.json_response({
-                    'found': False,
-                    'finished': False,
-                    'scanned_this': 0,
-                    'total_scanned': 0
-                })
+                session['current_index'] -= 1
+
+            # Check if we need to fetch more matches
+            wrapped = False
+
+            if session['current_index'] >= len(session['matches']):
+                # Need more matches in next direction
+                if session.get('has_more', False) and session.get('last_fetched_rowid'):
+                    # Fetch next batch
+                    more_matches = self._fetch_more_matches(session, 'next')
+                    if more_matches:
+                        session['matches'].extend(more_matches)
+                        session['last_fetched_rowid'] = more_matches[-1]['rowid'] if more_matches else None
+                        session['has_more'] = len(more_matches) == session['fetch_limit']
+
+                        if session['current_index'] < len(session['matches']):
+                            match = session['matches'][session['current_index']]
+                        else:
+                            # Still out of range - wrap
+                            session['current_index'] = 0
+                            wrapped = True
+                            match = session['matches'][session['current_index']]
+                    else:
+                        session['current_index'] = 0
+                        wrapped = True
+                        match = session['matches'][session['current_index']]
+                else:
+                    session['current_index'] = 0
+                    wrapped = True
+                    match = session['matches'][session['current_index']]
+            elif session['current_index'] < 0:
+                # Need more matches in prev direction
+                if session.get('has_more', False) and session.get('last_fetched_rowid'):
+                    # Fetch previous batch
+                    more_matches = self._fetch_more_matches(session, 'prev')
+                    if more_matches:
+                        # Insert at beginning for prev direction
+                        session['matches'] = more_matches + session['matches']
+                        session['last_fetched_rowid'] = more_matches[0]['rowid'] if more_matches else None
+                        session['has_more'] = len(more_matches) == session['fetch_limit']
+                        # Adjust index (we added more_matches at the beginning)
+                        session['current_index'] += len(more_matches)
+                        match = session['matches'][session['current_index']]
+                    else:
+                        session['current_index'] = len(session['matches']) - 1
+                        wrapped = True
+                        match = session['matches'][session['current_index']]
+                else:
+                    session['current_index'] = len(session['matches']) - 1
+                    wrapped = True
+                    match = session['matches'][session['current_index']]
+            else:
+                match = session['matches'][session['current_index']]
+
+            return web.json_response({
+                'found': True,
+                'timestamp': match['epoch_time'],
+                'message': match['message'],
+                'log_id': match['log_id'],
+                'wrapped': wrapped,
+                'current_index': session['current_index'],
+                'total_matches': session['total_matches']
+            })
+
         elif action == 'cancel':
             session_id = data.get('session_id')
             if session_id and session_id in self.search_sessions:
-                session = self.search_sessions[session_id]
-                session['cancelled'] = True
-                self._log_admin(f"Search session {session_id} cancelled by user")
+                del self.search_sessions[session_id]
+                self._log_admin(f"Search session {session_id} cancelled")
                 return web.json_response({'status': 'cancelled'})
-            else:
-                return web.json_response({'error': 'Session not found'}, status=404)
+            return web.json_response({'error': 'Session not found'}, status=404)
 
         else:
             return web.json_response({'error': 'Invalid action'}, status=400)
+
+    def _apply_search_filters(self, rows, params):
+        """Apply all search filters to a list of database rows."""
+        search_term = params['search_term']
+        filtered_matches = []
+
+        for row in rows:
+            message = row['message']
+            node_ip = row['node_ip']
+            log_level = row['log_level']
+
+            # Apply exclude CTRL filter
+            if params.get('exclude_ctrl', False) and message.startswith('[CTRL]'):
+                continue
+
+            # Apply node filter
+            include_nodes = params.get('include_nodes', [])
+            if include_nodes:
+                last_octet = node_ip.split('.')[-1] if node_ip else None
+                if not last_octet or last_octet not in include_nodes:
+                    continue
+
+            # Apply log level filter
+            min_log_level = params.get('min_log_level', 4)
+            if min_log_level < 4:
+                level_match = re.search(r'\[(?:NODE|CTRL)\].*?\[[\d.]+\]\s*([DIWE])\s', message)
+                if level_match:
+                    level = {'D': 0, 'I': 1, 'W': 2, 'E': 3}.get(level_match.group(1), 4)
+                    if level < min_log_level:
+                        continue
+
+            # Apply case sensitivity
+            case_sensitive = params.get('case_sensitive', False)
+            if case_sensitive:
+                if search_term not in message:
+                    continue
+            else:
+                if search_term.lower() not in message.lower():
+                    continue
+
+            # Apply whole word
+            whole_word = params.get('whole_word', False)
+            if whole_word:
+                pattern = rf'\b{re.escape(search_term)}\b'
+                flags = 0 if case_sensitive else re.IGNORECASE
+                if not re.search(pattern, message, flags):
+                    continue
+
+            filtered_matches.append({
+                'log_id': row['log_id'],
+                'epoch_time': row['epoch_time'],
+                'message': message,
+                'node_ip': node_ip,
+                'rowid': row['rowid']  # Add rowid here
+            })
+
+        return filtered_matches
+
+    def _fetch_more_matches(self, session, direction):
+        """Fetch the next batch of matches for a session"""
+        conn = None
+        try:
+            conn = sqlite3.connect(str(self.db_path))
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+
+            if direction == 'next':
+                query = f"""
+                    SELECT d.log_id, d.epoch_time, d.message, d.node_ip, d.log_level, d.rowid
+                    FROM logs d
+                    WHERE d.rowid IN (SELECT rowid FROM logs_fts WHERE logs_fts MATCH ?)
+                    AND d.rowid > ?
+                    ORDER BY d.rowid ASC
+                    LIMIT ?
+                """
+                cursor.execute(query, (session['fts_query'], session['last_fetched_rowid'], session['fetch_limit']))
+            else:
+                query = f"""
+                    SELECT d.log_id, d.epoch_time, d.message, d.node_ip, d.log_level, d.rowid
+                    FROM logs d
+                    WHERE d.rowid IN (SELECT rowid FROM logs_fts WHERE logs_fts MATCH ?)
+                    AND d.rowid < ?
+                    ORDER BY d.rowid DESC
+                    LIMIT ?
+                """
+                cursor.execute(query, (session['fts_query'], session['last_fetched_rowid'], session['fetch_limit']))
+
+            rows = cursor.fetchall()
+
+            if not rows:
+                return []
+
+            filter_params = {
+                'search_term': session['search_term'],
+                'exclude_ctrl': session.get('exclude_ctrl', False),
+                'include_nodes': session.get('include_nodes', []),
+                'min_log_level': session.get('min_log_level', 4),
+                'case_sensitive': session.get('case_sensitive', False),
+                'whole_word': session.get('whole_word', False)
+            }
+
+            filtered_matches = self._apply_search_filters(rows, filter_params)
+
+            # Add rowid to filtered matches (it's already in the row)
+            # The _apply_search_filters already includes rowid if we select it
+            # So we just need to ensure rowid is in the result
+
+            if direction == 'prev':
+                filtered_matches.reverse()
+
+            return filtered_matches
+
+        except Exception as e:
+            self._log_admin(f"Fetch more matches error: {e}")
+            import traceback
+            traceback.print_exc()
+            return []
+        finally:
+            if conn:
+                conn.close()
 
     async def handle_api_logs_lookup(self, request):
         """Look up a log by log_id and return its database timestamp"""
@@ -2521,7 +2821,6 @@ class WebController(Controller):
 
         except Exception as e:
             self._log_admin(f"Error querying raw minute data: {e}")
-            import traceback
             traceback.print_exc()
             return web.json_response({'error': str(e)}, status=500)
         finally:
@@ -2866,7 +3165,6 @@ class WebController(Controller):
 
         except Exception as e:
             self._log_admin(f"Error querying {metric_column}: {e}")
-            import traceback
             traceback.print_exc()
             return {}
         finally:
@@ -7083,9 +7381,6 @@ class WebController(Controller):
                     logDiv.className = className;
                     logDiv.setAttribute('data-timestamp', log.timestamp);
                     logDiv.setAttribute('data-log_id', log.log_id || '0');
-                    if (log.log_id && log.log_id !== 0) {
-                        console.log(`rebuildDebugDisplay: Setting log_id=${log.log_id} for message: ${log.message.substring(0, 50)}...`);
-                    }
                     const highlightedContent = applyHighlighting(log.message);
                     logDiv.innerHTML = highlightedContent
                     logDiv.addEventListener('click', handleLogClick(logDiv));
@@ -7314,17 +7609,6 @@ class WebController(Controller):
             console.log('=== scrollToMatch ===');
             console.log(`timestamp: ${timestamp}, targetLogId: ${targetLogId}`);
 
-            // Dump all log_ids in current DOM for comparison
-            if (targetLogId > 0) {
-                console.log('Current DOM log_ids:');
-                for (let i = 0; i < logElements.length; i++) {
-                    const rid = logElements[i].getAttribute('data-log_id');
-                    if (rid && rid !== '0') {
-                        console.log(`  [${i}] data-log_id="${rid}"`);
-                    }
-                }
-            }
-
             autoScrolling = true;
             let targetElement = null;
 
@@ -7526,12 +7810,14 @@ class WebController(Controller):
                         search: searchTerm,
                         direction: direction,
                         from_timestamp: fromTimestamp,
+                        time_window: 3600,  // Start with 1 hour
+                        max_time_window: 604800,  // 7 days in seconds
                         case_sensitive: searchCaseSensitive,
                         whole_word: searchWholeWord,
                         exclude_ctrl: filters.exclude_ctrl,
                         include_nodes: filters.include_nodes,
                         min_log_level: filters.min_log_level,
-                        debug: true  // Always enabled for now
+                        debug: true
                     })
                 });
 
@@ -7542,6 +7828,61 @@ class WebController(Controller):
                     return;
                 }
 
+                // Handle "too many matches" error
+                if (startData.status === 'too_many') {
+                    showTemporaryMessage(`❌ ${startData.message}`, 'error');
+                    return;
+                }
+
+                // If search completed with no results
+                if (startData.found === false && startData.finished === true) {
+                    showTemporaryMessage(`❌ No matches found for "${searchTerm}"`, 'search');
+                    return;
+                }
+
+                // If we got a match immediately (new behavior - single query)
+                if (startData.found === true && startData.session_id) {
+                    console.log('MATCH FOUND in start response!', startData);
+                    console.log(`  timestamp: ${startData.timestamp}`);
+                    console.log(`  log_id: ${startData.log_id}`);
+                    console.log(`  message: ${startData.message.substring(0, 100)}...`);
+
+                    // Get accurate journal timestamp for scrolling
+                    let scrollTimestamp = startData.timestamp;
+                    if (startData.log_id && startData.log_id > 0) {
+                        scrollTimestamp = await getJournalTimestampByLogId(startData.log_id, startData.timestamp);
+                        console.log(`  Using scroll timestamp: ${scrollTimestamp}`);
+                    }
+
+                    searchCursor = scrollTimestamp;
+                    searchCursorDb = startData.timestamp;
+                    searchLogId = startData.log_id;
+                    lastSearchDirection = direction;
+                    updateCursorHighlight();
+
+                    if (startData.wrapped) {
+                        const wrapMsg = direction === 'next' ? '↺ Wrapped to earliest logs' : '↺ Wrapped to latest logs';
+                        showTemporaryMessage(wrapMsg, 'search');
+                    }
+
+                    if (startData.window_expanded) {
+                        const windowHours = (startData.time_window_used / 3600).toFixed(1);
+                        showTemporaryMessage(`🔍 Found ${startData.total_matches} matches in last ${windowHours} hours`, 'search');
+                    } else {
+                        const shortMsg = startData.message.length > 80 ? startData.message.substring(0, 77) + '...' : startData.message;
+                        showTemporaryMessage(`✅ Found: ${shortMsg}`, 'search');
+                    }
+
+                    console.log('performSearch: calling scrollToMatch');
+                    await scrollToMatch(scrollTimestamp, startData.log_id);
+                    console.log('performSearch: scrollToMatch completed');
+
+                    // Store session for subsequent polling (next/prev)
+                    activeSearchSession = startData.session_id;
+                    return;
+                }
+
+                // Fall back to polling (for backward compatibility or journal search)
                 const session_id = startData.session_id;
                 activeSearchSession = session_id;
 
@@ -7551,7 +7892,6 @@ class WebController(Controller):
                 let pollCount = 0;
                 const maxPolls = 600; // 5 minutes at 500ms intervals
                 let totalScanned = 0;
-                let dotCount = 0;
 
                 while (!found && !finished && pollCount < maxPolls && !currentSearchAborted) {
                     await new Promise(resolve => setTimeout(resolve, 500));
@@ -7567,18 +7907,17 @@ class WebController(Controller):
                         body: JSON.stringify({
                             action: 'poll',
                             session_id: session_id,
-                            max_entries: 1000
+                            direction: direction  // Pass direction for navigation
                         })
                     });
 
                     const pollData = await pollResponse.json();
                     console.log(`Poll ${pollCount} response:`, pollData);
 
-                    // Update total scanned as soon as we have it
-                    if (pollData.total_scanned !== undefined) {
-                        totalScanned = pollData.total_scanned;
-                        const scannedK = (totalScanned / 1000).toFixed(1);
-                        progressSpan.textContent = `${scannedK}k`;
+                    if (pollData.error) {
+                        console.error('Poll error:', pollData.error);
+                        showTemporaryMessage(`❌ Search error: ${pollData.error}`, 'error');
+                        break;
                     }
 
                     if (pollData.cancelled) {
@@ -7613,12 +7952,7 @@ class WebController(Controller):
                         }
 
                         const shortMsg = pollData.message.length > 80 ? pollData.message.substring(0, 77) + '...' : pollData.message;
-
-                        if (pollData.log_id && pollData.log_id > 0) {
-                            showTemporaryMessage(`✅ Found: ${shortMsg}`, 'search');
-                        } else {
-                            showTemporaryMessage(`⚠️ Found: ${shortMsg} (approximate position - old log)`, 'search');
-                        }
+                        showTemporaryMessage(`✅ Found: ${shortMsg}`, 'search');
 
                         console.log('performSearch: calling scrollToMatch');
                         await scrollToMatch(scrollTimestamp, pollData.log_id);
@@ -7638,8 +7972,7 @@ class WebController(Controller):
                 if (!found && !finished && !currentSearchAborted) {
                     showTemporaryMessage(`❌ Search timeout after ${maxPolls * 0.5} seconds`, 'search');
                 } else if (!found && finished && !currentSearchAborted) {
-                    const scannedMsg = totalScanned > 0 ? ` (scanned ${totalScanned.toLocaleString()} entries)` : '';
-                    showTemporaryMessage(`❌ No more matches for "${searchTerm}"${scannedMsg}`, 'search');
+                    showTemporaryMessage(`❌ No more matches for "${searchTerm}"`, 'search');
                 }
 
             } catch (e) {
@@ -7705,14 +8038,15 @@ class WebController(Controller):
 
             searchGroup.innerHTML = `
                 <input type="text" id="searchInput" placeholder="🔍"
-                    style="width: 70px; font-size: 10px; padding: 2px 4px; border: 1px solid #ccc; border-radius: 3px;">
+                    style="width: 70px; font-size: 10px; padding: 2px 4px; border: 1px solid #ccc; border-radius: 3px;"
+                    title="F3: next, Shift+F3: previous">
                 <button id="searchCaseBtn" class="debug-toggle-btn" style="padding: 2px 4px; font-size: 9px; background: #6c757d;">Aa</button>
                 <button id="searchWordBtn" class="debug-toggle-btn" style="padding: 2px 4px; font-size: 9px; background: #6c757d;">ab</button>
                 <button id="searchPrevBtn" class="debug-toggle-btn" style="padding: 2px 6px; font-size: 12px;">▲</button>
                 <button id="searchNextBtn" class="debug-toggle-btn" style="padding: 2px 6px; font-size: 12px;">▼</button>
                 <button id="searchCancelBtn" class="debug-toggle-btn" style="padding: 2px 4px; font-size: 10px;">✕</button>
                 <span id="searchProgress" style="font-size: 9px; color: #495057; width: 40px; margin-left: 2px; font-family: monospace; display: inline-block; text-align: right;"></span>
-                <button id="jumpToCursorBtn" class="debug-toggle-btn" style="padding: 2px 4px; font-size: 10px;" title="Jump to cursor">📍</button>
+                <button id="jumpToCursorBtn" class="debug-toggle-btn" style="padding: 2px 4px; font-size: 10px;" title="Scroll to cursor (last found match)">🎯</button>
                 <button id="cursorClearBtn" class="debug-toggle-btn" style="padding: 2px 4px; font-size: 10px;" title="Clear cursor">↺</button>
             `;
 
@@ -7729,6 +8063,9 @@ class WebController(Controller):
             const cursorClearBtn = document.getElementById('cursorClearBtn');
 
             if (!searchInput) return;
+
+            // Track base direction (set by up/down buttons)
+            let baseDirection = 'prev';  // Default to 'prev' (up arrow)
 
             // Ctrl+F handler
             document.addEventListener('keydown', (e) => {
@@ -7765,10 +8102,11 @@ class WebController(Controller):
                 }
             });
 
-            // Enter key triggers search forward
+            // Enter key triggers search forward (next direction)
             searchInput.addEventListener('keypress', (e) => {
                 if (e.key === 'Enter') {
                     resetSearch();  // Reset on new search
+                    baseDirection = 'next';  // Enter defaults to next direction
                     performSearch('next');
                 }
             });
@@ -7787,9 +8125,16 @@ class WebController(Controller):
                 showTemporaryMessage(`Whole word ${searchWholeWord ? 'ON' : 'OFF'}`, 'search');
             });
 
-            // Navigation buttons
-            prevBtn.addEventListener('click', () => performSearch('prev'));
-            nextBtn.addEventListener('click', () => performSearch('next'));
+            // Navigation buttons - update baseDirection
+            prevBtn.addEventListener('click', () => {
+                baseDirection = 'prev';
+                performSearch('prev');
+            });
+
+            nextBtn.addEventListener('click', () => {
+                baseDirection = 'next';
+                performSearch('next');
+            });
 
             // Cancel button - cancels search and returns buttons to normal
             cancelBtn.addEventListener('click', async () => {
@@ -7847,15 +8192,38 @@ class WebController(Controller):
                 }
             });
 
-            // Cursor clear button
+            // Cursor clear button - also clear searchCursorDb
             cursorClearBtn.addEventListener('click', () => {
                 searchCursor = null;
+                searchCursorDb = null;
                 lastSearchDirection = null;
                 updateCursorHighlight();
-                showTemporaryMessage('Cursor cleared - next search will start from most recent log', 'search');
+                showTemporaryMessage('Cursor cleared - next search will start from viewport', 'search');
             });
 
-            console.log('Search UI initialized with cancellation support');
+            // F3 and Shift+F3 keyboard shortcuts for search navigation
+            document.addEventListener('keydown', (e) => {
+                const isF3 = (e.key === 'F3' || e.keyCode === 114);
+
+                if (isF3 && searchInput && searchInput.value.trim()) {
+                    e.preventDefault();
+                    let direction;
+
+                    if (e.shiftKey) {
+                        // Shift+F3: opposite of base direction
+                        direction = baseDirection === 'next' ? 'prev' : 'next';
+                        console.log(`Shift+F3 pressed: baseDirection=${baseDirection}, direction=${direction}`);
+                    } else {
+                        // F3: same as base direction
+                        direction = baseDirection;
+                        console.log(`F3 pressed: baseDirection=${baseDirection}, direction=${direction}`);
+                    }
+
+                    performSearch(direction, false);
+                }
+            });
+
+            console.log('Search UI initialized with F3/Shift+F3 support, baseDirection=prev');
         }
 
         // Toggle auto-scroll lock
@@ -9601,7 +9969,7 @@ def main():
 
     logging.basicConfig(
         level=getattr(logging, args.log_level),
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        format='%(message)s'
     )
 
     # Disable aiohttp access logs

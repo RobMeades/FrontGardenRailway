@@ -1377,7 +1377,7 @@ def main():
 
     logging.basicConfig(
         level=getattr(logging, args.log_level),
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        format='%(message)s'
     )
 
     logger = logging.getLogger("Main")
