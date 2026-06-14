@@ -2720,15 +2720,27 @@ class WebController(Controller):
                 node_filter = f"AND node_ip IN ({placeholders})"
                 params.extend(node_ips)
 
-            # Query raw data for this hour
-            query = f"""
-                SELECT epoch_time, node_ip, {column}
-                FROM metrics_history
-                WHERE {column} IS NOT NULL
-                AND epoch_time BETWEEN ? AND ?
-                {node_filter}
-                ORDER BY node_ip, epoch_time ASC
-            """
+            # CRITICAL FIX: Use COALESCE to treat NULL as 0 for counter metrics
+            # For RSSI and heap, keep NULL as NULL (0 is a valid signal strength)
+            if metric in ['wifi_failures', 'panics', 'ctrl_disconnects', 'log_disconnects']:
+                # Counter metrics: treat NULL as 0
+                query = f"""
+                    SELECT epoch_time, node_ip, COALESCE({column}, 0) as {column}
+                    FROM metrics_history
+                    WHERE epoch_time BETWEEN ? AND ?
+                    {node_filter}
+                    ORDER BY node_ip, epoch_time ASC
+                """
+            else:
+                # Non-counter metrics (RSSI, heap): keep NULL as NULL
+                query = f"""
+                    SELECT epoch_time, node_ip, {column}
+                    FROM metrics_history
+                    WHERE {column} IS NOT NULL
+                    AND epoch_time BETWEEN ? AND ?
+                    {node_filter}
+                    ORDER BY node_ip, epoch_time ASC
+                """
 
             cursor.execute(query, params)
             rows = cursor.fetchall()
@@ -2749,13 +2761,23 @@ class WebController(Controller):
             # (last known value before the hour, bounded by graph_start_time if provided)
             baseline_info = {}
             for node_ip, node_data in result.items():
-                baseline_query = f"""
-                    SELECT epoch_time, {column}
-                    FROM metrics_history
-                    WHERE node_ip = ?
-                    AND {column} IS NOT NULL
-                    AND epoch_time < ?
-                """
+                # Build baseline query with COALESCE for counter metrics
+                if metric in ['wifi_failures', 'panics', 'ctrl_disconnects', 'log_disconnects']:
+                    baseline_query = f"""
+                        SELECT epoch_time, COALESCE({column}, 0) as {column}
+                        FROM metrics_history
+                        WHERE node_ip = ?
+                        AND epoch_time < ?
+                    """
+                else:
+                    baseline_query = f"""
+                        SELECT epoch_time, {column}
+                        FROM metrics_history
+                        WHERE node_ip = ?
+                        AND {column} IS NOT NULL
+                        AND epoch_time < ?
+                    """
+
                 baseline_params = [node_ip, hour_start]
 
                 if graph_start_time:
@@ -2777,6 +2799,7 @@ class WebController(Controller):
                     baseline_info[node_ip] = None
 
             # Calculate delta_info using baseline as starting point
+            # ONLY count INCREASES - decreases (resets) are ignored
             delta_info = {}
             for node_ip, node_data in result.items():
                 baseline = baseline_info.get(node_ip)
@@ -2796,11 +2819,18 @@ class WebController(Controller):
                 for point in values:
                     current_value = point[1]
                     if prev_value is not None:
+                        # ONLY count INCREASES as new events
+                        # Decreases (resets) are ignored - they don't represent new failures
                         if current_value > prev_value:
                             delta = current_value - prev_value
                             total_events += delta
-                        elif current_value < prev_value:
+                        # else: decrease or same value - no new events, ignore
+                    else:
+                        # First reading with no baseline - assume all counted failures happened
+                        # since the start of the window (conservative approach)
+                        if current_value > 0:
                             total_events += current_value
+
                     prev_value = current_value
 
                 delta_info[node_ip] = {
@@ -3066,6 +3096,8 @@ class WebController(Controller):
     def _query_bucketed_metric(self, metric_column, start_time, end_time, node_ips, bucket_seconds=3600):
         """
         Query a cumulative metric and return deltas (new events) per bucket.
+        Treats NULL as zero (metric absent from message means counter was zero).
+        Only counts INCREASES as new events - decreases (resets) are ignored.
         """
         # Convert string bucket spec to seconds if needed
         if isinstance(bucket_seconds, str):
@@ -3093,15 +3125,16 @@ class WebController(Controller):
                 node_filter = f"AND node_ip IN ({placeholders})"
                 params.extend(node_ips)
 
-            # Get raw cumulative values with ordering
+            # CRITICAL FIX: Use COALESCE to treat NULL as 0
+            # This ensures that when a metric is absent from a message (meaning counter was zero),
+            # we explicitly use 0 instead of NULL, allowing delta calculations to work correctly
             query = f"""
                 SELECT
                     epoch_time,
                     node_ip,
-                    {metric_column}
+                    COALESCE({metric_column}, 0) as {metric_column}
                 FROM metrics_history
-                WHERE {metric_column} IS NOT NULL
-                AND epoch_time BETWEEN ? AND ?
+                WHERE epoch_time BETWEEN ? AND ?
                 {node_filter}
                 ORDER BY node_ip, epoch_time ASC
             """
@@ -3112,7 +3145,7 @@ class WebController(Controller):
             if not rows:
                 return {}
 
-            # Calculate deltas per node
+            # Calculate deltas per node - ONLY count increases
             node_last_values = {}
             delta_points = []  # (bucket_start, node_ip, delta)
 
@@ -3122,12 +3155,20 @@ class WebController(Controller):
                 last_value = node_last_values.get(node_ip)
 
                 if last_value is not None:
-                    # Calculate delta since last reading
-                    delta = cumulative_value - last_value
-                    if delta > 0:
-                        # Calculate which bucket this belongs to
-                        bucket_start = (epoch_time // bucket_seconds) * bucket_seconds
-                        delta_points.append((bucket_start, node_ip, delta))
+                    # ONLY count INCREASES as new failures/events
+                    # Decreases (resets) are ignored because they don't represent new events
+                    if cumulative_value > last_value:
+                        delta = cumulative_value - last_value
+                        if delta > 0:
+                            # Calculate which bucket this belongs to
+                            bucket_start = (epoch_time // bucket_seconds) * bucket_seconds
+                            delta_points.append((bucket_start, node_ip, delta))
+                    # else: decrease or same value - no new events, ignore
+                else:
+                    # First reading for this node in the query window
+                    # No baseline, so we cannot calculate a reliable delta.
+                    # We skip it to avoid counting pre-existing failures.
+                    pass
 
                 node_last_values[node_ip] = cumulative_value
 
@@ -3137,9 +3178,6 @@ class WebController(Controller):
             # Aggregate deltas by bucket and node
             result = {}
             for bucket_start, node_ip, delta in delta_points:
-                if node_ips and node_ip not in node_ips:
-                    continue
-
                 if node_ip not in result:
                     result[node_ip] = []
 
@@ -3160,7 +3198,7 @@ class WebController(Controller):
                 result[node_ip].sort(key=lambda x: x[0])
 
             total_points = sum(len(v) for v in result.values())
-            self._log_admin(f"{metric_column} (deltas): {total_points} event points from {len(result)} nodes")
+            self._log_admin(f"{metric_column} (deltas - increases only): {total_points} event points from {len(result)} nodes")
             return result
 
         except Exception as e:
@@ -8634,17 +8672,33 @@ class WebController(Controller):
                         let isEvent = false;
 
                         if (prevValue !== null && value > prevValue) {
+                            // Normal increase - this is a new failure/event
                             delta = `+${value - prevValue}`;
                             isEvent = true;
                             eventCount++;
                         } else if (prevValue !== null && value < prevValue) {
-                            delta = `↺ ${value}`;
-                            isEvent = true;
-                            eventCount++;
+                            // Reset detected - counter decreased
+                            // This is NOT a new failure, so we don't count it as an event
+                            // Optionally show a reset indicator, but don't make it clickable
+                            delta = `↺ ${value} (reset)`;
+                            isEvent = false;  // NOT counted as a failure event
+                            // eventCount NOT incremented
                         } else if (prevValue === null && baseline !== null && baseline !== undefined) {
-                            delta = `+${value - baseline}`;
-                            isEvent = true;
-                            eventCount++;
+                            // First reading in this hour - compare to baseline
+                            const diff = value - baseline;
+                            if (diff > 0) {
+                                // Increase from baseline - new failures occurred
+                                delta = `+${diff}`;
+                                isEvent = true;
+                                eventCount++;
+                            } else if (diff < 0) {
+                                // Decrease from baseline - reset occurred
+                                // This is NOT a new failure, so we don't count it as an event
+                                delta = `↺ ${value} (reset)`;
+                                isEvent = false;  // NOT counted as a failure event
+                                // eventCount NOT incremented
+                            }
+                            // If diff === 0, no change, ignore completely
                         }
 
                         if (isEvent) {
@@ -8656,18 +8710,28 @@ class WebController(Controller):
                                     <td>${delta}</td>
                                 </tr>
                             `;
+                        } else if (delta && !isEvent) {
+                            // Show reset indicators but don't make them clickable
+                            eventsHtml += `
+                                <tr style="opacity: 0.6; font-style: italic;">
+                                    <td style="white-space: nowrap;">${timeStr}</td>
+                                    <td>${value}</td>
+                                    <td>${delta}</td>
+                                </tr>
+                            `;
                         }
 
                         prevValue = value;
                     }
 
-                    if (eventCount > 0 || (baseline !== null && points.length > 0)) {
+                    // Only show the node section if there were actual events (increases)
+                    if (eventCount > 0) {
                         html += `
                             <div class="minute-node-section">
                                 <div class="minute-node-header" onclick="toggleMinuteNode(this)">
                                     <span class="minute-node-name">${nodeName} (${nodeIp})</span>
                                     <span class="minute-node-stats">
-                                        ${deltaInfo.total_events ? `📊 ${deltaInfo.total_events} events this hour` : ''}
+                                        📊 ${eventCount} events this hour
                                         ${baseline ? ` (baseline: ${baseline})` : ''}
                                     </span>
                                 </div>
