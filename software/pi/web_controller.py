@@ -615,7 +615,7 @@ class WebController(Controller):
         self.controller_unit = f"{self.script_name}.service"
 
         # Log storage for web interface - store as list with version tracking
-        self.log_entries: List[Tuple[int, str]] = []  # (version, message)
+        self.log_entries: List[Tuple[int, str, float, str, int]] = []  # (version, message, timestamp, source, log_id)
         self.max_log_entries = MAX_LOG_ENTRIES
         self._log_counter = 0
 
@@ -855,15 +855,14 @@ class WebController(Controller):
             return f"[{timestamp_str}] {message}"
 
     def _add_log_raw(self, source: str, node_ip: str, log_level: int,
-                    message: str, journal_ts: float = None):
-        """Add a log message - THIS IS THE ONLY FORMATTING LOCATION"""
-
+                    message: str, journal_ts: float = None, log_id: int = 0):
         # Generate timestamp string
         if journal_ts:
             dt = datetime.fromtimestamp(journal_ts)
             timestamp_str = dt.strftime('%d/%m %H:%M:%S')
         else:
             timestamp_str = datetime.now().strftime('%d/%m %H:%M:%S')
+            journal_ts = time.time()  # Use current time if no journal timestamp
 
         # FORMAT HERE - single source of truth
         formatted_message = self._format_log_for_display(
@@ -876,7 +875,7 @@ class WebController(Controller):
         # Store with components preserved for filtering
         version = self._log_counter
         self._log_counter += 1
-        self.log_entries.append((version, linkified_message, journal_ts, source))
+        self.log_entries.append((version, linkified_message, journal_ts, source, log_id))
 
         # Trim
         while len(self.log_entries) > self.max_log_entries:
@@ -980,11 +979,7 @@ class WebController(Controller):
                     source = entry.get('FGR_SOURCE', '')
                     node_ip = entry.get('FGR_NODE_IP', '')
                     log_level = entry.get('FGR_LOG_LEVEL', None)
-                    if log_level is not None:
-                        try:
-                            log_level = int(log_level)
-                        except (ValueError, TypeError):
-                            log_level = None
+                    log_id = entry.get('FGR_LOG_ID', 0)
 
                     # Parse metrics from node logs
                     if source == 'NODE' and node_ip:
@@ -994,7 +989,7 @@ class WebController(Controller):
                             self._update_node_metrics(node_ip, metrics_data)
 
                     # Store raw components - let _add_log_raw handle formatting
-                    self._add_log_raw(source, node_ip, log_level, message, journal_ts_value)
+                    self._add_log_raw(source, node_ip, log_level, message, journal_ts_value, log_id)
 
             # Now follow new entries
             if last_cursor:
@@ -1021,11 +1016,7 @@ class WebController(Controller):
                         source = entry.get('FGR_SOURCE', '')
                         node_ip = entry.get('FGR_NODE_IP', '')
                         log_level = entry.get('FGR_LOG_LEVEL', None)
-                        if log_level is not None:
-                            try:
-                                log_level = int(log_level)
-                            except (ValueError, TypeError):
-                                log_level = None
+                        log_id = entry.get('FGR_LOG_ID', 0)
 
                         if source == 'NODE' and node_ip:
                             metrics_result = self._parse_metrics_from_log(message, node_ip)
@@ -1033,7 +1024,7 @@ class WebController(Controller):
                                 node_ip, metrics_data = metrics_result
                                 self._update_node_metrics(node_ip, metrics_data)
 
-                        self._add_log_raw(source, node_ip, log_level, message, journal_ts_value)
+                        self._add_log_raw(source, node_ip, log_level, message, journal_ts_value, log_id)
 
         except Exception as e:
             self._log_admin(f"Journal reader error: {e}")
@@ -1704,10 +1695,6 @@ class WebController(Controller):
 
         return response
 
-    async def handle_api_logs(self, request):
-        """Return recent logs"""
-        return web.json_response({'logs': [msg for _, msg in self.log_entries]})
-
     async def handle_api_logs_clear(self, request):
         """Clear the log buffer"""
         self.log_entries.clear()
@@ -1742,18 +1729,16 @@ class WebController(Controller):
                     for entry in self.log_entries:
                         version = entry[0]
                         if version > last_version:
-                            source = entry[3] if len(entry) > 3 else None
+                            message = entry[1]
+                            timestamp = entry[2]
+                            source = entry[3]
+                            log_id = entry[4]
+
                             # Skip ADMIN logs - they shouldn't appear in debug window
                             if source != 'ADMIN':
-                                # Extract log_id from the formatted message if present
-                                log_id = 0
-                                log_id_match = re.search(r'\[LOG_ID=(\d+)\]', entry[1])
-                                if log_id_match:
-                                    log_id = int(log_id_match.group(1))
-
                                 new_logs.append({
-                                    "message": entry[1],
-                                    "timestamp": entry[2],
+                                    "message": message,
+                                    "timestamp": timestamp,
                                     "source": source,
                                     "log_id": log_id
                                 })
@@ -3362,7 +3347,6 @@ class WebController(Controller):
         self.web_app.router.add_get('/', self.handle_index)
         self.web_app.router.add_get('/api/status', self.handle_api_status)
         self.web_app.router.add_get('/api/status/stream', self.handle_api_status_stream)
-        self.web_app.router.add_get('/api/logs', self.handle_api_logs)
         self.web_app.router.add_get('/api/logs/stream', self.handle_api_logs_stream)
         self.web_app.router.add_post('/api/logs/clear', self.handle_api_logs_clear)
         self.web_app.router.add_post('/api/command', self.handle_api_command)
@@ -4183,10 +4167,6 @@ class WebController(Controller):
             cursor: default;
         }
 
-        .filter-textbox {
-            cursor: text;
-        }
-
         .filter-checkbox {
             display: flex;
             align-items: center;
@@ -4217,13 +4197,14 @@ class WebController(Controller):
             white-space: nowrap;
         }
 
-        .filter-textbox {
+        .debug-filters .filter-textbox {
             border: 1px solid #ced4da;
             border-radius: 3px;
             padding: 2px 4px;
             font-size: 9px;
             width: 90px;
             background: white;
+            cursor: text;
         }
 
         .filter-textbox:focus {
@@ -4293,6 +4274,9 @@ class WebController(Controller):
             opacity: 0.5;
             cursor: not-allowed;
             pointer-events: none;
+        }
+        #searchInput {
+            cursor: text;
         }
 
         .debug-toggle-btn:hover {
@@ -7137,13 +7121,13 @@ class WebController(Controller):
             if (!logId || logId === 0) return approxTimestamp;
 
             try {
-                // Use a 10-second window around the approximate timestamp
+                // Use a 60-second window around the approximate timestamp
                 const response = await fetch('/api/journal/query', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        since: approxTimestamp - 10,
-                        until: approxTimestamp + 10
+                        since: approxTimestamp - 60,
+                        until: approxTimestamp + 60
                     })
                 });
                 const data = await response.json();
@@ -7161,6 +7145,25 @@ class WebController(Controller):
                 console.warn('getJournalTimestampByLogId failed:', e);
             }
             return approxTimestamp;
+        }
+
+        function findLogElementByTimestamp(timestamp) {
+            for (let i = 0; i < logElements.length; i++) {
+                const ts = parseFloat(logElements[i].getAttribute('data-timestamp'));
+                if (Math.abs(ts - timestamp) < 0.001) {
+                    return logElements[i];
+                }
+            }
+            return null;
+        }
+
+        function findLogElementByLogId(logId) {
+            if (!logId || logId === 0) return null;
+            for (let i = 0; i < logElements.length; i++) {
+                const elLogId = parseInt(logElements[i].getAttribute('data-log_id'));
+                if (elLogId === logId) return logElements[i];
+            }
+            return null;
         }
 
         // Fill a gap by fetching logs in a specific direction
@@ -7771,6 +7774,127 @@ class WebController(Controller):
             };
         }
 
+        function matchesSearchCriteria(message, searchTerm, caseSensitive, wholeWord) {
+            let search = searchTerm;
+            let target = message;
+
+            if (!caseSensitive) {
+                search = search.toLowerCase();
+                target = target.toLowerCase();
+            }
+
+            if (wholeWord) {
+                const pattern = new RegExp(`\\b${escapeRegex(search)}\\b`);
+                return pattern.test(target);
+            } else {
+                return target.includes(search);
+            }
+        }
+
+        function escapeRegex(string) {
+            return string.replace(/[\\^$*+?.()|[\\]{}]/g, '\\\\$&');
+        }
+
+        function searchLocalBuffer(searchTerm, direction) {
+            console.log('searchLocalBuffer: searching', logBuffer.length, 'entries for', searchTerm);
+
+            // First, collect all matches in current buffer that pass filters
+            const matches = [];
+            for (let i = 0; i < logBuffer.length; i++) {
+                const entry = logBuffer[i];
+                // Check if this log should be displayed (respects filters)
+                if (shouldDisplayLog(entry.message) &&
+                    matchesSearchCriteria(entry.message, searchTerm, searchCaseSensitive, searchWholeWord)) {
+                    matches.push({
+                        index: i,
+                        log_id: entry.log_id,
+                        timestamp: entry.timestamp,
+                        message: entry.message
+                    });
+                }
+            }
+
+            if (matches.length === 0) {
+                console.log('searchLocalBuffer: no matches found in buffer');
+                return { found: false };
+            }
+
+            console.log('searchLocalBuffer: found', matches.length, 'matches in buffer');
+
+            // Find starting position based on cursor or viewport
+            let startIndex = -1;
+
+            console.log('searchLocalBuffer: cursor check - searchCursor=', searchCursor, 'autoScrolling=', autoScrolling);
+            if (searchCursor !== null && !autoScrolling) {
+                // Use cursor timestamp as reference point
+                if (direction === 'next') {
+                    startIndex = matches.findIndex(m => m.timestamp > searchCursor);
+                    if (startIndex === -1) startIndex = 0;
+                } else {
+                    startIndex = matches.findIndex(m => m.timestamp < searchCursor);
+                    if (startIndex === -1) startIndex = matches.length - 1;
+                }
+                console.log('searchLocalBuffer: using cursor timestamp, startIndex=', startIndex);
+            }
+
+            if (startIndex === -1) {
+                // No cursor, use viewport
+                const viewportTimestamp = (direction === 'next')
+                    ? getVisibleTimestamp('newest')  // Start from bottom when going "next" (down)
+                    : getVisibleTimestamp('oldest'); // Start from top when going "prev" (up)
+
+                console.log('searchLocalBuffer: using viewport timestamp', viewportTimestamp, 'direction', direction);
+
+                if (direction === 'next') {
+                    // Find first match AFTER the viewport bottom
+                    startIndex = matches.findIndex(m => m.timestamp > viewportTimestamp);
+                    if (startIndex === -1) startIndex = 0;  // Wrap to beginning
+                } else {
+                    // Find first match BEFORE the viewport top
+                    startIndex = matches.findIndex(m => m.timestamp < viewportTimestamp);
+                    if (startIndex === -1) startIndex = matches.length - 1;  // Wrap to end
+                }
+            }
+
+            // Navigate from startIndex - startIndex is already the target match
+            let newIndex = startIndex;
+            let wrapped = false;
+
+            const match = matches[newIndex];
+            const element = findLogElementByLogId(match.log_id);
+
+            // Check for gap markers in DOM between cursor and this match
+            if (searchCursor !== null && !autoScrolling) {
+                const cursorElement = findLogElementByTimestamp(searchCursor);
+                if (cursorElement && element) {
+                    const elements = Array.from(debugWindow.children);
+                    const cursorIndex = elements.indexOf(cursorElement);
+                    const matchIndex = elements.indexOf(element);
+                    const start = Math.min(cursorIndex, matchIndex);
+                    const end = Math.max(cursorIndex, matchIndex);
+
+                    for (let i = start; i <= end; i++) {
+                        if (elements[i].classList.contains('gap-marker')) {
+                            console.log('searchLocalBuffer: gap marker detected in DOM between cursor and match, falling back to database');
+                            return { found: false, gapDetected: true };
+                        }
+                    }
+                }
+            }
+
+            console.log('searchLocalBuffer: navigating to match', newIndex + 1, '/', matches.length, 'timestamp:', match.timestamp, 'message:', match.message.substring(0, 50));
+
+            return {
+                found: true,
+                element: element,
+                timestamp: match.timestamp,
+                log_id: match.log_id,
+                wrapped: wrapped,
+                matchNumber: newIndex + 1,
+                totalMatches: matches.length
+            };
+        }
+
         async function performSearch(direction, forceReset = false) {
             const searchInput = document.getElementById('searchInput');
             const caseBtn = document.getElementById('searchCaseBtn');
@@ -7781,11 +7905,53 @@ class WebController(Controller):
 
             const searchTerm = searchInput.value.trim();
 
-            console.log('performSearch called, isSearching =', isSearching);
+            console.log('performSearch called, direction=', direction, 'isSearching=', isSearching);
 
             if (!searchTerm) {
                 showTemporaryMessage('⚠️ Enter search term', 'error');
                 return;
+            }
+
+            // Try local search if we're not forcing reset and not already searching
+            if (!forceReset && !isSearching && logBuffer.length > 0) {
+                console.log('performSearch: trying local buffer search first...');
+                const localResult = searchLocalBuffer(searchTerm, direction);
+
+                if (localResult.found) {
+                    console.log('performSearch: ✅ LOCAL HIT! Match', localResult.matchNumber, '/', localResult.totalMatches, 'timestamp:', localResult.timestamp);
+
+                    // Update cursor
+                    searchCursor = localResult.timestamp;
+                    searchCursorDb = localResult.timestamp;
+                    searchLogId = localResult.log_id;
+                    lastSearchDirection = direction;
+                    updateCursorHighlight();
+
+                    // Scroll to match - need to find element by log_id
+                    const element = findLogElementByLogId(localResult.log_id);
+                    if (!element) {
+                        console.error('performSearch: could not find element for log_id', localResult.log_id);
+                        showTemporaryMessage('❌ Could not locate log entry', 'error');
+                        return;
+                    }
+
+                    element.scrollIntoView({ block: 'center', behavior: 'smooth' });
+                    element.classList.add('log-cursor');
+                    element.style.backgroundColor = '#ff9800';
+                    setTimeout(() => {
+                        if (element) element.style.backgroundColor = '';
+                    }, 300);
+
+                    if (localResult.wrapped) {
+                        showTemporaryMessage(`↺ Wrapped to ${localResult.matchNumber}/${localResult.totalMatches}`, 'search');
+                    } else {
+                        showTemporaryMessage(`${localResult.matchNumber}/${localResult.totalMatches}`, 'search');
+                    }
+                    return;
+                }
+
+                console.log('performSearch: no local matches, falling back to database');
+                showTemporaryMessage(`🔍 Searching database for "${searchTerm}"...`, 'search');
             }
 
             if (isSearching) {
@@ -7805,17 +7971,9 @@ class WebController(Controller):
             prevBtn.disabled = true;
             nextBtn.disabled = true;
 
-            console.log('Buttons disabled:', {
-                searchInput: searchInput.disabled,
-                caseBtn: caseBtn.disabled,
-                wordBtn: wordBtn.disabled,
-                prevBtn: prevBtn.disabled,
-                nextBtn: nextBtn.disabled
-            });
-
             let fromTimestamp;
 
-            // Determine starting point
+            // Determine starting point for database search
             if (!forceReset && searchCursorDb !== null && !autoScrolling) {
                 fromTimestamp = searchCursorDb;
                 if (direction === 'next') {
@@ -7831,9 +7989,6 @@ class WebController(Controller):
                 console.log(`Using viewport: ${fromTimestamp}`);
             }
 
-            showTemporaryMessage(`🔍 Searching for "${searchTerm}"...`, 'search');
-
-            // Get progress indicator
             const progressSpan = document.getElementById('searchProgress');
 
             try {
@@ -7848,8 +8003,8 @@ class WebController(Controller):
                         search: searchTerm,
                         direction: direction,
                         from_timestamp: fromTimestamp,
-                        time_window: 3600,  // Start with 1 hour
-                        max_time_window: 604800,  // 7 days in seconds
+                        time_window: 3600,
+                        max_time_window: 604800,
                         case_sensitive: searchCaseSensitive,
                         whole_word: searchWholeWord,
                         exclude_ctrl: filters.exclude_ctrl,
@@ -7866,30 +8021,22 @@ class WebController(Controller):
                     return;
                 }
 
-                // Handle "too many matches" error
                 if (startData.status === 'too_many') {
                     showTemporaryMessage(`❌ ${startData.message}`, 'error');
                     return;
                 }
 
-                // If search completed with no results
                 if (startData.found === false && startData.finished === true) {
                     showTemporaryMessage(`❌ No matches found for "${searchTerm}"`, 'search');
                     return;
                 }
 
-                // If we got a match immediately (new behavior - single query)
                 if (startData.found === true && startData.session_id) {
                     console.log('MATCH FOUND in start response!', startData);
-                    console.log(`  timestamp: ${startData.timestamp}`);
-                    console.log(`  log_id: ${startData.log_id}`);
-                    console.log(`  message: ${startData.message.substring(0, 100)}...`);
 
-                    // Get accurate journal timestamp for scrolling
                     let scrollTimestamp = startData.timestamp;
                     if (startData.log_id && startData.log_id > 0) {
                         scrollTimestamp = await getJournalTimestampByLogId(startData.log_id, startData.timestamp);
-                        console.log(`  Using scroll timestamp: ${scrollTimestamp}`);
                     }
 
                     searchCursor = scrollTimestamp;
@@ -7911,31 +8058,23 @@ class WebController(Controller):
                         showTemporaryMessage(`✅ Found: ${shortMsg}`, 'search');
                     }
 
-                    console.log('performSearch: calling scrollToMatch');
                     await scrollToMatch(scrollTimestamp, startData.log_id);
-                    console.log('performSearch: scrollToMatch completed');
-
-                    // Store session for subsequent polling (next/prev)
                     activeSearchSession = startData.session_id;
                     return;
                 }
 
-                // Fall back to polling (for backward compatibility or journal search)
+                // Polling for results (fallback)
                 const session_id = startData.session_id;
                 activeSearchSession = session_id;
 
-                // Poll for results with bounded chunks
                 let found = false;
                 let finished = false;
                 let pollCount = 0;
-                const maxPolls = 600; // 5 minutes at 500ms intervals
-                let totalScanned = 0;
+                const maxPolls = 600;
 
                 while (!found && !finished && pollCount < maxPolls && !currentSearchAborted) {
                     await new Promise(resolve => setTimeout(resolve, 500));
                     pollCount++;
-
-                    console.log(`Poll ${pollCount}: checking...`);
 
                     if (currentSearchAborted) break;
 
@@ -7945,12 +8084,11 @@ class WebController(Controller):
                         body: JSON.stringify({
                             action: 'poll',
                             session_id: session_id,
-                            direction: direction  // Pass direction for navigation
+                            direction: direction
                         })
                     });
 
                     const pollData = await pollResponse.json();
-                    console.log(`Poll ${pollCount} response:`, pollData);
 
                     if (pollData.error) {
                         console.error('Poll error:', pollData.error);
@@ -7964,18 +8102,11 @@ class WebController(Controller):
                     }
 
                     if (pollData.found) {
-                        console.log('MATCH FOUND in poll response!', pollData);
-                        console.log(`  timestamp: ${pollData.timestamp}`);
-                        console.log(`  log_id: ${pollData.log_id}`);
-                        console.log(`  message: ${pollData.message.substring(0, 100)}...`);
-
                         found = true;
 
-                        // Get accurate journal timestamp for scrolling
                         let scrollTimestamp = pollData.timestamp;
                         if (pollData.log_id && pollData.log_id > 0) {
                             scrollTimestamp = await getJournalTimestampByLogId(pollData.log_id, pollData.timestamp);
-                            console.log(`  Using scroll timestamp: ${scrollTimestamp}`);
                         }
 
                         searchCursor = scrollTimestamp;
@@ -7992,23 +8123,18 @@ class WebController(Controller):
                         const shortMsg = pollData.message.length > 80 ? pollData.message.substring(0, 77) + '...' : pollData.message;
                         showTemporaryMessage(`✅ Found: ${shortMsg}`, 'search');
 
-                        console.log('performSearch: calling scrollToMatch');
                         await scrollToMatch(scrollTimestamp, pollData.log_id);
-                        console.log('performSearch: scrollToMatch completed');
                         break;
                     }
 
                     if (pollData.finished) {
-                        console.log('Search finished (no more matches)');
                         finished = true;
                         break;
                     }
                 }
 
-                console.log(`Loop ended: found=${found}, finished=${finished}, pollCount=${pollCount}, aborted=${currentSearchAborted}`);
-
                 if (!found && !finished && !currentSearchAborted) {
-                    showTemporaryMessage(`❌ Search timeout after ${maxPolls * 0.5} seconds`, 'search');
+                    showTemporaryMessage(`❌ Search timeout`, 'search');
                 } else if (!found && finished && !currentSearchAborted) {
                     showTemporaryMessage(`❌ No more matches for "${searchTerm}"`, 'search');
                 }
@@ -8017,7 +8143,6 @@ class WebController(Controller):
                 console.error('Search error:', e);
                 showTemporaryMessage(`❌ Search failed: ${e.message}`, 'search');
             } finally {
-                console.log('Search finished, re-enabling buttons');
                 isSearching = false;
                 currentSearchAborted = false;
                 searchInput.disabled = false;
@@ -8026,7 +8151,6 @@ class WebController(Controller):
                 prevBtn.disabled = false;
                 nextBtn.disabled = false;
 
-                // Clear progress indicator
                 if (progressSpan) {
                     progressSpan.textContent = '';
                 }
