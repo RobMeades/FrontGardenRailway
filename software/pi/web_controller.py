@@ -978,8 +978,8 @@ class WebController(Controller):
                     # Get custom fields
                     source = entry.get('FGR_SOURCE', '')
                     node_ip = entry.get('FGR_NODE_IP', '')
-                    log_level = entry.get('FGR_LOG_LEVEL', None)
-                    log_id = entry.get('FGR_LOG_ID', 0)
+                    log_level = int(entry.get('FGR_LOG_LEVEL', 0))
+                    log_id = int(entry.get('FGR_LOG_ID', 0))
 
                     # Parse metrics from node logs
                     if source == 'NODE' and node_ip:
@@ -4940,6 +4940,7 @@ class WebController(Controller):
         const logLevelNames = ['DEBUG', 'INFO', 'WARN', 'ERROR'];
 
         // Debug window
+        const MAX_LOG_ENTRIES= 10000;
         let debugWindow = null;
         let logBuffer = [];             // Stores {timestamp, message} objects
         let logElements = [];           // DOM elements for each log
@@ -4953,6 +4954,19 @@ class WebController(Controller):
         let currentScrollAnchor = null;  // Timestamp to anchor scrolling after loading
         let maxNormalGapSeconds = 5; // Track the maximum normal gap between consecutive logs
         let deadGaps = new Set();  // Stores gap keys that have no logs in journal
+        let queueRunning = false;
+        let queueItems = [];
+        const DebugViewOperation = Object.freeze({
+            ADD_LOG: 'add_log',
+            REBUILD_DISPLAY: 'rebuild_display',
+            CLEAR_LOGS: 'clear_logs',
+            REFILTER_DISPLAY: 'refilter_display',
+            ADD_HISTORICAL_ABOVE: 'add_historical_above',
+            ADD_HISTORICAL_BELOW: 'add_historical_below',
+            TRIM_BUFFER: 'trim_buffer',
+            SCROLL_TO_TIMESTAMP: 'scroll_to_timestamp',
+            FILL_GAP: 'fill_gap'
+        });
 
         // Debug window search
         let activeSearchSession = null;
@@ -5491,6 +5505,70 @@ class WebController(Controller):
             }
         }
 
+        function queueDebugViewOperation(type, data = null) {
+            // Return a promise so callers can await if needed (optional)
+            return new Promise((resolve, reject) => {
+                queueItems.push({ type, data, resolve, reject });
+                if (!queueRunning) {
+                    runQueue();
+                }
+            });
+        }
+
+        async function runQueue() {
+            if (queueRunning) return;
+            queueRunning = true;
+
+            while (queueItems.length > 0) {
+                const item = queueItems.shift();
+                const startTime = Date.now();
+
+                try {
+                    switch (item.type) {
+                        case DebugViewOperation.ADD_LOG:
+                            addNewLogInternal(item.data);
+                            break;
+                        case DebugViewOperation.REBUILD_DISPLAY:
+                            rebuildDebugDisplayInternal();
+                            break;
+                        case DebugViewOperation.CLEAR_LOGS:
+                            clearLogsInternal();
+                            break;
+                        case DebugViewOperation.REFILTER_DISPLAY:
+                            refilterAndRenderLogsInternal();
+                            break;
+                        case DebugViewOperation.ADD_HISTORICAL_ABOVE:
+                            addHistoricalLogsAboveInternal(item.data);
+                            break;
+                        case DebugViewOperation.ADD_HISTORICAL_BELOW:
+                            addHistoricalLogsBelowInternal(item.data);
+                            break;
+                        case DebugViewOperation.TRIM_BUFFER:
+                            const trimmed = trimBufferInternal();
+                            if (trimmed) {
+                                rebuildDebugDisplayInternal();
+                            }
+                            break;
+                        case DebugViewOperation.SCROLL_TO_TIMESTAMP:
+                            await scrollToTimestampInternal(item.data);
+                            break;
+                        case DebugViewOperation.FILL_GAP:
+                            await fillGapDirectionalInternal(item.data);
+                            break;
+                        default:
+                            console.error('Unknown debug view operation:', item.type);
+                            item.reject(new Error(`Unknown operation: ${item.type}`));
+                    }
+                    const duration = Date.now() - startTime;
+                    item.resolve();
+                } catch (e) {
+                    item.reject(e);
+                }
+            }
+
+            queueRunning = false;
+        }
+
         function selectAllLogs() {
             const debugWindow = document.getElementById('debugWindow');
             if (!debugWindow) return;
@@ -5638,7 +5716,6 @@ class WebController(Controller):
                         const dbTs = await getDbTimestampByLogId(logId);
                         if (dbTs) {
                             searchCursorDb = dbTs;
-                            console.log(`Cursor set: journal=${ts}, db=${dbTs}`);
                         } else {
                             searchCursorDb = ts;  // Fallback
                         }
@@ -5658,7 +5735,8 @@ class WebController(Controller):
             };
         }
 
-        function refilterAndRenderLogs() {
+        // Don't call this, call refilterAndRenderLogs()
+        function refilterAndRenderLogsInternal() {
             const debugWindow = document.getElementById('debugWindow');
             if (!debugWindow) return;
 
@@ -5714,6 +5792,11 @@ class WebController(Controller):
             } else if (emptyMsg) {
                 emptyMsg.style.display = 'none';
             }
+        }
+
+         // Wot it says
+        function refilterAndRenderLogs() {
+            queueDebugViewOperation(DebugViewOperation.REFILTER_DISPLAY);
         }
 
         // Parse comma/space separated list of numbers into a Set
@@ -6679,8 +6762,6 @@ class WebController(Controller):
             }
         }
 
-        // ============ DEBUG WINDOW ============
-
         // Initialize debug window with scroll loading
         function initDebugWindow() {
             debugWindow = document.getElementById('debugWindow');
@@ -6881,8 +6962,8 @@ class WebController(Controller):
             }
         }
 
-        // Add historical logs above existing logs
-        function addHistoricalLogsAbove(newLogs) {
+        // Don't call this, call addHistoricalLogsAbove()
+        function addHistoricalLogsAboveInternal(newLogs) {
             if (!newLogs.length) return;
 
             // Convert to internal format
@@ -6895,13 +6976,8 @@ class WebController(Controller):
             // Create a Set of existing timestamps for quick lookup (with tolerance)
             const existingTimestamps = new Set(logBuffer.map(log => log.timestamp));
 
-            // Only add logs that don't already exist (within 0.1 second tolerance)
-            const uniqueNewEntries = newEntries.filter(log => {
-                // Check if any existing log has a timestamp within 0.1 seconds
-                const exists = Array.from(existingTimestamps).some(ts => Math.abs(ts - log.timestamp) < 0.1);
-                return !exists;
-            });
-
+            // Filter out duplicates
+            const uniqueNewEntries = filterUniqueLogs(newEntries);
             if (uniqueNewEntries.length === 0) return;
 
             // Update maxNormalGapSeconds for consecutive entries within the new batch
@@ -6922,12 +6998,17 @@ class WebController(Controller):
             // Sort by timestamp
             logBuffer.sort((a, b) => a.timestamp - b.timestamp);
 
-            // Rebuild display
-            rebuildDebugDisplay();
+            // Rebuild display, calling the internal function as we have the lock
+            rebuildDebugDisplayInternal();
         }
 
         // Add historical logs above existing logs
-        function addHistoricalLogsBelow(newLogs) {
+        function addHistoricalLogsAbove(newLogs) {
+            queueDebugViewOperation(DebugViewOperation.ADD_HISTORICAL_ABOVE, newLogs);
+        }
+
+        // Don't call this, call addHistoricalLogsBelow
+        function addHistoricalLogsBelowInternal(newLogs) {
             if (!newLogs.length) return;
 
             // Convert to internal format and filter
@@ -6942,75 +7023,41 @@ class WebController(Controller):
                 }
             }
 
-            if (newEntries.length === 0) return;
+            // Filter out duplicates
+            const uniqueNewEntries = filterUniqueLogs(newEntries);
+            if (uniqueNewEntries.length === 0) return;
 
             // Update maxNormalGapSeconds for consecutive entries within the new batch
-            for (let i = 1; i < newEntries.length; i++) {
-                updateMaxNormalGap(newEntries[i].timestamp, newEntries[i-1].timestamp);
+            for (let i = 1; i < uniqueNewEntries.length; i++) {
+                updateMaxNormalGap(uniqueNewEntries[i].timestamp, uniqueNewEntries[i-1].timestamp);
             }
 
             // Also check gap between last existing log and first new log
-            if (logBuffer.length > 0 && newEntries.length > 0) {
+            if (logBuffer.length > 0 && uniqueNewEntries.length > 0) {
                 const lastExisting = logBuffer[logBuffer.length - 1].timestamp;
-                const firstNew = newEntries[0].timestamp;
+                const firstNew = uniqueNewEntries[0].timestamp;
                 updateMaxNormalGap(firstNew, lastExisting);
             }
 
             // Add to buffer
-            for (const entry of newEntries) {
+            for (const entry of uniqueNewEntries) {
                 logBuffer.push(entry);
             }
 
             // Sort by timestamp
             logBuffer.sort((a, b) => a.timestamp - b.timestamp);
 
-            // Rebuild display
-            rebuildDebugDisplay();
+            // Rebuild display, calling the internal function as we have the lock
+            rebuildDebugDisplayInternal();
         }
 
         // Add historical logs below existing logs
         function addHistoricalLogsBelow(newLogs) {
-            if (!newLogs.length) return;
-
-            // Convert to internal format and filter
-            const newEntries = [];
-            for (const log of newLogs) {
-                if (shouldDisplayLog(log.message)) {
-                    newEntries.push({
-                        timestamp: log.timestamp,
-                        message: log.message,
-                        log_id: log.log_id || 0
-                    });
-                }
-            }
-
-            if (newEntries.length === 0) return;
-
-            // Update maxNormalGapSeconds for consecutive entries within the new batch
-            for (let i = 1; i < newEntries.length; i++) {
-                updateMaxNormalGap(newEntries[i].timestamp, newEntries[i-1].timestamp);
-            }
-
-            // Also check gap between last existing log and first new log
-            if (logBuffer.length > 0 && newEntries.length > 0) {
-                const lastExisting = logBuffer[logBuffer.length - 1].timestamp;
-                const firstNew = newEntries[0].timestamp;
-                updateMaxNormalGap(firstNew, lastExisting);
-            }
-
-            // Add to buffer
-            for (const entry of newEntries) {
-                logBuffer.push(entry);
-            }
-
-            // Sort by timestamp
-            logBuffer.sort((a, b) => a.timestamp - b.timestamp);
-
-            // Rebuild display
-            rebuildDebugDisplay();
+            queueDebugViewOperation(DebugViewOperation.ADD_HISTORICAL_BELOW, newLogs);
         }
 
-        function addNewLog(logData) {
+        // Don't call this, call addNewLog()
+        function addNewLogInternal(logData) {
             let message, timestamp, source, log_id;
             if (typeof logData === 'string') {
                 message = logData;
@@ -7046,14 +7093,6 @@ class WebController(Controller):
                 }
             }
 
-            // Check for duplicate
-            const isDuplicate = logBuffer.some(log =>
-                log.message === message && Math.abs(log.timestamp - timestamp) < 2
-            );
-            if (isDuplicate) {
-                return;
-            }
-
             // Update maxNormalGapSeconds
             if (logBuffer.length > 0) {
                 const lastTimestamp = logBuffer[logBuffer.length - 1].timestamp;
@@ -7068,11 +7107,8 @@ class WebController(Controller):
                 source: source
             });
 
-            // Sort and trim
+            // Sort
             logBuffer.sort((a, b) => a.timestamp - b.timestamp);
-            while (logBuffer.length > 2000) {
-                logBuffer.shift();
-            }
 
             // Add to DOM if it passes filters
             if (shouldDisplayLog(message)) {
@@ -7098,6 +7134,26 @@ class WebController(Controller):
             }
         }
 
+        // Add a newly arrived log to the debug window
+        function addNewLog(logData) {
+            queueDebugViewOperation(DebugViewOperation.ADD_LOG, logData);
+        }
+
+        // Don't call this, call trimBuffer()
+        function trimBufferInternal() {
+            let trimmed = false;
+            while (logBuffer.length > MAX_LOG_ENTRIES) {
+                logBuffer.shift();
+                trimmed = true;
+            }
+            return trimmed;
+        }
+
+        // Trim buffer (does NOT touch DOM)
+        function trimBuffer() {
+            queueDebugViewOperation(DebugViewOperation.TRIM_BUFFER);
+        }
+
         async function getDbTimestampByLogId(logId) {
             if (!logId || logId === 0) return null;
 
@@ -7118,6 +7174,7 @@ class WebController(Controller):
         }
 
         async function getJournalTimestampByLogId(logId, approxTimestamp) {
+            console.log(`getJournalTimestampByLogId: called with logId=${logId}, approxTimestamp=${approxTimestamp}`);
             if (!logId || logId === 0) return approxTimestamp;
 
             try {
@@ -7131,19 +7188,21 @@ class WebController(Controller):
                     })
                 });
                 const data = await response.json();
+                console.log(`getJournalTimestampByLogId: response received, logs count=${data.logs?.length}`);
 
                 if (data.status === 'ok' && data.logs) {
                     const match = data.logs.find(log => log.log_id === logId);
                     if (match && match.timestamp) {
-                        console.log(`Found journal timestamp ${match.timestamp} for log_id ${logId} (was ${approxTimestamp})`);
+                        console.log(`getJournalTimestampByLogId: found match with timestamp ${match.timestamp}`);
                         return match.timestamp;
                     } else {
-                        console.log(`No match found for log_id ${logId} in ${data.logs.length} logs between ${approxTimestamp - 10} and ${approxTimestamp + 10}`);
+                        console.log(`getJournalTimestampByLogId: no match found for log_id ${logId}`);
                     }
                 }
             } catch (e) {
                 console.warn('getJournalTimestampByLogId failed:', e);
             }
+            console.log(`getJournalTimestampByLogId: returning approxTimestamp ${approxTimestamp}`);
             return approxTimestamp;
         }
 
@@ -7158,24 +7217,46 @@ class WebController(Controller):
         }
 
         function findLogElementByLogId(logId) {
-            if (!logId || logId === 0) return null;
             for (let i = 0; i < logElements.length; i++) {
-                const elLogId = parseInt(logElements[i].getAttribute('data-log_id'));
-                if (elLogId === logId) return logElements[i];
+                const dataLogId = logElements[i].getAttribute('data-log_id');
+                const parsedId = parseInt(dataLogId, 10);
+                if (parsedId === logId) {
+                    return logElements[i];
+                }
             }
             return null;
         }
 
-        // Fill a gap by fetching logs in a specific direction
-        async function fillGapDirectional(edgeTimestamp, direction, gapMarkerElement) {
-            const gapKey = gapMarkerElement.dataset.gapKey;
-            const originalOlder = parseFloat(gapMarkerElement.dataset.olderTimestamp);
-            const originalNewer = parseFloat(gapMarkerElement.dataset.newerTimestamp);
+        // Shared function to filter out duplicate logs based on log_id
+        function filterUniqueLogs(newEntries) {
+            if (!newEntries || newEntries.length === 0) return [];
+
+            // Create a Set of existing log_ids for O(1) lookup
+            const existingLogIds = new Set(logBuffer.map(log => log.log_id));
+
+            // Only keep logs that don't already exist (by log_id)
+            return newEntries.filter(log => {
+                if (log.log_id === 0) {
+                    // Fallback: if no log_id, use timestamp + message (rare)
+                    return !logBuffer.some(existing =>
+                        existing.message === log.message &&
+                        Math.abs(existing.timestamp - log.timestamp) < 0.1
+                    );
+                }
+                return !existingLogIds.has(log.log_id);
+            });
+        }
+
+        // Don't call this one, call fillGapDirectional()
+        async function fillGapDirectionalInternal(data) {
+            const { edgeTimestamp, direction, gapKey, olderTimestamp, newerTimestamp, gapMarkerElement } = data;
+            // Store original values for later use
+            const originalOlder = olderTimestamp;
+            const originalNewer = newerTimestamp;
             const BATCH_SIZE = 50;
 
-            // Visual feedback while loading
-            gapMarkerElement.style.opacity = '0.5';
-            gapMarkerElement.style.cursor = 'wait';
+            // Note: We cannot store DOM element references across async boundaries reliably
+            // So we'll need to find the gap marker by its key after the operation completes
 
             try {
                 const requestBody = {
@@ -7190,39 +7271,30 @@ class WebController(Controller):
                     body: JSON.stringify(requestBody)
                 });
 
-                const data = await response.json();
+                const result = await response.json();
 
-                if (data.status === 'ok' && data.logs && data.logs.length > 0) {
-                    const newEntries = data.logs
+                if (result.status === 'ok' && result.logs && result.logs.length > 0) {
+                    const newEntries = result.logs
                         .map(log => ({
                             timestamp: log.timestamp,
-                            message: log.message
+                            message: log.message,
+                            log_id: log.log_id || 0
                         }))
                         .filter(log => shouldDisplayLog(log.message));
 
                     if (newEntries.length > 0) {
-                        const existingTimestamps = new Set(logBuffer.map(log => log.timestamp));
-                        const uniqueNew = [];
-
-                        for (const log of newEntries) {
-                            let isDuplicate = false;
-                            for (const ts of existingTimestamps) {
-                                if (Math.abs(ts - log.timestamp) < 0.1) {
-                                    isDuplicate = true;
-                                    break;
-                                }
-                            }
-                            if (!isDuplicate) {
-                                uniqueNew.push(log);
-                            }
-                        }
+                        // Filter out duplicates
+                        const uniqueNew = filterUniqueLogs(newEntries);
 
                         if (uniqueNew.length > 0) {
+                            // Add to buffer (lock is held, so safe)
                             logBuffer.push(...uniqueNew);
                             logBuffer.sort((a, b) => a.timestamp - b.timestamp);
-                            rebuildDebugDisplay();
 
-                            // Scroll to the gap marker after rebuild
+                            // Rebuild display (call internal directly since lock is held)
+                            rebuildDebugDisplayInternal();
+
+                            // Scroll to the gap area after rebuild
                             setTimeout(() => {
                                 const markers = document.querySelectorAll('.gap-marker');
                                 let bestMarker = null;
@@ -7249,8 +7321,6 @@ class WebController(Controller):
                                 }
                             }, 200);
 
-                            gapMarkerElement.style.opacity = '';
-                            gapMarkerElement.style.cursor = '';
                             showTemporaryMessage(`Loaded ${uniqueNew.length} logs`);
                             return;
                         }
@@ -7259,20 +7329,45 @@ class WebController(Controller):
 
                 // No logs found or all were duplicates
                 deadGaps.add(gapKey);
-                gapMarkerElement.remove();
+                // Remove the gap marker from DOM
+                const markers = document.querySelectorAll('.gap-marker');
+                for (const marker of markers) {
+                    if (marker.dataset.gapKey === gapKey) {
+                        marker.remove();
+                        break;
+                    }
+                }
                 showTemporaryMessage('No logs exist in this gap');
 
             } catch (e) {
                 console.error('Error filling gap:', e);
-                gapMarkerElement.style.opacity = '';
-                gapMarkerElement.style.cursor = '';
                 showTemporaryMessage('Failed to load logs: ' + e.message);
             }
         }
 
-        // Rebuild entire debug display (used after bulk adds)
-        function rebuildDebugDisplay() {
-            console.log('rebuildDebugDisplay: logBuffer entries with log_id:');
+        // Fill a gap by fetching logs in a specific direction
+        async function fillGapDirectional(edgeTimestamp, direction, gapMarkerElement) {
+            // Extract data from the DOM element before queueing (DOM elements can't be serialized)
+            const gapKey = gapMarkerElement.dataset.gapKey;
+            const olderTimestamp = parseFloat(gapMarkerElement.dataset.olderTimestamp);
+            const newerTimestamp = parseFloat(gapMarkerElement.dataset.newerTimestamp);
+
+            // Visual feedback while waiting
+            gapMarkerElement.style.opacity = '0.5';
+            gapMarkerElement.style.cursor = 'wait';
+
+            queueDebugViewOperation(DebugViewOperation.FILL_GAP, {
+                edgeTimestamp: parseFloat(edgeTimestamp),
+                direction: direction,
+                gapKey: gapKey,
+                olderTimestamp: olderTimestamp,
+                newerTimestamp: newerTimestamp,
+                gapMarkerElement: null  // Don't store DOM reference, we'll find by key later
+            });
+        }
+
+        // Don't call this, call rebuildDebugDisplay()
+        function rebuildDebugDisplayInternal() {
             if (!debugWindow) return;
 
             const shouldScrollToBottom = !autoScrollLocked && isAtBottom;
@@ -7475,17 +7570,19 @@ class WebController(Controller):
             }
         }
 
-        // Scroll to a specific timestamp
-        async function scrollToTimestamp(timestamp, targetLogId = null) {
-            console.log('scrollToTimestamp: started with timestamp', timestamp, 'targetLogId', targetLogId);
+        // Rebuild entire debug display (used after bulk adds)
+        function rebuildDebugDisplay() {
+            queueDebugViewOperation(DebugViewOperation.REBUILD_DISPLAY);
+        }
+
+        // Don't call this one, call scrollToTimestamp()
+        async function scrollToTimestampInternal(data) {
+            const { timestamp, targetLogId } = data;
+
+            console.log(`[scrollToTimestampInternal] START: timestamp=${timestamp}, targetLogId=${targetLogId}, type=${typeof targetLogId}`);
 
             if (!timestamp) {
-                console.error('scrollToTimestamp: No timestamp provided');
-                return;
-            }
-
-            if (!timestamp) {
-                console.error('scrollToTimestamp: No timestamp provided');
+                console.error('scrollToTimestampInternal: No timestamp provided');
                 return;
             }
 
@@ -7500,12 +7597,10 @@ class WebController(Controller):
                     closestIndex = i;
                 }
             }
-            console.log('scrollToTimestamp: closest in buffer distance', closestDistance);
+            console.log(`[scrollToTimestampInternal] closest in buffer: distance=${closestDistance}, index=${closestIndex}`);
 
             // If we have logs within 60 seconds and a target log_id, check if it exists
             if (closestIndex !== -1 && closestDistance < 60 && targetLogId) {
-                console.log('scrollToTimestamp: found logs in buffer, distance', closestDistance);
-
                 // Check if exact log_id exists in buffer
                 let exactIndex = -1;
                 for (let i = 0; i < logElements.length; i++) {
@@ -7517,8 +7612,8 @@ class WebController(Controller):
                 }
 
                 if (exactIndex !== -1) {
+                    console.log(`[scrollToTimestampInternal] EXACT MATCH FOUND in buffer at index ${exactIndex}, scrolling directly`);
                     // Exact log_id found - scroll directly to it
-                    console.log('scrollToTimestamp: exact log_id found in buffer at index', exactIndex);
                     const exactElement = logElements[exactIndex];
                     exactElement.scrollIntoView({ block: 'center', behavior: 'smooth' });
                     exactElement.classList.add('log-cursor');
@@ -7527,62 +7622,66 @@ class WebController(Controller):
                         if (exactElement) exactElement.style.backgroundColor = '';
                     }, 3000);
                     await new Promise(resolve => setTimeout(resolve, 500));
-                    console.log('scrollToTimestamp: scrolled to exact match in buffer');
+                    console.log(`[scrollToTimestampInternal] DONE - scrolled to exact match`);
                     return;
                 } else {
                     // Exact log_id not in buffer - go straight to journal fetch
-                    console.log('scrollToTimestamp: exact log_id not in buffer, falling back to journal');
+                    console.log(`[scrollToTimestampInternal] exact log_id ${targetLogId} not in buffer (found closest but not exact), falling back to journal`);
                     // Continue to journal fetch below
                 }
             } else if (closestIndex !== -1 && closestDistance < 60 && !targetLogId) {
                 // No target log_id (Go to time button) - just scroll to closest
-                console.log('scrollToTimestamp: no target log_id, scrolling to closest');
+                console.log(`[scrollToTimestampInternal] no targetLogId, scrolling to closest at index ${closestIndex}`);
                 const centerElement = logElements[closestIndex];
                 if (centerElement) {
                     centerElement.scrollIntoView({ block: 'center', behavior: 'smooth' });
                     await new Promise(resolve => setTimeout(resolve, 500));
                 }
+                console.log(`[scrollToTimestampInternal] DONE - scrolled to closest`);
                 return;
             }
 
+            console.log(`[scrollToTimestampInternal] FETCHING from journal for timestamp ${timestamp}`);
             // Fetch logs around this timestamp from journal
             isLoading = true;
 
             try {
-                console.log('scrollToTimestamp: fetching from journal');
                 const response = await fetch('/api/journal/query', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         timestamp: timestamp,
-                        before: 500,  // Nice and wide as the journal entry
-                        after: 500    // and the database may be far apart
+                        before: 500,
+                        after: 500
                     })
                 });
                 const data = await response.json();
-                console.log('scrollToTimestamp: fetch complete, logs count', data.logs?.length);
+                console.log(`[scrollToTimestampInternal] FETCH complete: status=${data.status}, logsCount=${data.logs?.length}`);
 
                 if (data.status === 'ok' && data.logs && data.logs.length > 0) {
-                    // Get timestamps of new logs
                     const newLogs = data.logs;
-                    const newTimestamps = new Set(newLogs.map(log => log.timestamp));
 
-                    // Remove existing logs that overlap with new ones (by timestamp)
-                    const filteredBuffer = logBuffer.filter(log => !newTimestamps.has(log.timestamp));
+                    // Filter by current display filters
+                    const filteredNewLogs = newLogs.filter(log => shouldDisplayLog(log.message));
+                    console.log(`[scrollToTimestampInternal] after filter: ${filteredNewLogs.length} logs`);
 
-                    // Merge and sort by timestamp
-                    logBuffer = [...filteredBuffer, ...newLogs];
+                    // Filter duplicates by log_id
+                    const uniqueNewLogs = filterUniqueLogs(filteredNewLogs);
+                    console.log(`[scrollToTimestampInternal] after dedup: ${uniqueNewLogs.length} logs`);
+
+                    // Add to buffer
+                    logBuffer.push(...uniqueNewLogs);
                     logBuffer.sort((a, b) => a.timestamp - b.timestamp);
+                    console.log(`[scrollToTimestampInternal] buffer now has ${logBuffer.length} entries`);
 
                     // Rebuild display with new merged buffer
-                    console.log('scrollToTimestamp: rebuilding display');
-                    rebuildDebugDisplay();
-                    console.log('scrollToTimestamp: display rebuilt, logElements count', logElements.length);
+                    rebuildDebugDisplayInternal();
+                    console.log(`[scrollToTimestampInternal] display rebuilt, logElements length=${logElements.length}`);
 
                     // Scroll to the time range (center of the loaded logs)
                     if (logElements.length > 0) {
                         const centerIndex = Math.floor(logElements.length / 2);
-                        console.log('scrollToTimestamp: scrolling to time range');
+                        console.log(`[scrollToTimestampInternal] scrolling to center index ${centerIndex}`);
                         logElements[centerIndex].scrollIntoView({ block: 'center', behavior: 'smooth' });
 
                         // Wait for scroll to settle
@@ -7590,10 +7689,12 @@ class WebController(Controller):
 
                         // If we have a target log_id, find and highlight the exact match
                         if (targetLogId) {
+                            console.log(`[scrollToTimestampInternal] searching for targetLogId ${targetLogId} in rebuilt logElements`);
                             let found = false;
                             for (let i = 0; i < logElements.length; i++) {
                                 const rid = parseInt(logElements[i].getAttribute('data-log_id'));
                                 if (rid === targetLogId) {
+                                    console.log(`[scrollToTimestampInternal] FOUND target at index ${i}, highlighting`);
                                     const exactElement = logElements[i];
                                     exactElement.classList.add('log-cursor');
                                     exactElement.style.backgroundColor = '#4a4a4a';
@@ -7601,20 +7702,17 @@ class WebController(Controller):
                                     setTimeout(() => {
                                         if (exactElement) exactElement.style.backgroundColor = '';
                                     }, 3000);
-                                    console.log('scrollToTimestamp: cursor set on exact match at index', i);
                                     found = true;
                                     break;
                                 }
                             }
                             if (!found) {
-                                console.log('scrollToTimestamp: exact log_id not found in loaded logs');
-                                // Fall back to message matching? Journal logs don't have log_id
-                                // So we might need to keep message matching as fallback
+                                console.log(`[scrollToTimestampInternal] WARNING: targetLogId ${targetLogId} NOT FOUND in rebuilt logElements`);
                             }
                         }
                     }
                 } else {
-                    console.log('scrollToTimestamp: no logs found');
+                    console.log(`[scrollToTimestampInternal] no logs returned from journal`);
                     const notification = document.createElement('div');
                     notification.style.cssText = 'position:fixed; bottom:100px; right:20px; background:#f44336; color:white; padding:10px; border-radius:5px; z-index:10000;';
                     notification.textContent = `No logs available for ${new Date(timestamp * 1000).toLocaleString()}`;
@@ -7622,11 +7720,17 @@ class WebController(Controller):
                     setTimeout(() => notification.remove(), 3000);
                 }
             } catch (e) {
-                console.error('scrollToTimestamp: Error=', e);
+                console.error('scrollToTimestampInternal: Error=', e);
             } finally {
                 isLoading = false;
-                console.log('scrollToTimestamp: finished');
+                console.log(`[scrollToTimestampInternal] FINISHED`);
             }
+        }
+
+        // Scroll to a specific timestamp
+        function scrollToTimestamp(timestamp, targetLogId = null) {
+            console.log('scrollToTimestamp called with:', { timestamp, targetLogId, type: typeof targetLogId });
+            queueDebugViewOperation(DebugViewOperation.SCROLL_TO_TIMESTAMP, { timestamp, targetLogId });
         }
 
         // Go to time from datetime picker
@@ -7646,11 +7750,9 @@ class WebController(Controller):
             scrollToTimestamp(timestamp);
         }
 
-        async function scrollToMatch(timestamp, targetLogId = null) {
-            console.log('=== scrollToMatch ===');
-            console.log(`timestamp: ${timestamp}, targetLogId: ${targetLogId}`);
+        async function scrollToMatch(timestamp, targetLogId = null, direction = null) {
+            console.log('scrollToMatch called with:', { timestamp, targetLogId, direction, type: typeof targetLogId });
 
-            autoScrolling = true;
             let targetElement = null;
 
             if (targetLogId) {
@@ -7671,7 +7773,30 @@ class WebController(Controller):
             }
 
             if (targetElement) {
-                console.log('Scrolling to element...');
+                console.log('TARGET ELEMENT FOUND:');
+                const foundTimestamp = parseFloat(targetElement.getAttribute('data-timestamp'));
+                const foundLogId = parseInt(targetElement.getAttribute('data-log_id'), 10);
+
+                if (!isNaN(foundTimestamp) && !isNaN(foundLogId)) {
+                    searchCursor = foundTimestamp;
+                    searchCursorDb = foundTimestamp;
+                    searchLogId = foundLogId;
+                    if (direction) {
+                        lastSearchDirection = direction;
+                    }
+                    updateCursorHighlight();
+                    console.log('  Updated cursor to timestamp:', foundTimestamp, 'log_id:', foundLogId);
+                } else if (timestamp) {
+                    // Fallback to provided timestamp if parsing fails
+                    searchCursor = timestamp;
+                    searchCursorDb = timestamp;
+                    if (direction) {
+                        lastSearchDirection = direction;
+                    }
+                    updateCursorHighlight();
+                    console.log('  Updated cursor to timestamp (fallback):', timestamp);
+                }
+
                 targetElement.scrollIntoView({ block: 'center' });
                 targetElement.classList.add('log-cursor');
                 targetElement.style.backgroundColor = '#ff9800';
@@ -7679,6 +7804,7 @@ class WebController(Controller):
                     if (targetElement) targetElement.style.backgroundColor = '';
                 }, 300);
                 await new Promise(resolve => setTimeout(resolve, 500));
+                console.log('Scroll animation complete');
             } else {
                 console.log(`Element not found by log_id, calling scrollToTimestamp(${timestamp}, ${targetLogId})`);
                 await scrollToTimestamp(timestamp, targetLogId);
@@ -7796,74 +7922,126 @@ class WebController(Controller):
         }
 
         function searchLocalBuffer(searchTerm, direction) {
-            console.log('searchLocalBuffer: searching', logBuffer.length, 'entries for', searchTerm);
+            console.log('searchLocalBuffer: ========== START ==========');
+            console.log('searchLocalBuffer: searchTerm:', searchTerm);
+            console.log('searchLocalBuffer: caseSensitive:', searchCaseSensitive);
+            console.log('searchLocalBuffer: wholeWord:', searchWholeWord);
+            console.log('searchLocalBuffer: direction:', direction);
+            console.log('searchLocalBuffer: logBuffer length:', logBuffer.length);
 
-            // First, collect all matches in current buffer that pass filters
+            // Build matches array
             const matches = [];
+            let coreDumpCount = 0;
+            let coreDumpRejected = 0;
+
             for (let i = 0; i < logBuffer.length; i++) {
                 const entry = logBuffer[i];
-                // Check if this log should be displayed (respects filters)
-                if (shouldDisplayLog(entry.message) &&
-                    matchesSearchCriteria(entry.message, searchTerm, searchCaseSensitive, searchWholeWord)) {
+
+                // Check if this is a CORE_DUMP entry
+                const isCoreDump = entry.message.includes('CORE_DUMP');
+                if (isCoreDump) {
+                    coreDumpCount++;
+                }
+
+                const shouldDisplay = shouldDisplayLog(entry.message);
+                const matchesCriteria = matchesSearchCriteria(entry.message, searchTerm, searchCaseSensitive, searchWholeWord);
+
+                if (shouldDisplay && matchesCriteria) {
                     matches.push({
                         index: i,
                         log_id: entry.log_id,
                         timestamp: entry.timestamp,
                         message: entry.message
                     });
+                } else if (isCoreDump) {
+                    coreDumpRejected++;
+                    console.log('searchLocalBuffer: REJECTED CORE_DUMP entry:', {
+                        log_id: entry.log_id,
+                        timestamp: entry.timestamp,
+                        shouldDisplay: shouldDisplay,
+                        matchesCriteria: matchesCriteria,
+                        message_preview: entry.message.substring(0, 80)
+                    });
                 }
             }
 
+            console.log('searchLocalBuffer: total CORE_DUMP entries in buffer:', coreDumpCount);
+            console.log('searchLocalBuffer: CORE_DUMP entries rejected:', coreDumpRejected);
+            console.log('searchLocalBuffer: total matches found:', matches.length);
+
             if (matches.length === 0) {
-                console.log('searchLocalBuffer: no matches found in buffer');
+                console.log('searchLocalBuffer: no matches, returning false');
                 return { found: false };
             }
 
-            console.log('searchLocalBuffer: found', matches.length, 'matches in buffer');
+            // Log first few matches
+            console.log('searchLocalBuffer: first 5 matches:');
+            for (let i = 0; i < Math.min(5, matches.length); i++) {
+                console.log(`  [${i}] log_id=${matches[i].log_id}, ts=${matches[i].timestamp}`);
+            }
+            console.log('searchLocalBuffer: last 5 matches:');
+            for (let i = Math.max(0, matches.length - 5); i < matches.length; i++) {
+                console.log(`  [${i}] log_id=${matches[i].log_id}, ts=${matches[i].timestamp}`);
+            }
 
-            // Find starting position based on cursor or viewport
-            let startIndex = -1;
-
-            console.log('searchLocalBuffer: cursor check - searchCursor=', searchCursor, 'autoScrolling=', autoScrolling);
+            // Determine reference timestamp
+            let referenceTimestamp;
             if (searchCursor !== null && !autoScrolling) {
-                // Use cursor timestamp as reference point
-                if (direction === 'next') {
-                    startIndex = matches.findIndex(m => m.timestamp > searchCursor);
-                    if (startIndex === -1) startIndex = 0;
-                } else {
-                    startIndex = matches.findIndex(m => m.timestamp < searchCursor);
-                    if (startIndex === -1) startIndex = matches.length - 1;
-                }
-                console.log('searchLocalBuffer: using cursor timestamp, startIndex=', startIndex);
+                referenceTimestamp = searchCursor;
+                console.log('searchLocalBuffer: using cursor timestamp:', referenceTimestamp);
+            } else {
+                referenceTimestamp = (direction === 'next')
+                    ? getVisibleTimestamp('newest')
+                    : getVisibleTimestamp('oldest');
+                console.log('searchLocalBuffer: using viewport timestamp:', referenceTimestamp);
             }
 
-            if (startIndex === -1) {
-                // No cursor, use viewport
-                const viewportTimestamp = (direction === 'next')
-                    ? getVisibleTimestamp('newest')  // Start from bottom when going "next" (down)
-                    : getVisibleTimestamp('oldest'); // Start from top when going "prev" (up)
+            // ADDED: Detailed match checking with tolerance
+            const EPSILON = 0.0001;  // 0.1ms tolerance for floating point
 
-                console.log('searchLocalBuffer: using viewport timestamp', viewportTimestamp, 'direction', direction);
-
-                if (direction === 'next') {
-                    // Find first match AFTER the viewport bottom
-                    startIndex = matches.findIndex(m => m.timestamp > viewportTimestamp);
-                    if (startIndex === -1) startIndex = 0;  // Wrap to beginning
-                } else {
-                    // Find first match BEFORE the viewport top
-                    startIndex = matches.findIndex(m => m.timestamp < viewportTimestamp);
-                    if (startIndex === -1) startIndex = matches.length - 1;  // Wrap to end
+            // Find the closest match in the specified direction
+            let bestIndex = -1;
+            if (direction === 'next') {
+                // Find smallest timestamp > reference
+                for (let i = 0; i < matches.length; i++) {
+                    const isGreater = matches[i].timestamp > referenceTimestamp;
+                    const isGreaterWithTolerance = matches[i].timestamp > (referenceTimestamp + EPSILON);
+                    console.log(`  checking match[${i}]: ts=${matches[i].timestamp.toFixed(6)}, ref=${referenceTimestamp.toFixed(6)}, diff=${(matches[i].timestamp - referenceTimestamp).toFixed(6)}, >? ${isGreater} (with tolerance: ${isGreaterWithTolerance})`);
+                    if (matches[i].timestamp > referenceTimestamp) {
+                        bestIndex = i;
+                        console.log(`    -> FOUND at index ${i}`);
+                        break;
+                    }
+                }
+                if (bestIndex === -1) {
+                    console.log('searchLocalBuffer: no next match, need more');
+                    return { found: false, needMore: true };
+                }
+            } else {
+                // Find largest timestamp < reference
+                for (let i = matches.length - 1; i >= 0; i--) {
+                    const isLess = matches[i].timestamp < referenceTimestamp;
+                    const isLessWithTolerance = matches[i].timestamp < (referenceTimestamp - EPSILON);
+                    console.log(`  checking match[${i}]: ts=${matches[i].timestamp.toFixed(6)}, ref=${referenceTimestamp.toFixed(6)}, diff=${(matches[i].timestamp - referenceTimestamp).toFixed(6)}, <? ${isLess} (with tolerance: ${isLessWithTolerance})`);
+                    if (matches[i].timestamp < referenceTimestamp) {
+                        bestIndex = i;
+                        console.log(`    -> FOUND at index ${i}`);
+                        break;
+                    }
+                }
+                if (bestIndex === -1) {
+                    console.log('searchLocalBuffer: no prev match, need more');
+                    return { found: false, needMore: true };
                 }
             }
 
-            // Navigate from startIndex - startIndex is already the target match
-            let newIndex = startIndex;
-            let wrapped = false;
+            const match = matches[bestIndex];
+            console.log('searchLocalBuffer: selected match:', { log_id: match.log_id, timestamp: match.timestamp });
 
-            const match = matches[newIndex];
             const element = findLogElementByLogId(match.log_id);
+            console.log('searchLocalBuffer: element found by log_id:', !!element);
 
-            // Check for gap markers in DOM between cursor and this match
+            // Gap marker detection
             if (searchCursor !== null && !autoScrolling) {
                 const cursorElement = findLogElementByTimestamp(searchCursor);
                 if (cursorElement && element) {
@@ -7875,22 +8053,21 @@ class WebController(Controller):
 
                     for (let i = start; i <= end; i++) {
                         if (elements[i].classList.contains('gap-marker')) {
-                            console.log('searchLocalBuffer: gap marker detected in DOM between cursor and match, falling back to database');
+                            console.log('searchLocalBuffer: gap marker detected, falling back to database');
                             return { found: false, gapDetected: true };
                         }
                     }
                 }
             }
 
-            console.log('searchLocalBuffer: navigating to match', newIndex + 1, '/', matches.length, 'timestamp:', match.timestamp, 'message:', match.message.substring(0, 50));
-
+            console.log('searchLocalBuffer: ========== SUCCESS ==========');
             return {
                 found: true,
                 element: element,
                 timestamp: match.timestamp,
                 log_id: match.log_id,
-                wrapped: wrapped,
-                matchNumber: newIndex + 1,
+                wrapped: bestIndex === 0 || bestIndex === matches.length - 1,
+                matchNumber: bestIndex + 1,
                 totalMatches: matches.length
             };
         }
@@ -7955,12 +8132,10 @@ class WebController(Controller):
             }
 
             if (isSearching) {
-                console.log('Search already in progress, ignoring');
                 showTemporaryMessage('⏳ Search already in progress...', 'search');
                 return;
             }
 
-            console.log('Setting isSearching = true, disabling buttons');
             isSearching = true;
             currentSearchAborted = false;
 
@@ -7981,12 +8156,10 @@ class WebController(Controller):
                 } else {
                     fromTimestamp -= 0.001;
                 }
-                console.log(`Using cursor with offset (db timestamp): ${fromTimestamp}`);
             } else {
                 fromTimestamp = (direction === 'next')
                     ? getVisibleTimestamp('oldest')
                     : getVisibleTimestamp('newest');
-                console.log(`Using viewport: ${fromTimestamp}`);
             }
 
             const progressSpan = document.getElementById('searchProgress');
@@ -8032,18 +8205,53 @@ class WebController(Controller):
                 }
 
                 if (startData.found === true && startData.session_id) {
-                    console.log('MATCH FOUND in start response!', startData);
+                    console.log('DATABASE MATCH:');
+                    console.log('  log_id:', startData.log_id);
+                    console.log('  timestamp:', startData.timestamp);
+                    console.log('  message preview:', startData.message.substring(0, 200));
 
-                    let scrollTimestamp = startData.timestamp;
-                    if (startData.log_id && startData.log_id > 0) {
-                        scrollTimestamp = await getJournalTimestampByLogId(startData.log_id, startData.timestamp);
+                    // Check if this log_id is in logBuffer right now
+                    const inBuffer = logBuffer.some(log => log.log_id === startData.log_id);
+                    console.log('  In logBuffer right now:', inBuffer);
+
+                    if (inBuffer) {
+                        // Find it in logBuffer and log its timestamp
+                        const bufferEntry = logBuffer.find(log => log.log_id === startData.log_id);
+                        console.log('  Buffer entry timestamp:', bufferEntry.timestamp);
+                        console.log('  Buffer entry message preview:', bufferEntry.message.substring(0, 100));
                     }
 
+                    // Check if it's in logElements
+                    let inElements = false;
+                    let elementIndex = -1;
+                    for (let i = 0; i < logElements.length; i++) {
+                        const rid = parseInt(logElements[i].getAttribute('data-log_id'));
+                        if (rid === startData.log_id) {
+                            inElements = true;
+                            elementIndex = i;
+                            break;
+                        }
+                    }
+                    console.log('  In logElements:', inElements, inElements ? `at index ${elementIndex}` : '');
+
+                    let scrollTimestamp = startData.timestamp;
+                    console.log('  Before getJournalTimestampByLogId: scrollTimestamp=', scrollTimestamp);
+
+                    if (startData.log_id && startData.log_id > 0) {
+                        console.log('  Calling getJournalTimestampByLogId with log_id=', startData.log_id);
+                        scrollTimestamp = await getJournalTimestampByLogId(startData.log_id, startData.timestamp);
+                        console.log('  After getJournalTimestampByLogId: scrollTimestamp=', scrollTimestamp);
+                    } else {
+                        console.log('  Skipping getJournalTimestampByLogId - no log_id or log_id=0');
+                    }
+
+                    console.log('  Setting searchCursor...');
                     searchCursor = scrollTimestamp;
                     searchCursorDb = startData.timestamp;
                     searchLogId = startData.log_id;
                     lastSearchDirection = direction;
                     updateCursorHighlight();
+                    console.log('  Cursor set, showing temporary message...');
 
                     if (startData.wrapped) {
                         const wrapMsg = direction === 'next' ? '↺ Wrapped to earliest logs' : '↺ Wrapped to latest logs';
@@ -8058,8 +8266,11 @@ class WebController(Controller):
                         showTemporaryMessage(`✅ Found: ${shortMsg}`, 'search');
                     }
 
-                    await scrollToMatch(scrollTimestamp, startData.log_id);
+                    console.log('  About to call scrollToMatch...');
+                    await scrollToMatch(scrollTimestamp, startData.log_id, direction);
+                    console.log('  scrollToMatch completed');
                     activeSearchSession = startData.session_id;
+                    console.log('  Search session saved');
                     return;
                 }
 
@@ -8123,7 +8334,7 @@ class WebController(Controller):
                         const shortMsg = pollData.message.length > 80 ? pollData.message.substring(0, 77) + '...' : pollData.message;
                         showTemporaryMessage(`✅ Found: ${shortMsg}`, 'search');
 
-                        await scrollToMatch(scrollTimestamp, pollData.log_id);
+                        await scrollToMatch(scrollTimestamp, pollData.log_id, direction);
                         break;
                     }
 
@@ -8255,6 +8466,7 @@ class WebController(Controller):
             searchInput.addEventListener('focus', () => {
                 searchInput.style.width = '100px';
                 searchInput.placeholder = 'Search...';
+                searchInput.select();
             });
 
             searchInput.addEventListener('blur', () => {
@@ -8300,12 +8512,8 @@ class WebController(Controller):
 
             // Cancel button - cancels search and returns buttons to normal
             cancelBtn.addEventListener('click', async () => {
-                console.log('Cancel button clicked');
-                console.log('activeSearchSession:', activeSearchSession);
-
                 // Cancel the backend search session
                 if (activeSearchSession) {
-                    console.log('Sending cancel request...');
                     try {
                         const response = await fetch('/api/search', {
                             method: 'POST',
@@ -8315,7 +8523,6 @@ class WebController(Controller):
                                 session_id: activeSearchSession
                             })
                         });
-                        console.log('Cancel response:', response);
                     } catch (e) {
                         console.error('Cancel failed:', e);
                     }
@@ -8328,8 +8535,6 @@ class WebController(Controller):
 
                 // Reset search state BUT KEEP CURSOR
                 isSearching = false;
-                console.log('isSearching set to false');
-
                 // Re-enable buttons
                 searchInput.disabled = false;
                 caseBtn.disabled = false;
@@ -8341,7 +8546,6 @@ class WebController(Controller):
                 searchInput.blur();
 
                 showTemporaryMessage('Search cancelled', 'search');
-                console.log('Cancel complete');
             });
 
             // Jump to cursor button
@@ -8374,18 +8578,14 @@ class WebController(Controller):
                     if (e.shiftKey) {
                         // Shift+F3: opposite of base direction
                         direction = baseDirection === 'next' ? 'prev' : 'next';
-                        console.log(`Shift+F3 pressed: baseDirection=${baseDirection}, direction=${direction}`);
                     } else {
                         // F3: same as base direction
                         direction = baseDirection;
-                        console.log(`F3 pressed: baseDirection=${baseDirection}, direction=${direction}`);
                     }
 
                     performSearch(direction, false);
                 }
             });
-
-            console.log('Search UI initialized with F3/Shift+F3 support, baseDirection=prev');
         }
 
         // Toggle auto-scroll lock
@@ -8407,7 +8607,6 @@ class WebController(Controller):
             }
         }
 
-        // Override existing appendLogsFiltered function
         function appendLogsFiltered(newLogs) {
             if (!newLogs || newLogs.length === 0) return;
 
@@ -8416,8 +8615,8 @@ class WebController(Controller):
             }
         }
 
-        // Override clearLogs to reset buffer properly
-        function clearLogs() {
+        // Don't call this, call clearLogs()
+        function clearLogsInternal() {
             logBuffer = [];
             logElements = [];
             logTexts = [];
@@ -8431,6 +8630,11 @@ class WebController(Controller):
                     setTimeout(() => loadHistoricalLogsAbove(), 100);
                 })
                 .catch(e => console.error('Error clearing logs:', e));
+        }
+
+        // Override clearLogs to reset buffer properly
+        function clearLogs() {
+            queueDebugViewOperation(DebugViewOperation.CLEAR_LOGS);
         }
 
         // Override setupDebugWindow to also handle auto-scroll toggle
@@ -8468,6 +8672,10 @@ class WebController(Controller):
             setupDebugWindow();
             initDebugWindow();
             initSearchUI();
+            // Trim buffer every 30 seconds
+            setInterval(() => {
+                trimBuffer();
+            }, 30000);
         }
 
         // ============ GRAPH VIEW CODE ============
