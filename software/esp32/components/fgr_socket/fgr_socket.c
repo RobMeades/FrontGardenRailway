@@ -193,6 +193,7 @@ static void task_maintain_cb(void *handle, void *param)
                                 fgr_socket_connect_stop(&context_connect);
                             }
                             if (local_sock >= 0) {
+                                shutdown(local_sock, SHUT_RDWR);  // To unblock any LWIP callbacks
                                 close(local_sock);
                             }
                         }
@@ -207,6 +208,7 @@ static void task_maintain_cb(void *handle, void *param)
                             fgr_socket_connect_stop(&context_connect);
                         }
                         if (local_sock >= 0) {
+                            shutdown(local_sock, SHUT_RDWR);  // To unblock any LWIP callbacks
                             close(local_sock);
                         }
                         CONTEXT_UNLOCK(context_channel->lock, "task_maintain_cb() 3");
@@ -214,6 +216,7 @@ static void task_maintain_cb(void *handle, void *param)
                 } else {
                     xSemaphoreGive(context_channel->lock);
                     if (local_sock >= 0) {
+                        shutdown(local_sock, SHUT_RDWR);  // To unblock any LWIP callbacks
                         close(local_sock);
                     }
                 }
@@ -399,6 +402,15 @@ int32_t fgr_socket_create(int *sock)
 void fgr_socket_destroy(int *sock)
 {
     if (sock && (*sock >= 0)) {
+        // Call shutdown() to unblock any LWIP callbacks
+        int32_t err = shutdown(*sock, SHUT_RDWR);
+        if (err != 0) {
+            // ENOTCONN is harmless - socket wasn't connected
+            if (errno != ENOTCONN) {
+                ESP_LOGW(TAG, "shutdown() failed for socket %d: %d (%s)",
+                         *sock, errno, strerror(errno));
+            }
+        }
         close(*sock);
         *sock = -1;
     }

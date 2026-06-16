@@ -5022,7 +5022,7 @@ class WebController(Controller):
         const logLevelNames = ['DEBUG', 'INFO', 'WARN', 'ERROR'];
 
         // Debug window
-        const MAX_LOG_ENTRIES= 10000;
+        const MAX_LOG_ENTRIES= 2000;
         let debugWindow = null;
         let logBuffer = [];             // Stores {timestamp, message} objects
         let logElements = [];           // DOM elements for each log
@@ -5129,7 +5129,7 @@ class WebController(Controller):
                     if (toast.parentNode) toast.remove();
                 }, 300);
                 toastTimeout = null;
-            }, 2000);
+            }, 5000);
         }
 
         // Set CSS variables from server data if needed
@@ -7877,13 +7877,37 @@ class WebController(Controller):
 
         // Don't call this one, call scrollToTimestamp()
         async function scrollToTimestampInternal(data) {
-            const { timestamp, targetLogId } = data;
+            const { timestamp, targetLogId, showToast = false, setCursor = false } = data;
 
-            console.log(`[scrollToTimestampInternal] START: timestamp=${timestamp}, targetLogId=${targetLogId}, type=${typeof targetLogId}`);
+            console.log(`[scrollToTimestampInternal] START: timestamp=${timestamp}, targetLogId=${targetLogId}, showToast=${showToast}, setCursor=${setCursor}`);
 
             if (!timestamp) {
                 console.error('scrollToTimestampInternal: No timestamp provided');
                 return;
+            }
+
+            if (showToast) {
+                showTemporaryMessage(`🔍 Jumping to ${new Date(timestamp * 1000).toLocaleTimeString()}...`, 'search');
+            }
+
+            // Helper to set cursor if requested
+            function setCursorIfRequested(element) {
+                if (setCursor && element) {
+                    const logId = parseInt(element.getAttribute('data-log_id'), 10);
+                    if (!isNaN(logId)) {
+                        searchLogId = logId;
+                        searchTimestamp = timestamp;
+                        updateCursorHighlight();
+                        element.classList.add('log-cursor');
+                    }
+                }
+            }
+
+            // Helper to show completion toast if requested
+            function showCompletionToast(message) {
+                if (showToast) {
+                    showTemporaryMessage(message, 'success');
+                }
             }
 
             // Check if we already have logs around this time in buffer
@@ -7901,7 +7925,6 @@ class WebController(Controller):
 
             // If we have logs within 60 seconds and a target log_id, check if it exists
             if (closestIndex !== -1 && closestDistance < 60 && targetLogId) {
-                // Check if exact log_id exists in buffer
                 let exactIndex = -1;
                 for (let i = 0; i < logElements.length; i++) {
                     const rid = parseInt(logElements[i].getAttribute('data-log_id'));
@@ -7912,37 +7935,49 @@ class WebController(Controller):
                 }
 
                 if (exactIndex !== -1) {
-                    console.log(`[scrollToTimestampInternal] EXACT MATCH FOUND in buffer at index ${exactIndex}, scrolling directly`);
-                    // Exact log_id found - scroll directly to it
+                    console.log(`[scrollToTimestampInternal] EXACT MATCH FOUND in buffer at index ${exactIndex}`);
                     const exactElement = logElements[exactIndex];
                     exactElement.scrollIntoView({ block: 'center', behavior: 'smooth' });
-                    exactElement.classList.add('log-cursor');
                     exactElement.style.backgroundColor = '#4a4a4a';
+
+                    setCursorIfRequested(exactElement);
+
                     setTimeout(() => {
                         if (exactElement) exactElement.style.backgroundColor = '';
+                        if (showToast) {
+                            showCompletionToast(`📍 Jumped to ${new Date(timestamp * 1000).toLocaleTimeString()}`);
+                        }
                     }, 3000);
                     await new Promise(resolve => setTimeout(resolve, 500));
-                    console.log(`[scrollToTimestampInternal] DONE - scrolled to exact match`);
                     return;
-                } else {
-                    // Exact log_id not in buffer - go straight to journal fetch
-                    console.log(`[scrollToTimestampInternal] exact log_id ${targetLogId} not in buffer (found closest but not exact), falling back to journal`);
-                    // Continue to journal fetch below
                 }
-            } else if (closestIndex !== -1 && closestDistance < 60 && !targetLogId) {
-                // No target log_id (Go to time button) - just scroll to closest
+            }
+
+            // If we have a close match in buffer (within 60 seconds) and no targetLogId
+            if (closestIndex !== -1 && closestDistance < 60 && !targetLogId) {
                 console.log(`[scrollToTimestampInternal] no targetLogId, scrolling to closest at index ${closestIndex}`);
                 const centerElement = logElements[closestIndex];
                 if (centerElement) {
                     centerElement.scrollIntoView({ block: 'center', behavior: 'smooth' });
+                    centerElement.style.backgroundColor = '#4a4a4a';
+
+                    setCursorIfRequested(centerElement);
+
+                    setTimeout(() => {
+                        if (centerElement) centerElement.style.backgroundColor = '';
+                        if (showToast) {
+                            showCompletionToast(`📍 Jumped to ${new Date(timestamp * 1000).toLocaleTimeString()}`);
+                        }
+                    }, 3000);
                     await new Promise(resolve => setTimeout(resolve, 500));
                 }
-                console.log(`[scrollToTimestampInternal] DONE - scrolled to closest`);
                 return;
             }
 
-            console.log(`[scrollToTimestampInternal] FETCHING from journal for timestamp ${timestamp}`);
-            // Fetch logs around this timestamp from journal
+            // Need to fetch from journal
+            if (showToast) {
+                showTemporaryMessage(`⏳ Loading logs near ${new Date(timestamp * 1000).toLocaleTimeString()}...`, 'search');
+            }
             isLoading = true;
 
             try {
@@ -7956,81 +7991,95 @@ class WebController(Controller):
                     })
                 });
                 const data = await response.json();
-                console.log(`[scrollToTimestampInternal] FETCH complete: status=${data.status}, logsCount=${data.logs?.length}`);
 
                 if (data.status === 'ok' && data.logs && data.logs.length > 0) {
                     const newLogs = data.logs;
-
-                    // Filter by current display filters
                     const filteredNewLogs = newLogs.filter(log => shouldDisplayLog(log.message));
-                    console.log(`[scrollToTimestampInternal] after filter: ${filteredNewLogs.length} logs`);
-
-                    // Filter duplicates by log_id
                     const uniqueNewLogs = filterUniqueLogs(filteredNewLogs);
-                    console.log(`[scrollToTimestampInternal] after dedup: ${uniqueNewLogs.length} logs`);
 
-                    // Add to buffer
                     logBuffer.push(...uniqueNewLogs);
                     logBuffer.sort((a, b) => a.timestamp - b.timestamp);
-                    console.log(`[scrollToTimestampInternal] buffer now has ${logBuffer.length} entries`);
 
-                    // Rebuild display with new merged buffer
                     rebuildDebugDisplayInternal();
-                    console.log(`[scrollToTimestampInternal] display rebuilt, logElements length=${logElements.length}`);
 
-                    // Scroll to the time range (center of the loaded logs)
-                    if (logElements.length > 0) {
-                        const centerIndex = Math.floor(logElements.length / 2);
-                        console.log(`[scrollToTimestampInternal] scrolling to center index ${centerIndex}`);
-                        logElements[centerIndex].scrollIntoView({ block: 'center', behavior: 'smooth' });
-
-                        // Wait for scroll to settle
-                        await new Promise(resolve => setTimeout(resolve, 500));
-
-                        // If we have a target log_id, find and highlight the exact match
-                        if (targetLogId) {
-                            console.log(`[scrollToTimestampInternal] searching for targetLogId ${targetLogId} in rebuilt logElements`);
-                            let found = false;
-                            for (let i = 0; i < logElements.length; i++) {
-                                const rid = parseInt(logElements[i].getAttribute('data-log_id'));
-                                if (rid === targetLogId) {
-                                    console.log(`[scrollToTimestampInternal] FOUND target at index ${i}, highlighting`);
-                                    const exactElement = logElements[i];
-                                    exactElement.classList.add('log-cursor');
-                                    exactElement.style.backgroundColor = '#4a4a4a';
-                                    exactElement.scrollIntoView({ block: 'center', behavior: 'smooth' });
-                                    setTimeout(() => {
-                                        if (exactElement) exactElement.style.backgroundColor = '';
-                                    }, 3000);
-                                    found = true;
-                                    break;
-                                }
-                            }
-                            if (!found) {
-                                console.log(`[scrollToTimestampInternal] WARNING: targetLogId ${targetLogId} NOT FOUND in rebuilt logElements`);
+                    // Find closest log to target timestamp
+                    let bestIndex = -1;
+                    let bestDistance = Infinity;
+                    for (let i = 0; i < logElements.length; i++) {
+                        const ts = parseFloat(logElements[i].getAttribute('data-timestamp'));
+                        if (ts && !isNaN(ts)) {
+                            const distance = Math.abs(ts - timestamp);
+                            if (distance < bestDistance) {
+                                bestDistance = distance;
+                                bestIndex = i;
                             }
                         }
                     }
-                } else {
-                    console.log(`[scrollToTimestampInternal] no logs returned from journal`);
-                    const notification = document.createElement('div');
-                    notification.style.cssText = 'position:fixed; bottom:100px; right:20px; background:#f44336; color:white; padding:10px; border-radius:5px; z-index:10000;';
-                    notification.textContent = `No logs available for ${new Date(timestamp * 1000).toLocaleString()}`;
-                    document.body.appendChild(notification);
-                    setTimeout(() => notification.remove(), 3000);
+
+                    if (bestIndex !== -1) {
+                        const bestElement = logElements[bestIndex];
+                        bestElement.scrollIntoView({ block: 'center', behavior: 'smooth' });
+                        bestElement.style.backgroundColor = '#4a4a4a';
+
+                        setCursorIfRequested(bestElement);
+
+                        setTimeout(() => {
+                            if (bestElement) bestElement.style.backgroundColor = '';
+                            if (showToast) {
+                                const msg = targetLogId ?
+                                    `📍 Jumped to event at ${new Date(timestamp * 1000).toLocaleTimeString()}` :
+                                    `📍 Jumped to ${new Date(timestamp * 1000).toLocaleTimeString()}`;
+                                showCompletionToast(msg);
+                            }
+                        }, 3000);
+
+                        await new Promise(resolve => setTimeout(resolve, 500));
+                    }
+
+                    // If we have a target log_id, find exact match
+                    if (targetLogId) {
+                        for (let i = 0; i < logElements.length; i++) {
+                            const rid = parseInt(logElements[i].getAttribute('data-log_id'));
+                            if (rid === targetLogId) {
+                                const exactElement = logElements[i];
+                                exactElement.style.backgroundColor = '#4a4a4a';
+                                exactElement.scrollIntoView({ block: 'center', behavior: 'smooth' });
+
+                                setCursorIfRequested(exactElement);
+
+                                setTimeout(() => {
+                                    if (exactElement) exactElement.style.backgroundColor = '';
+                                    if (showToast) {
+                                        showCompletionToast(`📍 Jumped to exact event at ${new Date(timestamp * 1000).toLocaleTimeString()}`);
+                                    }
+                                }, 3000);
+                                break;
+                            }
+                        }
+                    }
+                } else if (showToast) {
+                    showTemporaryMessage(`No logs available for ${new Date(timestamp * 1000).toLocaleTimeString()}`, 'error');
                 }
             } catch (e) {
                 console.error('scrollToTimestampInternal: Error=', e);
+                if (showToast) {
+                    showTemporaryMessage(`❌ Failed to load logs: ${e.message}`, 'error');
+                }
             } finally {
                 isLoading = false;
-                console.log(`[scrollToTimestampInternal] FINISHED`);
             }
         }
 
         // Scroll to a specific timestamp
-        function scrollToTimestamp(timestamp, targetLogId = null) {
-            console.log('scrollToTimestamp called with:', { timestamp, targetLogId, type: typeof targetLogId });
-            queueDebugViewOperation(DebugViewOperation.SCROLL_TO_TIMESTAMP, { timestamp, targetLogId });
+        function scrollToTimestamp(timestamp, targetLogId = null, options = {}) {
+            const { showToast = false, setCursor = false } = options;
+            console.log('scrollToTimestamp called with:', { timestamp, targetLogId, options });
+            queueDebugViewOperation(DebugViewOperation.SCROLL_TO_TIMESTAMP, {
+                timestamp,
+                targetLogId,
+                showToast,
+                setCursor
+            });
         }
 
         // Go to time from datetime picker
@@ -8047,7 +8096,7 @@ class WebController(Controller):
             const localDate = new Date(year, month - 1, day, hour, minute, 0, 0);
             const timestamp = localDate.getTime() / 1000;
 
-            scrollToTimestamp(timestamp);
+            scrollToTimestamp(timestamp, null, { showToast: false, setCursor: true });
         }
 
         async function scrollToMatch(timestamp, targetLogId = null, direction = null) {
@@ -8105,7 +8154,7 @@ class WebController(Controller):
                 console.log('Scroll animation complete');
             } else {
                 console.log(`Element not found by log_id, calling scrollToTimestamp(${timestamp}, ${targetLogId})`);
-                await scrollToTimestamp(timestamp, targetLogId);
+                await scrollToTimestamp(timestamp, targetLogId, { setCursor: true });
             }
 
             setTimeout(() => {
@@ -9417,7 +9466,7 @@ class WebController(Controller):
                             const timestamp = parseFloat(row.getAttribute('data-timestamp'));
                             if (timestamp) {
                                 modal.style.display = 'none';
-                                scrollToTimestamp(timestamp);
+                                scrollToTimestamp(timestamp, null, { showToast: true, setCursor: true });
                             }
                         });
                     });
@@ -9863,7 +9912,7 @@ class WebController(Controller):
                     const timestampSeconds = timestamp / 1000;
 
                     // Jump to this time in the logs
-                    scrollToTimestamp(timestampSeconds);
+                    scrollToTimestamp(timestampSeconds, null, { showToast: true, setCursor: true });
 
                     // Visual feedback - show a brief flash at click position
                     const flash = document.createElement('div');
