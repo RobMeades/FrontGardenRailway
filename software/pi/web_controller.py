@@ -216,6 +216,7 @@ class SearchIterator:
     def __init__(self, params: dict, start_timestamp: float, db_path: Path = None):
         self.params = params
         self.current_timestamp = start_timestamp
+        self.current_rowid = params.get('from_rowid', None)  # New: for two-step search
         self.direction = params['direction']
         self.wrapped = False
         self.search_string = params['search']
@@ -224,12 +225,12 @@ class SearchIterator:
         self.exclude_ctrl = params['exclude_ctrl']
         self.include_nodes = set(params['include_nodes']) if params['include_nodes'] else None
         self.min_log_level = params['min_log_level']
-        self.controller_unit = None  # Will be set from WebController
+        self.controller_unit = None
         self.cancelled = False
         self.entries_checked = 0
         self.debug = params.get('debug', False)
         self.db_path = db_path
-        self.using_sqlite = False  # Track which backend we're using
+        self.using_sqlite = False
         self.starting_timestamp = start_timestamp
         self.has_wrapped = False
 
@@ -256,17 +257,18 @@ class SearchIterator:
         self._log_debug("Search cancelled")
 
     def _search_sqlite(self, max_entries: int) -> Optional[Tuple[float, str, bool, int, int, int]]:
-        """Search SQLite database using FTS5 for fast full-text search"""
+        """Search SQLite using two-step FTS + rowid fetch pattern (fast)"""
         if not self.db_path or not self.db_path.exists():
             return None
 
-        self._log_debug(f"=== Starting SQLite search ===")
+        import time
+        start_total = time.time()
+
+        self._log_debug(f"=== Starting SQLite search (two-step) ===")
         self._log_debug(f"Search string: {repr(self.search_string)}")
         self._log_debug(f"Case sensitive: {self.case_sensitive}")
         self._log_debug(f"Whole word: {self.whole_word}")
-        self._log_debug(f"Current timestamp: {self.current_timestamp}")
-        self._log_debug(f"Starting timestamp: {self.starting_timestamp}")
-        self._log_debug(f"Has wrapped: {self.has_wrapped}")
+        self._log_debug(f"Current rowid: {self.current_rowid}")
         self._log_debug(f"Direction: {self.direction}")
         self._log_debug(f"Max entries: {max_entries}")
 
@@ -276,74 +278,106 @@ class SearchIterator:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
 
-            # Direction and ordering
-            if self.direction == 'next':
-                operator = '>='
-                order = 'ASC'
+            # Build FTS query
+            if self.whole_word:
+                fts_query = f'"{self.search_string.replace('"', '""')}"'
             else:
-                operator = '<='
+                fts_query = self.search_string
+
+            # DEBUG: Time the COUNT
+            t0 = time.time()
+            cursor.execute("SELECT COUNT(*) FROM logs_fts WHERE logs_fts MATCH ?", (fts_query,))
+            total_matches = cursor.fetchone()[0]
+            t1 = time.time()
+            print(f"SEARCH TIMING: COUNT took {t1-t0:.3f}s, total_matches={total_matches}", flush=True)
+
+            if total_matches == 0:
+                return None
+
+            # Step 1: Get rowids from FTS (fast)
+            if self.direction == 'next':
+                if self.current_rowid is not None:
+                    rowid_condition = f"AND rowid > {self.current_rowid}"
+                else:
+                    rowid_condition = ""
+                order = 'ASC'
+            else:  # prev
+                if self.current_rowid is not None:
+                    rowid_condition = f"AND rowid < {self.current_rowid}"
+                else:
+                    rowid_condition = ""
                 order = 'DESC'
 
-            # Build FTS query - this is our pre-filter
-            fts_query = self.search_string
-
+            t0 = time.time()
             query = f"""
-                SELECT d.log_id, d.epoch_time, d.message, d.node_ip
-                FROM logs d
-                WHERE d.rowid IN (
-                    SELECT rowid FROM logs_fts
-                    WHERE logs_fts MATCH ?
-                )
-                AND d.epoch_time {operator} ?
-                ORDER BY d.rowid {order}
+                SELECT rowid FROM logs_fts
+                WHERE logs_fts MATCH ?
+                {rowid_condition}
+                ORDER BY rowid {order}
                 LIMIT ?
             """
+            cursor.execute(query, (fts_query, max_entries))
+            rowids = [row[0] for row in cursor.fetchall()]
+            t1 = time.time()
+            print(f"SEARCH TIMING: FTS rowid fetch took {t1-t0:.3f}s, got {len(rowids)} rowids", flush=True)
+            self._log_debug(f"FTS returned {len(rowids)} rowids")
 
-            cursor.execute(query, (fts_query, self.current_timestamp, max_entries))
-            rows = cursor.fetchall()
-            original_rows = rows  # Store original rows before filtering
-
-            self._log_debug(f"FTS returned {len(rows)} candidate rows")
-
-            # Handle case where no rows returned
-            if not rows:
-                # Find the next log in this direction to advance timestamp
+            # Handle wrap if no rows found
+            if not rowids:
+                self._log_debug("No rows found, attempting wrap")
                 if self.direction == 'next':
-                    cursor.execute("SELECT MIN(epoch_time) FROM logs WHERE epoch_time > ?", (self.current_timestamp,))
+                    cursor.execute("SELECT MIN(rowid) FROM logs")
                 else:
-                    cursor.execute("SELECT MAX(epoch_time) FROM logs WHERE epoch_time < ?", (self.current_timestamp,))
+                    cursor.execute("SELECT MAX(rowid) FROM logs")
+                wrap_rowid = cursor.fetchone()[0]
 
-                next_ts = cursor.fetchone()[0]
-
-                if next_ts is not None:
-                    # Jump to the next log's timestamp
-                    self.current_timestamp = next_ts
-                    self._log_debug(f"No rows in chunk, jumping to next timestamp: {next_ts}")
-                    # Return marker to continue searching (no match in this chunk)
-                    return (None, None, False, 0, self.entries_checked, 0)
-                else:
-                    # No more logs in this direction - need to wrap
+                if wrap_rowid is not None:
+                    t0 = time.time()
                     if self.direction == 'next':
-                        cursor.execute("SELECT MIN(epoch_time) FROM logs")
+                        cursor.execute("""
+                            SELECT rowid FROM logs_fts
+                            WHERE logs_fts MATCH ?
+                            AND rowid >= ?
+                            ORDER BY rowid ASC
+                            LIMIT ?
+                        """, (fts_query, wrap_rowid, max_entries))
                     else:
-                        cursor.execute("SELECT MAX(epoch_time) FROM logs")
+                        cursor.execute("""
+                            SELECT rowid FROM logs_fts
+                            WHERE logs_fts MATCH ?
+                            AND rowid <= ?
+                            ORDER BY rowid DESC
+                            LIMIT ?
+                        """, (fts_query, wrap_rowid, max_entries))
+                    rowids = [row[0] for row in cursor.fetchall()]
+                    t1 = time.time()
+                    print(f"SEARCH TIMING: FTS wrap fetch took {t1-t0:.3f}s, got {len(rowids)} rowids", flush=True)
+                    self.has_wrapped = True
+                    self._log_debug(f"Wrap returned {len(rowids)} rowids")
+                else:
+                    self._log_debug("No logs in database")
+                    return None
 
-                    wrap_ts = cursor.fetchone()[0]
+            if not rowids:
+                return None
 
-                    if wrap_ts is None:
-                        # No logs at all in database
-                        return None
+            # Step 2: Get full log data for these rowids
+            t0 = time.time()
+            placeholders = ','.join(['?' for _ in rowids])
+            cursor.execute(f"""
+                SELECT log_id, epoch_time, message, node_ip, log_level, rowid
+                FROM logs
+                WHERE rowid IN ({placeholders})
+                ORDER BY rowid {'ASC' if self.direction == 'next' else 'DESC'}
+            """, rowids)
 
-                    # Check if we've already wrapped and are back to the start
-                    if self.has_wrapped and abs(wrap_ts - self.starting_timestamp) < 0.001:
-                        self._log_debug("Search complete: wrapped and returned to start")
-                        return None  # finished=True
-                    else:
-                        self.has_wrapped = True
-                        self.current_timestamp = wrap_ts
-                        self._log_debug(f"Wrapping to {'earliest' if self.direction == 'next' else 'latest'} timestamp: {wrap_ts}")
-                        # Return wrapped marker
-                        return (None, None, True, 0, self.entries_checked, 0)
+            rows = cursor.fetchall()
+            t1 = time.time()
+            print(f"SEARCH TIMING: log data fetch took {t1-t0:.3f}s, got {len(rows)} rows", flush=True)
+            self._log_debug(f"Retrieved {len(rows)} full log rows")
+
+            if not rows:
+                return None
 
             # Apply post-filtering for case sensitivity
             if self.case_sensitive and self.search_string:
@@ -361,15 +395,13 @@ class SearchIterator:
                 self._log_debug(f"Whole word filter: {original_count} -> {len(rows)} rows")
 
             if not rows:
-                # No matches in this chunk after filtering - advance timestamp to the last original row
-                if original_rows:
-                    last_ts = original_rows[-1]['epoch_time']
-                    self.current_timestamp = last_ts
-                    self._log_debug(f"No matches after filtering, moving to timestamp: {last_ts}")
-                return (None, None, False, len(original_rows) if original_rows else 0, self.entries_checked, 0)
+                self._log_debug("No matches after filtering")
+                total_time = time.time() - start_total
+                print(f"SEARCH TIMING: TOTAL search (no match) took {total_time:.3f}s", flush=True)
+                return (None, None, self.has_wrapped, len(rowids), self.entries_checked, 0)
 
             scanned = 0
-            last_timestamp = self.current_timestamp
+            last_timestamp = None
             last_log_id = 0
 
             for row in rows:
@@ -378,6 +410,7 @@ class SearchIterator:
                 timestamp = row['epoch_time']
                 message = row['message']
                 node_ip = row['node_ip']
+                rowid = row['rowid']
                 last_timestamp = timestamp
                 last_log_id = log_id
 
@@ -400,19 +433,25 @@ class SearchIterator:
                             continue
 
                 # Match found!
-                self.current_timestamp = timestamp
+                self.current_rowid = rowid
                 self.entries_checked += scanned
-                result_tuple = (timestamp, message, False, scanned, self.entries_checked, log_id)
-                self._log_debug(f"Returning match: log_id={log_id}, timestamp={timestamp}")
+                total_time = time.time() - start_total
+                print(f"SEARCH TIMING: TOTAL search (match found) took {total_time:.3f}s", flush=True)
+                result_tuple = (timestamp, message, self.has_wrapped, scanned, self.entries_checked, log_id)
+                self._log_debug(f"Returning match: log_id={log_id}, rowid={rowid}, timestamp={timestamp}")
                 return result_tuple
 
             # No match in this chunk after all filters
             if rows:
-                self.current_timestamp = last_timestamp
+                self.current_rowid = rows[-1]['rowid']
                 self.entries_checked += scanned
-                self._log_debug(f"No match in this chunk, updated timestamp to {last_timestamp}")
-                return (None, None, False, scanned, self.entries_checked, last_log_id)
+                self._log_debug(f"No match in this chunk, updated rowid to {self.current_rowid}")
+                total_time = time.time() - start_total
+                print(f"SEARCH TIMING: TOTAL search (no match in chunk) took {total_time:.3f}s", flush=True)
+                return (None, None, self.has_wrapped, scanned, self.entries_checked, last_log_id)
             else:
+                total_time = time.time() - start_total
+                print(f"SEARCH TIMING: TOTAL search (no rows) took {total_time:.3f}s", flush=True)
                 return None
 
         except Exception as e:
@@ -658,9 +697,6 @@ class WebController(Controller):
         else:
             self._log_admin("Journal reading disabled - node logs will not appear")
 
-        # Override the logger to capture controller logs
-        self._setup_log_capture()
-
         # Store metrics for each node
         self.node_metrics: Dict[str, Dict[str, Any]] = {}
 
@@ -702,48 +738,51 @@ class WebController(Controller):
                 )
             """)
 
-            # Get source count
-            cursor.execute("SELECT COUNT(*) FROM logs WHERE message_type = 'METRIC'")
-            source_count = cursor.fetchone()[0]
-            print(f"Source logs has {source_count} metric rows")
+            # Check if metrics_history is empty (LIMIT 1 is fast)
+            cursor.execute("SELECT 1 FROM metrics_history LIMIT 1")
+            has_metrics_history = cursor.fetchone() is not None
 
-            # Check current row count
-            cursor.execute("SELECT COUNT(*) FROM metrics_history")
-            current_count = cursor.fetchone()[0]
-            print(f"metrics_history has {current_count} rows")
+            if not has_metrics_history:
+                # Check if there are any metric rows in logs (EXISTS is fast)
+                cursor.execute("SELECT 1 FROM logs WHERE message_type = 'METRIC' LIMIT 1")
+                has_metric_logs = cursor.fetchone() is not None
 
-            # Only backfill if the table is completely empty
-            if current_count == 0 and source_count > 0:
-                print(f"Initializing metrics_history (found {current_count} rows, need {source_count})...")
+                if has_metric_logs:
+                    # Need the count for batch processing
+                    cursor.execute("SELECT COUNT(*) FROM logs WHERE message_type = 'METRIC'")
+                    source_count = cursor.fetchone()[0]
+                    print(f"Found {source_count} metric rows to backfill...")
 
-                # Insert in batches to avoid memory issues
-                batch_size = 5000
-                offset = 0
+                    # Backfill in batches
+                    batch_size = 5000
+                    offset = 0
 
-                while offset < source_count:
-                    cursor.execute(f"""
-                        INSERT OR REPLACE INTO metrics_history (epoch_time, node_ip, rssi, heap, wifi_failures, panics, ctrl_disconnects, log_disconnects)
-                        SELECT
-                            epoch_time,
-                            node_ip,
-                            json_extract(substr(message, instr(message, '{{')), '$.dbm'),
-                            json_extract(substr(message, instr(message, '{{')), '$.heap'),
-                            json_extract(substr(message, instr(message, '{{')), '$.w.-.n'),
-                            json_extract(substr(message, instr(message, '{{')), '$.panic.n'),
-                            json_extract(substr(message, instr(message, '{{')), '$.cnt_c.-.n'),
-                            json_extract(substr(message, instr(message, '{{')), '$.log_c.-.n')
-                        FROM logs
-                        WHERE message_type = 'METRIC'
-                        GROUP BY epoch_time, node_ip
-                        LIMIT {batch_size} OFFSET {offset}
-                    """)
-                    conn.commit()
-                    offset += batch_size
-                    print(f"Backfilled {offset}/{source_count} rows")
+                    while offset < source_count:
+                        cursor.execute(f"""
+                            INSERT OR REPLACE INTO metrics_history (epoch_time, node_ip, rssi, heap, wifi_failures, panics, ctrl_disconnects, log_disconnects)
+                            SELECT
+                                epoch_time,
+                                node_ip,
+                                json_extract(substr(message, instr(message, '{{')), '$.dbm'),
+                                json_extract(substr(message, instr(message, '{{')), '$.heap'),
+                                json_extract(substr(message, instr(message, '{{')), '$.w.-.n'),
+                                json_extract(substr(message, instr(message, '{{')), '$.panic.n'),
+                                json_extract(substr(message, instr(message, '{{')), '$.cnt_c.-.n'),
+                                json_extract(substr(message, instr(message, '{{')), '$.log_c.-.n')
+                            FROM logs
+                            WHERE message_type = 'METRIC'
+                            GROUP BY epoch_time, node_ip
+                            LIMIT {batch_size} OFFSET {offset}
+                        """)
+                        conn.commit()
+                        offset += batch_size
+                        print(f"Backfilled {offset}/{source_count} rows")
 
-                print("Backfill complete")
+                    print("Backfill complete")
+                else:
+                    print("No metric logs found, skipping backfill")
             else:
-                print(f"metrics_history already has {current_count} rows, skipping backfill (trigger will maintain it)")
+                print("metrics_history already has data, skipping backfill (trigger will maintain it)")
 
             # Create indexes (only if they don't exist)
             print("Creating indexes...")
@@ -772,11 +811,6 @@ class WebController(Controller):
                     );
                 END
             """)
-
-            # Verify final count
-            cursor.execute("SELECT COUNT(*) FROM metrics_history")
-            final_count = cursor.fetchone()[0]
-            print(f"metrics_history final count: {final_count} rows")
 
             conn.commit()
             print("_init_metrics_history: Complete")
@@ -855,7 +889,7 @@ class WebController(Controller):
             return f"[{timestamp_str}] {message}"
 
     def _add_log_raw(self, source: str, node_ip: str, log_level: int,
-                    message: str, journal_ts: float = None, log_id: int = 0):
+                     message: str, journal_ts: float = None, log_id: int = 0):
         # Generate timestamp string
         if journal_ts:
             dt = datetime.fromtimestamp(journal_ts)
@@ -880,33 +914,6 @@ class WebController(Controller):
         # Trim
         while len(self.log_entries) > self.max_log_entries:
             self.log_entries.pop(0)
-
-    def _setup_log_capture(self):
-        """Capture controller logs for web interface display"""
-        class WebLogHandler(logging.Handler):
-            def __init__(self, callback):
-                super().__init__()
-                self.callback = callback
-
-            def emit(self, record):
-                msg = self.format(record)
-                self.callback(msg)
-
-        handler = WebLogHandler(self._capture_controller_log)
-        handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-        logging.getLogger().addHandler(handler)
-
-    def _capture_controller_log(self, message: str):
-        """Capture a controller log message and send to journal"""
-        # Extract just the message part
-        if ' - ' in message:
-            parts = message.split(' - ', 2)
-            msg_text = parts[2] if len(parts) >= 3 else message
-        else:
-            msg_text = message
-
-        # Send to journal
-        self._log_message(msg_text)
 
     def _log_message(self, message: str):
         """Add a message to the journal via shared logger"""
@@ -953,6 +960,33 @@ class WebController(Controller):
             j = journal.Reader(path='/var/log/journal')
             j.add_match(SYSLOG_IDENTIFIER=JOURNAL_IDENTIFIER)
 
+            # Helper function to process a journal entry
+            def process_entry(entry):
+                message = entry.get('MESSAGE', '')
+                if not message:
+                    return
+
+                message = message.rstrip()
+
+                journal_ts = entry.get('__REALTIME_TIMESTAMP')
+                journal_ts_value = journal_ts.timestamp() if journal_ts else None
+
+                # Get custom fields - always convert to int
+                source = entry.get('FGR_SOURCE', '')
+                node_ip = entry.get('FGR_NODE_IP', '')
+                log_level = int(entry.get('FGR_LOG_LEVEL', 0))
+                log_id = int(entry.get('FGR_LOG_ID', 0))
+
+                # Parse metrics from node logs
+                if source == 'NODE' and node_ip:
+                    metrics_result = self._parse_metrics_from_log(message, node_ip)
+                    if metrics_result:
+                        node_ip, metrics_data = metrics_result
+                        self._update_node_metrics(node_ip, metrics_data)
+
+                # Store raw components - let _add_log_raw handle formatting
+                self._add_log_raw(source, node_ip, log_level, message, journal_ts_value, log_id)
+
             # Get the cursor of the last entry
             j.seek_tail()
             j.get_previous(1)
@@ -968,28 +1002,7 @@ class WebController(Controller):
             for entry in j:
                 if not self.journal_running:
                     break
-                message = entry.get('MESSAGE', '')
-                if message:
-                    message = message.rstrip()
-
-                    journal_ts = entry.get('__REALTIME_TIMESTAMP')
-                    journal_ts_value = journal_ts.timestamp() if journal_ts else None
-
-                    # Get custom fields
-                    source = entry.get('FGR_SOURCE', '')
-                    node_ip = entry.get('FGR_NODE_IP', '')
-                    log_level = int(entry.get('FGR_LOG_LEVEL', 0))
-                    log_id = int(entry.get('FGR_LOG_ID', 0))
-
-                    # Parse metrics from node logs
-                    if source == 'NODE' and node_ip:
-                        metrics_result = self._parse_metrics_from_log(message, node_ip)
-                        if metrics_result:
-                            node_ip, metrics_data = metrics_result
-                            self._update_node_metrics(node_ip, metrics_data)
-
-                    # Store raw components - let _add_log_raw handle formatting
-                    self._add_log_raw(source, node_ip, log_level, message, journal_ts_value, log_id)
+                process_entry(entry)
 
             # Now follow new entries
             if last_cursor:
@@ -1006,25 +1019,7 @@ class WebController(Controller):
                     for entry in j:
                         if not self.journal_running:
                             break
-                        message = entry.get('MESSAGE', '')
-                        if message:
-                            message = message.rstrip()
-
-                        journal_ts = entry.get('__REALTIME_TIMESTAMP')
-                        journal_ts_value = journal_ts.timestamp() if journal_ts else None
-
-                        source = entry.get('FGR_SOURCE', '')
-                        node_ip = entry.get('FGR_NODE_IP', '')
-                        log_level = entry.get('FGR_LOG_LEVEL', None)
-                        log_id = entry.get('FGR_LOG_ID', 0)
-
-                        if source == 'NODE' and node_ip:
-                            metrics_result = self._parse_metrics_from_log(message, node_ip)
-                            if metrics_result:
-                                node_ip, metrics_data = metrics_result
-                                self._update_node_metrics(node_ip, metrics_data)
-
-                        self._add_log_raw(source, node_ip, log_level, message, journal_ts_value, log_id)
+                        process_entry(entry)
 
         except Exception as e:
             self._log_admin(f"Journal reader error: {e}")
@@ -1820,14 +1815,20 @@ class WebController(Controller):
         timestamp = data.get('timestamp')
         before = data.get('before', 0)
         after = data.get('after', 0)
-        since = data.get('since')  # NEW: timestamp in seconds
-        until = data.get('until')  # NEW: timestamp in seconds
+        since = data.get('since')
+        until = data.get('until')
 
-        # Require either timestamp or (since+until)
+        thread_id = threading.get_ident()
+        print(f"[DEBUG] JOURNAL QUERY START: thread={thread_id}, timestamp={timestamp}, before={before}, after={after}, since={since}, until={until}", flush=True)
+        start_time = time.time()
+
         if timestamp is None and since is None:
+            print(f"[DEBUG] JOURNAL QUERY END: thread={thread_id}, no timestamp/since, took={time.time()-start_time:.3f}s", flush=True)
             return web.json_response({'status': 'ok', 'logs': []})
 
         def _format_log_entry(entry):
+            start = time.time()
+
             ts = entry.get('__REALTIME_TIMESTAMP')
             if ts:
                 dt = datetime.fromtimestamp(ts.timestamp())
@@ -1859,6 +1860,10 @@ class WebController(Controller):
 
             linkified_message = linkify_log_line(formatted_message)
 
+            elapsed = time.time() - start
+            if elapsed > 0.01:
+                print(f"SLOW _format_log_entry: {elapsed:.3f}s for log_id={log_id}")
+
             return {
                 'message': linkified_message,
                 'timestamp': ts.timestamp() if ts else None,
@@ -1868,39 +1873,65 @@ class WebController(Controller):
             }
 
         def _query():
+            total_start = time.time()
+            print(f"[DEBUG] _query START: thread={threading.get_ident()}")
+
             j = journal.Reader(path='/var/log/journal')
             j.add_match(SYSLOG_IDENTIFIER='fgr-log-server')
+
+            seek_start = time.time()
 
             # NEW: Use since/until time range if provided
             if since is not None and until is not None:
                 since_dt = datetime.fromtimestamp(since, tz=timezone.utc)
                 until_dt = datetime.fromtimestamp(until, tz=timezone.utc)
                 j.seek_realtime(since_dt)
+                print(f"  seek_realtime (since/until): {time.time() - seek_start:.3f}s")
 
+                read_start = time.time()
                 logs = []
+                format_total = 0
+                entry_count = 0
                 for entry in j:
                     ts = entry.get('__REALTIME_TIMESTAMP')
                     if ts and ts.timestamp() > until:
                         break
+                    entry_count += 1
+                    format_start = time.time()
                     logs.append(_format_log_entry(entry))
+                    format_total += time.time() - format_start
+                print(f"  read/format: {time.time() - read_start:.3f}s ({entry_count} entries, format={format_total:.3f}s)")
 
-                # For time-range queries, target_index is -1 (not applicable)
-                # has_more is false since we have a fixed window
+                j.close()
+                print(f"_query total: {time.time() - total_start:.3f}s")
+                print(f"[DEBUG] _query END: thread={threading.get_ident()}, logs={len(logs)}")
                 return logs, -1, False
 
             # Original behavior: query by timestamp with before/after counts
             target_dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
             j.seek_realtime(target_dt)
+            print(f"  seek_realtime (timestamp): {time.time() - seek_start:.3f}s")
 
             center = j.get_next()
+            center_format_start = time.time()
+            center_formatted = _format_log_entry(center) if center else None
+            center_format_time = time.time() - center_format_start
+            print(f"  center format: {center_format_time:.3f}s")
 
             # Collect AFTER logs first (cursor moves forward)
             after_logs = []
+            after_read_start = time.time()
+            after_format_total = 0
             if after > 0 and center:
                 entry = j.get_next()
+                entry_count = 0
                 while entry and len(after_logs) < after:
+                    entry_count += 1
+                    format_start = time.time()
                     after_logs.append(_format_log_entry(entry))
+                    after_format_total += time.time() - format_start
                     entry = j.get_next()
+                print(f"  after read/format: {time.time() - after_read_start:.3f}s ({entry_count} entries, format={after_format_total:.3f}s)")
 
             # Reposition to center for BEFORE logs
             j.seek_realtime(target_dt)
@@ -1909,18 +1940,25 @@ class WebController(Controller):
             entry = j.get_previous()
 
             before_logs = []
+            before_read_start = time.time()
+            before_format_total = 0
             if before > 0 and center:
+                entry_count = 0
                 while entry and len(before_logs) < before:
+                    entry_count += 1
+                    format_start = time.time()
                     before_logs.append(_format_log_entry(entry))
+                    before_format_total += time.time() - format_start
                     entry = j.get_previous()
-            before_logs.reverse()
+                before_logs.reverse()
+                print(f"  before read/format: {time.time() - before_read_start:.3f}s ({entry_count} entries, format={before_format_total:.3f}s)")
 
             # Assemble
             logs = before_logs
             target_index = -1
             if before > 0 and after > 0 and center:
                 target_index = len(logs)
-                logs.append(_format_log_entry(center))
+                logs.append(center_formatted)
             logs.extend(after_logs)
 
             if target_index == -1:
@@ -1931,10 +1969,15 @@ class WebController(Controller):
 
             # Check if there might be more logs beyond what we fetched
             has_more = len(logs) >= (before if before > 0 else after)
+            j.close()
+            print(f"_query total: {time.time() - total_start:.3f}s")
+            print(f"[DEBUG] _query END: thread={threading.get_ident()}, logs={len(logs)}, target_index={target_index}")
             return logs, target_index, has_more
 
         try:
             logs, target_index, has_more = await asyncio.to_thread(_query)
+            elapsed = time.time() - start_time
+            print(f"[DEBUG] JOURNAL QUERY END: thread={thread_id}, logs={len(logs)}, took={elapsed:.3f}s", flush=True)
             return web.json_response({
                 'status': 'ok',
                 'logs': logs,
@@ -1942,10 +1985,12 @@ class WebController(Controller):
                 'has_more': has_more
             })
         except Exception as e:
+            elapsed = time.time() - start_time
+            print(f"[DEBUG] JOURNAL QUERY ERROR: thread={thread_id}, error={e}, took={elapsed:.3f}s", flush=True)
             return web.json_response({'error': str(e)}, status=500)
 
     async def handle_api_search(self, request):
-        """Handle search requests - limited fetch database search"""
+        """Handle search requests - using Log ID as primary cursor"""
 
         data = await request.json() if request.body_exists else {}
         action = data.get('action')
@@ -1964,17 +2009,16 @@ class WebController(Controller):
                 'include_nodes': data.get('include_nodes', []),
                 'min_log_level': data.get('min_log_level', 4),
             }
-            from_timestamp = data.get('from_timestamp')
-            fetch_limit = data.get('fetch_limit', 200)  # Fetch 200 matches at a time
+            from_rowid = data.get('from_rowid')
+            fetch_limit = data.get('fetch_limit', 200)
 
             if not params['search']:
                 return web.json_response({'error': 'No search term'}, status=400)
 
-            if not from_timestamp:
-                return web.json_response({'error': 'No starting timestamp'}, status=400)
-
             def do_search():
+                import time
                 start_total = time.time()
+
                 conn = None
                 try:
                     conn = sqlite3.connect(str(self.db_path))
@@ -1988,112 +2032,136 @@ class WebController(Controller):
                     else:
                         fts_query = search_term
 
-                    # First, check if term exists at all (quick count)
-                    cursor.execute("SELECT COUNT(*) FROM logs_fts WHERE logs_fts MATCH ?", (fts_query,))
-                    total_matches = cursor.fetchone()[0]
+                    # Initialize wrapped variable
+                    wrapped = False
 
-                    if total_matches == 0:
+                    # DEBUG: Check if any matches exist (fast with LIMIT 1)
+                    t0 = time.time()
+                    cursor.execute("SELECT 1 FROM logs_fts WHERE logs_fts MATCH ? LIMIT 1", (fts_query,))
+                    has_matches = cursor.fetchone() is not None
+                    t1 = time.time()
+                    print(f"SEARCH TIMING: EXISTS check took {t1-t0:.3f}s, has_matches={has_matches}", flush=True)
+
+                    if not has_matches:
                         return {'found': False, 'finished': True, 'total_matches': 0}
 
-                    # Find the rowid closest to the starting timestamp
+                    # Determine operator and order based on direction
                     if params['direction'] == 'next':
-                        cursor.execute("SELECT rowid FROM logs WHERE epoch_time >= ? ORDER BY epoch_time ASC LIMIT 1", (from_timestamp,))
-                    else:
-                        cursor.execute("SELECT rowid FROM logs WHERE epoch_time <= ? ORDER BY epoch_time DESC LIMIT 1", (from_timestamp,))
-
-                    start_rowid_row = cursor.fetchone()
-                    if not start_rowid_row:
-                        # No logs at or after the timestamp - wrap around
-                        if params['direction'] == 'next':
-                            cursor.execute("SELECT MIN(rowid) FROM logs")
-                        else:
-                            cursor.execute("SELECT MAX(rowid) FROM logs")
-                        start_rowid_row = cursor.fetchone()
-
-                    start_rowid = start_rowid_row[0]
-
-                    # Determine operator and order for the FTS query
-                    if params['direction'] == 'next':
-                        operator = '>='
+                        operator = '>'
                         order = 'ASC'
-                    else:
-                        operator = '<='
+                    else:  # prev direction
+                        operator = '<'
                         order = 'DESC'
 
-                    # Step 1: Get matching rowids from FTS (fast!)
-                    fts_query_sql = f"""
-                        SELECT rowid FROM logs_fts
-                        WHERE logs_fts MATCH ?
-                        AND rowid {operator} ?
-                        ORDER BY rowid {order}
-                        LIMIT ?
-                    """
-                    cursor.execute(fts_query_sql, (fts_query, start_rowid, fetch_limit))
-                    rowids = [row[0] for row in cursor.fetchall()]
+                    # Single combined query - inline log_id to rowid conversion
+                    from_log_id = data.get('from_log_id')
+                    t0 = time.time()
 
-                    # Handle wrap if no matches
-                    wrapped = False
+                    if from_log_id is not None:
+                        # Combined query: log_id lookup + FTS search in one go
+                        query = f"""
+                            SELECT rowid FROM logs_fts
+                            WHERE logs_fts MATCH ?
+                            AND rowid {operator} (SELECT rowid FROM logs WHERE log_id = ?)
+                            ORDER BY rowid {order}
+                            LIMIT ?
+                        """
+                        cursor.execute(query, (fts_query, from_log_id, fetch_limit))
+                    else:
+                        # No starting log_id - get from beginning/end
+                        query = f"""
+                            SELECT rowid FROM logs_fts
+                            WHERE logs_fts MATCH ?
+                            ORDER BY rowid {order}
+                            LIMIT ?
+                        """
+                        cursor.execute(query, (fts_query, fetch_limit))
+
+                    rowids = [row[0] for row in cursor.fetchall()]
+                    t1 = time.time()
+                    print(f"SEARCH TIMING: FTS rowid fetch took {t1-t0:.3f}s, got {len(rowids)} rowids", flush=True)
+
+                    # Handle wrap if no rows found
                     if not rowids:
                         if params['direction'] == 'next':
                             cursor.execute("SELECT MIN(rowid) FROM logs")
                         else:
                             cursor.execute("SELECT MAX(rowid) FROM logs")
                         wrap_rowid = cursor.fetchone()[0]
-                        cursor.execute(fts_query_sql, (fts_query, wrap_rowid, fetch_limit))
-                        rowids = [row[0] for row in cursor.fetchall()]
-                        wrapped = True
+
+                        if wrap_rowid is not None:
+                            t0 = time.time()
+                            if params['direction'] == 'next':
+                                cursor.execute("""
+                                    SELECT rowid FROM logs_fts
+                                    WHERE logs_fts MATCH ?
+                                    AND rowid >= ?
+                                    ORDER BY rowid ASC
+                                    LIMIT ?
+                                """, (fts_query, wrap_rowid, fetch_limit))
+                            else:
+                                cursor.execute("""
+                                    SELECT rowid FROM logs_fts
+                                    WHERE logs_fts MATCH ?
+                                    AND rowid <= ?
+                                    ORDER BY rowid DESC
+                                    LIMIT ?
+                                """, (fts_query, wrap_rowid, fetch_limit))
+                            rowids = [row[0] for row in cursor.fetchall()]
+                            t1 = time.time()
+                            print(f"SEARCH TIMING: FTS wrap fetch took {t1-t0:.3f}s, got {len(rowids)} rowids", flush=True)
+                            wrapped = True
+                        else:
+                            return {'found': False, 'finished': True, 'total_matches': 0}
 
                     if not rowids:
                         return {'found': False, 'finished': True, 'total_matches': 0}
 
-                    # Step 2: Fetch full log details for those rowids (fast with IN)
-                    placeholders = ','.join(['?'] * len(rowids))
+                    # Step 2: Get full log data for these rowids
+                    t0 = time.time()
+                    placeholders = ','.join(['?' for _ in rowids])
                     cursor.execute(f"""
                         SELECT log_id, epoch_time, message, node_ip, log_level, rowid
                         FROM logs
                         WHERE rowid IN ({placeholders})
                         ORDER BY rowid {'ASC' if params['direction'] == 'next' else 'DESC'}
                     """, rowids)
-                    rows = cursor.fetchall()
 
-                    # Apply filters (only if needed)
-                    if params['case_sensitive'] or params['whole_word'] or params['exclude_ctrl'] or params['include_nodes'] or params['min_log_level'] < 4:
-                        filter_params = {
-                            'search_term': search_term,
-                            'exclude_ctrl': params['exclude_ctrl'],
-                            'include_nodes': params['include_nodes'],
-                            'min_log_level': params['min_log_level'],
-                            'case_sensitive': params['case_sensitive'],
-                            'whole_word': params['whole_word']
-                        }
-                        filtered_matches = self._apply_search_filters(rows, filter_params)
-                    else:
-                        # No filtering needed - use rows directly
-                        filtered_matches = []
-                        for row in rows:
-                            filtered_matches.append({
-                                'log_id': row['log_id'],
-                                'epoch_time': row['epoch_time'],
-                                'message': row['message'],
-                                'node_ip': row['node_ip'],
-                                'rowid': row['rowid']
-                            })
+                    rows = cursor.fetchall()
+                    t1 = time.time()
+                    print(f"SEARCH TIMING: log data fetch took {t1-t0:.3f}s, got {len(rows)} rows", flush=True)
+
+                    if not rows:
+                        return {'found': False, 'finished': True, 'total_matches': 0}
+
+                    # Apply filters
+                    filter_params = {
+                        'search_term': search_term,
+                        'exclude_ctrl': params['exclude_ctrl'],
+                        'include_nodes': params['include_nodes'],
+                        'min_log_level': params['min_log_level'],
+                        'case_sensitive': params['case_sensitive'],
+                        'whole_word': params['whole_word']
+                    }
+
+                    filtered_matches = self._apply_search_filters(rows, filter_params)
 
                     if not filtered_matches:
                         return {'found': False, 'finished': True, 'total_matches': 0}
 
-                    # Create session
+                    # Create session - store both rowid and log_id
                     session_id = str(uuid.uuid4())
                     self.search_sessions[session_id] = {
                         'last_access': time.time(),
                         'matches': filtered_matches,
-                        'total_matches': total_matches,
+                        'total_matches': -1,  # Unknown, but we don't need it for navigation
                         'current_index': 0,
                         'direction': params['direction'],
                         'search_term': search_term,
                         'fts_query': fts_query,
                         'fetch_limit': fetch_limit,
-                        'last_fetched_rowid': rowids[-1] if rowids else None,
+                        'last_fetched_rowid': rows[-1]['rowid'] if rows else None,
+                        'last_fetched_log_id': rows[-1]['log_id'] if rows else None,
                         'has_more': len(filtered_matches) == fetch_limit,
                         'exclude_ctrl': params['exclude_ctrl'],
                         'include_nodes': params['include_nodes'],
@@ -2104,14 +2172,16 @@ class WebController(Controller):
 
                     # Return the first match
                     first_match = filtered_matches[0]
+                    total_time = time.time() - start_total
+                    print(f"SEARCH TIMING: TOTAL do_search took {total_time:.3f}s", flush=True)
                     return {
                         'session_id': session_id,
                         'found': True,
-                        'timestamp': first_match['epoch_time'],
-                        'message': first_match['message'],
                         'log_id': first_match['log_id'],
+                        'epoch_time': first_match['epoch_time'],
+                        'message': first_match['message'],
                         'wrapped': wrapped,
-                        'total_matches': total_matches,
+                        'total_matches': -1,  # Unknown
                         'current_index': 0,
                         'has_more': self.search_sessions[session_id]['has_more']
                     }
@@ -2156,12 +2226,12 @@ class WebController(Controller):
 
             if session['current_index'] >= len(session['matches']):
                 # Need more matches in next direction
-                if session.get('has_more', False) and session.get('last_fetched_rowid'):
+                if session.get('has_more', False) and session.get('last_fetched_log_id'):
                     # Fetch next batch
                     more_matches = self._fetch_more_matches(session, 'next')
                     if more_matches:
                         session['matches'].extend(more_matches)
-                        session['last_fetched_rowid'] = more_matches[-1]['rowid'] if more_matches else None
+                        session['last_fetched_log_id'] = more_matches[-1]['log_id'] if more_matches else None
                         session['has_more'] = len(more_matches) == session['fetch_limit']
 
                         if session['current_index'] < len(session['matches']):
@@ -2181,13 +2251,13 @@ class WebController(Controller):
                     match = session['matches'][session['current_index']]
             elif session['current_index'] < 0:
                 # Need more matches in prev direction
-                if session.get('has_more', False) and session.get('last_fetched_rowid'):
+                if session.get('has_more', False) and session.get('last_fetched_log_id'):
                     # Fetch previous batch
                     more_matches = self._fetch_more_matches(session, 'prev')
                     if more_matches:
                         # Insert at beginning for prev direction
                         session['matches'] = more_matches + session['matches']
-                        session['last_fetched_rowid'] = more_matches[0]['rowid'] if more_matches else None
+                        session['last_fetched_log_id'] = more_matches[0]['log_id'] if more_matches else None
                         session['has_more'] = len(more_matches) == session['fetch_limit']
                         # Adjust index (we added more_matches at the beginning)
                         session['current_index'] += len(more_matches)
@@ -2205,9 +2275,9 @@ class WebController(Controller):
 
             return web.json_response({
                 'found': True,
-                'timestamp': match['epoch_time'],
-                'message': match['message'],
                 'log_id': match['log_id'],
+                'epoch_time': match['epoch_time'],
+                'message': match['message'],
                 'wrapped': wrapped,
                 'current_index': session['current_index'],
                 'total_matches': session['total_matches']
@@ -2282,33 +2352,44 @@ class WebController(Controller):
         return filtered_matches
 
     def _fetch_more_matches(self, session, direction):
-        """Fetch the next batch of matches for a session"""
+        """Fetch the next batch of matches for a session using rowid positioning (fast)"""
         conn = None
         try:
             conn = sqlite3.connect(str(self.db_path))
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
 
+            # Step 1: Get rowids from FTS
             if direction == 'next':
-                query = f"""
-                    SELECT d.log_id, d.epoch_time, d.message, d.node_ip, d.log_level, d.rowid
-                    FROM logs d
-                    WHERE d.rowid IN (SELECT rowid FROM logs_fts WHERE logs_fts MATCH ?)
-                    AND d.rowid > ?
-                    ORDER BY d.rowid ASC
+                cursor.execute("""
+                    SELECT rowid FROM logs_fts
+                    WHERE logs_fts MATCH ?
+                    AND rowid > ?
+                    ORDER BY rowid ASC
                     LIMIT ?
-                """
-                cursor.execute(query, (session['fts_query'], session['last_fetched_rowid'], session['fetch_limit']))
-            else:
-                query = f"""
-                    SELECT d.log_id, d.epoch_time, d.message, d.node_ip, d.log_level, d.rowid
-                    FROM logs d
-                    WHERE d.rowid IN (SELECT rowid FROM logs_fts WHERE logs_fts MATCH ?)
-                    AND d.rowid < ?
-                    ORDER BY d.rowid DESC
+                """, (session['fts_query'], session['last_fetched_rowid'], session['fetch_limit']))
+            else:  # prev
+                cursor.execute("""
+                    SELECT rowid FROM logs_fts
+                    WHERE logs_fts MATCH ?
+                    AND rowid < ?
+                    ORDER BY rowid DESC
                     LIMIT ?
-                """
-                cursor.execute(query, (session['fts_query'], session['last_fetched_rowid'], session['fetch_limit']))
+                """, (session['fts_query'], session['last_fetched_rowid'], session['fetch_limit']))
+
+            rowids = [row[0] for row in cursor.fetchall()]
+
+            if not rowids:
+                return []
+
+            # Step 2: Get full log data for these rowids
+            placeholders = ','.join(['?' for _ in rowids])
+            cursor.execute(f"""
+                SELECT log_id, epoch_time, message, node_ip, log_level, rowid
+                FROM logs
+                WHERE rowid IN ({placeholders})
+                ORDER BY rowid {'ASC' if direction == 'next' else 'DESC'}
+            """, rowids)
 
             rows = cursor.fetchall()
 
@@ -2326,12 +2407,13 @@ class WebController(Controller):
 
             filtered_matches = self._apply_search_filters(rows, filter_params)
 
-            # Add rowid to filtered matches (it's already in the row)
-            # The _apply_search_filters already includes rowid if we select it
-            # So we just need to ensure rowid is in the result
-
             if direction == 'prev':
                 filtered_matches.reverse()
+
+            # Update the session's last_fetched_rowid and last_fetched_log_id
+            if filtered_matches:
+                session['last_fetched_rowid'] = filtered_matches[-1]['rowid']
+                session['last_fetched_log_id'] = filtered_matches[-1]['log_id']
 
             return filtered_matches
 
@@ -4963,6 +5045,7 @@ class WebController(Controller):
             REFILTER_DISPLAY: 'refilter_display',
             ADD_HISTORICAL_ABOVE: 'add_historical_above',
             ADD_HISTORICAL_BELOW: 'add_historical_below',
+            ADD_HISTORICAL_BATCH: 'add_historical_batch',
             TRIM_BUFFER: 'trim_buffer',
             SCROLL_TO_TIMESTAMP: 'scroll_to_timestamp',
             FILL_GAP: 'fill_gap'
@@ -4973,9 +5056,9 @@ class WebController(Controller):
         let searchCaseSensitive = false;
         let searchWholeWord = false;
         let isSearching = false;
-        let searchCursor = null;
-        let searchCursorDb = null;
-        let searchLogId = null;
+        let searchLogId = null;      // Primary cursor - for database searches and buffer navigation
+        let searchTimestamp = null;   // Secondary cursor - for journal seeks (display/scroll)
+        let activeFetchController = null;  // For cancelling background fetches
         let lastSearchDirection = null;    // 'next' or 'prev'
         let autoScrolling = false;         // Are we auto-scrolling to a match?
         let currentSearchAborted = false;  // Flag to ignore pending search results after cancel
@@ -5543,6 +5626,9 @@ class WebController(Controller):
                         case DebugViewOperation.ADD_HISTORICAL_BELOW:
                             addHistoricalLogsBelowInternal(item.data);
                             break;
+                        case DebugViewOperation.ADD_HISTORICAL_BATCH:
+                            addHistoricalBatchInternal(item.data);
+                            break;
                         case DebugViewOperation.TRIM_BUFFER:
                             const trimmed = trimBufferInternal();
                             if (trimmed) {
@@ -5709,21 +5795,8 @@ class WebController(Controller):
 
                 if (ts) {
                     resetSearch();
-                    searchCursor = ts;  // Journal timestamp for display
-
-                    // Fetch database timestamp for this log_id
-                    if (logId && logId > 0) {
-                        const dbTs = await getDbTimestampByLogId(logId);
-                        if (dbTs) {
-                            searchCursorDb = dbTs;
-                        } else {
-                            searchCursorDb = ts;  // Fallback
-                        }
-                    } else {
-                        searchCursorDb = ts;
-                    }
-
-                    showTemporaryMessage(`Cursor set to ${new Date(ts * 1000).toLocaleTimeString()}`, 'search');
+                    searchTimestamp = ts;
+                    searchLogId = logId;  // Also set from the log
                     updateCursorHighlight();
 
                     // Flash the clicked line
@@ -6817,6 +6890,15 @@ class WebController(Controller):
 
         // Load historical logs above current view (scrolling up)
         async function loadHistoricalLogsAbove() {
+            console.log(`[DEBUG] loadHistoricalLogsAbove called, isSearching=${isSearching}`);
+
+            // Skip during search fetch
+            if (isSearching || isLoading) {
+                console.log('[DEBUG] loadHistoricalLogsAbove: skipping due to isSearching or isLoading');
+            }
+
+            if (isSearching || isLoading) return;
+
             // Get the earliest log we currently have
             const earliestLog = logBuffer.length > 0 ? logBuffer[0] : null;
             const beforeTimestamp = earliestLog ? earliestLog.timestamp - 0.001 : null;
@@ -6829,10 +6911,16 @@ class WebController(Controller):
                     return;
                 }
                 isLoading = true;
+
+                const controller = new AbortController();
+                activeFetchController = controller;
+
+                console.log('[DEBUG] loadHistoricalLogsAbove: fetching initial logs from latest');
                 try {
                     const response = await fetch('/api/journal/query', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
+                        signal: controller.signal,
                         body: JSON.stringify({
                             timestamp: journalRange.latest,
                             before: 100,
@@ -6842,30 +6930,44 @@ class WebController(Controller):
                     const data = await response.json();
                     if (data.status === 'ok' && data.logs && data.logs.length > 0) {
                         currentScrollAnchor = data.logs[data.target_index]?.timestamp;
-                        addHistoricalLogsAbove(data.logs);
+                        addHistoricalLogsAbove({logs: data.logs});
                     }
                 } catch (e) {
+                    if (e.name === 'AbortError') {
+                        console.log('loadHistoricalLogsAbove: cancelled');
+                        return;
+                    }
                     console.error('loadHistoricalLogsAbove: error=', e);
+                } finally {
+                    if (activeFetchController === controller) {
+                        activeFetchController = null;
+                    }
+                    isLoading = false;
                 }
-                isLoading = false;
                 return;
             }
 
             if (!beforeTimestamp) {
+                console.log('[DEBUG] loadHistoricalLogsAbove: no beforeTimestamp, returning');
                 return;
             }
 
             // Check if we're near the top of the scroll area
             if (debugWindow.scrollTop > 20) {
+                console.log('[DEBUG] loadHistoricalLogsAbove: scrollTop > 20, returning');
                 return;
             }
 
+            console.log('[DEBUG] loadHistoricalLogsAbove: fetching historical logs before', beforeTimestamp);
             isLoading = true;
+            const controller = new AbortController();
+            activeFetchController = controller;
 
             try {
                 const response = await fetch('/api/journal/query', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
+                    signal: controller.signal,
                     body: JSON.stringify({
                         timestamp: beforeTimestamp,
                         before: 100
@@ -6877,39 +6979,61 @@ class WebController(Controller):
                     const oldScrollHeight = debugWindow.scrollHeight;
                     const oldScrollTop = debugWindow.scrollTop;
 
-                    addHistoricalLogsAbove(data.logs);
+                    addHistoricalLogsAbove({logs: data.logs});
 
                     const newScrollHeight = debugWindow.scrollHeight;
                     debugWindow.scrollTop = oldScrollTop + (newScrollHeight - oldScrollHeight);
                 }
 
             } catch (e) {
+                if (e.name === 'AbortError') {
+                    console.log('loadHistoricalLogsAbove: cancelled');
+                    return;
+                }
                 console.error('loadHistoricalLogsAbove: fetch error=', e);
+            } finally {
+                if (activeFetchController === controller) {
+                    activeFetchController = null;
+                }
+                isLoading = false;
             }
-
-            isLoading = false;
         }
 
         // Load more logs below (when scrolling down near bottom)
         async function loadMoreLogsBelow() {
-            if (isLoading || !hasMoreDown || autoScrollLocked) return;
+            // Skip during search fetch
+            if (isSearching) {
+                console.log('[DEBUG] loadMoreLogsBelow: skipping due to isSearching');
+            }
+
+            if (isSearching || isLoading || !hasMoreDown || autoScrollLocked) return;
 
             // Check if we're near the bottom
             const distanceToBottom = debugWindow.scrollHeight - debugWindow.scrollTop - debugWindow.clientHeight;
-            if (distanceToBottom > 50) return;
+            if (distanceToBottom > 50) {
+                console.log('[DEBUG] loadMoreLogsBelow: distanceToBottom > 50, returning');
+                return;
+            }
 
             // Get the latest log we currently have
             const latestLog = logBuffer.length > 0 ? logBuffer[logBuffer.length - 1] : null;
             const afterTimestamp = latestLog ? latestLog.timestamp : null;
 
-            if (!afterTimestamp) return;
+            if (!afterTimestamp) {
+                console.log('[DEBUG] loadMoreLogsBelow: no afterTimestamp, returning');
+                return;
+            }
 
+            console.log('[DEBUG] loadMoreLogsBelow: fetching logs after', afterTimestamp);
             isLoading = true;
+            const controller = new AbortController();
+            activeFetchController = controller;
 
             try {
                 const response = await fetch('/api/journal/query', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
+                    signal: controller.signal,
                     body: JSON.stringify({
                         timestamp: afterTimestamp,
                         after: 100
@@ -6918,16 +7042,23 @@ class WebController(Controller):
                 const data = await response.json();
 
                 if (data.status === 'ok' && data.logs.length > 0) {
-                    addHistoricalLogsBelow(data.logs);
+                    addHistoricalLogsBelow({logs: data.logs});
                 }
 
                 hasMoreDown = data.has_more !== false;
 
             } catch (e) {
+                if (e.name === 'AbortError') {
+                    console.log('loadMoreLogsBelow: cancelled');
+                    return;
+                }
                 console.error('Failed to load more logs:', e);
+            } finally {
+                if (activeFetchController === controller) {
+                    activeFetchController = null;
+                }
+                isLoading = false;
             }
-
-            isLoading = false;
         }
 
         // Handle scroll events for infinite loading
@@ -6962,98 +7093,224 @@ class WebController(Controller):
             }
         }
 
+        async function fetchAndScrollToTimestamp(timestamp, targetLogId, direction) {
+            console.log(`[DEBUG] fetchAndScrollToTimestamp START:`, {
+                timestamp: timestamp,
+                targetLogId: targetLogId,
+                direction: direction,
+                isSearching: isSearching
+            });
+            console.time('fetchAndScrollToTimestamp');
+
+            // If there's a background fetch running, abort it
+            if (activeFetchController) {
+                console.log('[DEBUG] fetchAndScrollToTimestamp: aborting activeFetchController');
+                activeFetchController.abort();
+                activeFetchController = null;
+            }
+
+            return new Promise(async (resolve, reject) => {
+                try {
+                    console.log('[DEBUG] fetchAndScrollToTimestamp: about to fetch /api/journal/query');
+                    console.time('fetchAndScrollToTimestamp: journal_query');
+                    const response = await fetch('/api/journal/query', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            timestamp: timestamp,
+                            before: 500,
+                            after: 500
+                        })
+                    });
+                    const data = await response.json();
+                    console.log(`[DEBUG] fetchAndScrollToTimestamp: journal query completed, logs=${data.logs?.length}`);
+                    console.timeEnd('fetchAndScrollToTimestamp: journal_query');
+
+                    if (data.status === 'ok' && data.logs && data.logs.length > 0) {
+                        console.log(`[DEBUG] fetchAndScrollToTimestamp: processing ${data.logs.length} logs`);
+                        const newLogs = data.logs;
+                        const filteredNewLogs = newLogs.filter(log => shouldDisplayLog(log.message));
+                        console.log(`[DEBUG] fetchAndScrollToTimestamp: after filter: ${filteredNewLogs.length} logs`);
+                        const uniqueNewLogs = filterUniqueLogs(filteredNewLogs);
+                        console.log(`[DEBUG] fetchAndScrollToTimestamp: after dedup: ${uniqueNewLogs.length} logs`);
+
+                        if (uniqueNewLogs.length > 0) {
+                            console.log('[DEBUG] fetchAndScrollToTimestamp: queueing ADD_HISTORICAL_BATCH');
+                            console.time('fetchAndScrollToTimestamp: queue_operation');
+                            await queueDebugViewOperation(DebugViewOperation.ADD_HISTORICAL_BATCH, {
+                                logs: uniqueNewLogs,
+                                targetLogId: targetLogId,
+                                direction: direction
+                            });
+                            console.timeEnd('fetchAndScrollToTimestamp: queue_operation');
+                        } else {
+                            console.log('[DEBUG] fetchAndScrollToTimestamp: uniqueNewLogs is empty, skipping queue');
+                        }
+                    } else {
+                        console.log('[DEBUG] fetchAndScrollToTimestamp: no logs returned from journal');
+                    }
+                    console.timeEnd('fetchAndScrollToTimestamp');
+                    resolve();
+                } catch (e) {
+                    console.error('[DEBUG] fetchAndScrollToTimestamp error:', e);
+                    console.timeEnd('fetchAndScrollToTimestamp');
+                    reject(e);
+                }
+            });
+        }
+
         // Don't call this, call addHistoricalLogsAbove()
-        function addHistoricalLogsAboveInternal(newLogs) {
-            if (!newLogs.length) return;
+        function addHistoricalLogsAboveInternal(data) {
+            const { logs, skipRebuild = false } = data;
+
+            if (!logs || !logs.length) return;
 
             // Convert to internal format
-            const newEntries = newLogs.map(log => ({
+            const newEntries = logs.map(log => ({
+                log_id: log.log_id || 0,
                 timestamp: log.timestamp,
                 message: log.message,
-                log_id: log.log_id || 0
+                source: log.source || ''
             })).filter(log => shouldDisplayLog(log.message));
 
-            // Create a Set of existing timestamps for quick lookup (with tolerance)
-            const existingTimestamps = new Set(logBuffer.map(log => log.timestamp));
-
             // Filter out duplicates
             const uniqueNewEntries = filterUniqueLogs(newEntries);
             if (uniqueNewEntries.length === 0) return;
-
-            // Update maxNormalGapSeconds for consecutive entries within the new batch
-            for (let i = 1; i < uniqueNewEntries.length; i++) {
-                updateMaxNormalGap(uniqueNewEntries[i].timestamp, uniqueNewEntries[i-1].timestamp);
-            }
-
-            // Also check gap between last existing log and first new log
-            if (logBuffer.length > 0 && uniqueNewEntries.length > 0) {
-                const lastExisting = logBuffer[logBuffer.length - 1].timestamp;
-                const firstNew = uniqueNewEntries[0].timestamp;
-                updateMaxNormalGap(firstNew, lastExisting);
-            }
-
-            // Add to buffer
-            logBuffer.push(...uniqueNewEntries);
-
-            // Sort by timestamp
-            logBuffer.sort((a, b) => a.timestamp - b.timestamp);
-
-            // Rebuild display, calling the internal function as we have the lock
-            rebuildDebugDisplayInternal();
-        }
-
-        // Add historical logs above existing logs
-        function addHistoricalLogsAbove(newLogs) {
-            queueDebugViewOperation(DebugViewOperation.ADD_HISTORICAL_ABOVE, newLogs);
-        }
-
-        // Don't call this, call addHistoricalLogsBelow
-        function addHistoricalLogsBelowInternal(newLogs) {
-            if (!newLogs.length) return;
-
-            // Convert to internal format and filter
-            const newEntries = [];
-            for (const log of newLogs) {
-                if (shouldDisplayLog(log.message)) {
-                    newEntries.push({
-                        timestamp: log.timestamp,
-                        message: log.message,
-                        log_id: log.log_id || 0
-                    });
-                }
-            }
-
-            // Filter out duplicates
-            const uniqueNewEntries = filterUniqueLogs(newEntries);
-            if (uniqueNewEntries.length === 0) return;
-
-            // Update maxNormalGapSeconds for consecutive entries within the new batch
-            for (let i = 1; i < uniqueNewEntries.length; i++) {
-                updateMaxNormalGap(uniqueNewEntries[i].timestamp, uniqueNewEntries[i-1].timestamp);
-            }
-
-            // Also check gap between last existing log and first new log
-            if (logBuffer.length > 0 && uniqueNewEntries.length > 0) {
-                const lastExisting = logBuffer[logBuffer.length - 1].timestamp;
-                const firstNew = uniqueNewEntries[0].timestamp;
-                updateMaxNormalGap(firstNew, lastExisting);
-            }
 
             // Add to buffer
             for (const entry of uniqueNewEntries) {
                 logBuffer.push(entry);
             }
 
-            // Sort by timestamp
-            logBuffer.sort((a, b) => a.timestamp - b.timestamp);
+            // Sort by LOG_ID
+            logBuffer.sort((a, b) => a.log_id - b.log_id);
 
-            // Rebuild display, calling the internal function as we have the lock
-            rebuildDebugDisplayInternal();
+            if (!skipRebuild) {
+                rebuildDebugDisplayInternal();
+            }
+        }
+
+        // Add historical logs above existing logs
+        function addHistoricalLogsAbove(data) {
+            queueDebugViewOperation(DebugViewOperation.ADD_HISTORICAL_ABOVE, data);
+        }
+
+        // Don't call this, call addHistoricalLogsBelow
+        function addHistoricalLogsBelowInternal(data) {
+            const { logs, skipRebuild = false } = data;
+
+            if (!logs || !logs.length) return;
+
+            // Convert to internal format and filter
+            const newEntries = logs.map(log => ({
+                log_id: log.log_id || 0,
+                timestamp: log.timestamp,
+                message: log.message,
+                source: log.source || ''
+            })).filter(log => shouldDisplayLog(log.message));
+
+            // Filter out duplicates
+            const uniqueNewEntries = filterUniqueLogs(newEntries);
+            if (uniqueNewEntries.length === 0) return;
+
+            // Add to buffer
+            for (const entry of uniqueNewEntries) {
+                logBuffer.push(entry);
+            }
+
+            // Sort by LOG_ID
+            logBuffer.sort((a, b) => a.log_id - b.log_id);
+
+            if (!skipRebuild) {
+                rebuildDebugDisplayInternal();
+            }
         }
 
         // Add historical logs below existing logs
-        function addHistoricalLogsBelow(newLogs) {
-            queueDebugViewOperation(DebugViewOperation.ADD_HISTORICAL_BELOW, newLogs);
+        function addHistoricalLogsBelow(data) {
+            queueDebugViewOperation(DebugViewOperation.ADD_HISTORICAL_BELOW, data);
+        }
+
+        function addHistoricalBatchInternal(data) {
+            const { logs, targetLogId, direction } = data;
+
+            console.log('addHistoricalBatchInternal: START', {
+                targetLogId: targetLogId,
+                targetLogId_type: typeof targetLogId,
+                logs_count: logs.length,
+                first_log_id: logs[0]?.log_id,
+                last_log_id: logs[logs.length - 1]?.log_id
+            });
+
+            if (!logs || logs.length === 0) {
+                console.log('addHistoricalBatchInternal: no logs');
+                return;
+            }
+
+            // Split logs into those above and below target
+            const aboveLogs = [];
+            const belowLogs = [];
+            let foundTarget = false;
+
+            for (const log of logs) {
+                if (log.log_id === targetLogId) {
+                    foundTarget = true;
+                    // Add target to below logs - it will be sorted correctly
+                    belowLogs.push(log);
+                } else if (!foundTarget) {
+                    aboveLogs.push(log);
+                } else {
+                    belowLogs.push(log);
+                }
+            }
+
+            console.log('addHistoricalBatchInternal: split', {
+                above_count: aboveLogs.length,
+                below_count: belowLogs.length,
+                foundTarget: foundTarget
+            });
+
+            // Add logs above (older) - skip rebuild
+            if (aboveLogs.length > 0) {
+                addHistoricalLogsAboveInternal({ logs: aboveLogs, skipRebuild: true });
+            }
+
+            // Add logs below (newer) - skip rebuild
+            if (belowLogs.length > 0) {
+                addHistoricalLogsBelowInternal({ logs: belowLogs, skipRebuild: true });
+            }
+
+            // Single rebuild
+            rebuildDebugDisplayInternal();
+
+            // Scroll to target
+            const targetElement = findLogElementByLogId(targetLogId);
+            console.log('addHistoricalBatchInternal: targetElement found?', {
+                targetLogId: targetLogId,
+                found: !!targetElement,
+                element_log_id: targetElement?.getAttribute('data-log_id'),
+                element_timestamp: targetElement?.getAttribute('data-timestamp')
+            });
+
+            if (targetElement) {
+                targetElement.scrollIntoView({ block: 'center', behavior: 'smooth' });
+                targetElement.classList.add('log-cursor');
+                targetElement.style.backgroundColor = '#ff9800';
+                setTimeout(() => {
+                    if (targetElement) targetElement.style.backgroundColor = '';
+                }, 300);
+
+                searchLogId = targetLogId;
+                const timestampAttr = targetElement.getAttribute('data-timestamp');
+                if (timestampAttr) {
+                    searchTimestamp = parseFloat(timestampAttr);
+                }
+                lastSearchDirection = direction;
+                updateCursorHighlight();
+                console.log('addHistoricalBatchInternal: scroll completed');
+            } else {
+                console.warn('addHistoricalBatchInternal: target element NOT FOUND for log_id:', targetLogId);
+            }
         }
 
         // Don't call this, call addNewLog()
@@ -7217,13 +7474,28 @@ class WebController(Controller):
         }
 
         function findLogElementByLogId(logId) {
+            const targetId = parseInt(logId, 10);
+            console.log('findLogElementByLogId: looking for', {
+                logId: logId,
+                targetId: targetId,
+                logElements_length: logElements.length,
+                first_5_log_ids: logElements.slice(0, 5).map(el => el.getAttribute('data-log_id'))
+            });
+
+            if (isNaN(targetId)) {
+                console.log('findLogElementByLogId: targetId is NaN');
+                return null;
+            }
+
             for (let i = 0; i < logElements.length; i++) {
-                const dataLogId = logElements[i].getAttribute('data-log_id');
-                const parsedId = parseInt(dataLogId, 10);
-                if (parsedId === logId) {
+                const dataLogId = parseInt(logElements[i].getAttribute('data-log_id'), 10);
+                if (dataLogId === targetId) {
+                    console.log('findLogElementByLogId: FOUND at index', i, 'log_id=', dataLogId);
                     return logElements[i];
                 }
             }
+
+            console.log('findLogElementByLogId: NOT FOUND');
             return null;
         }
 
@@ -7370,9 +7642,14 @@ class WebController(Controller):
         function rebuildDebugDisplayInternal() {
             if (!debugWindow) return;
 
-            const shouldScrollToBottom = !autoScrollLocked && isAtBottom;
-            const oldScrollHeight = debugWindow.scrollHeight;
             const oldScrollTop = debugWindow.scrollTop;
+            const oldScrollHeight = debugWindow.scrollHeight;
+
+            // Sort buffer by TIMESTAMP for display (timestamps are more reliable for gap detection)
+            const sortedBuffer = [...logBuffer];
+            sortedBuffer.sort((a, b) => a.timestamp - b.timestamp);
+
+            const shouldScrollToBottom = !autoScrollLocked && isAtBottom;
 
             debugWindow.innerHTML = '';
             logElements = [];
@@ -7381,9 +7658,27 @@ class WebController(Controller):
 
             let visibleCount = 0;
             let lastDisplayedTimestamp = null;
+            let lastDisplayedLogId = null;  // Track log ID too
             const currentGapKeys = new Set();  // Track gaps that exist in this rebuild
 
-            for (const log of logBuffer) {
+            // Helper to format duration nicely
+            function formatDuration(seconds) {
+                seconds = Math.round(seconds);
+                const days = Math.floor(seconds / 86400);
+                const hours = Math.floor((seconds % 86400) / 3600);
+                const minutes = Math.floor((seconds % 3600) / 60);
+                const secs = seconds % 60;
+
+                if (days > 0) {
+                    return `${days}d ${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+                } else if (hours > 0) {
+                    return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+                } else {
+                    return `${minutes}m ${secs}s`;
+                }
+            }
+
+            for (const log of sortedBuffer) {
                 // Skip markers for gap calculation, but they still affect display
                 if (log.isMarker) {
                     // Render marker
@@ -7399,27 +7694,31 @@ class WebController(Controller):
                 }
 
                 if (shouldDisplayLog(log.message)) {
-                    // Check for gap before displaying this log
+                    // Check for gap before displaying this log - USE TIMESTAMPS
                     if (lastDisplayedTimestamp !== null) {
                         const gap = log.timestamp - lastDisplayedTimestamp;
-                        const threshold = maxNormalGapSeconds * 2;
+                        // Use a threshold based on maxNormalGapSeconds (which tracks typical spacing)
+                        const threshold = Math.max(maxNormalGapSeconds * 2, 5); // At least 5 seconds
                         if (gap > threshold) {
                             const gapKey = `${lastDisplayedTimestamp}|${log.timestamp}`;
                             currentGapKeys.add(gapKey);
 
                             // Check if this gap is dead (no logs in journal)
                             if (!deadGaps.has(gapKey)) {
+                                const formattedGap = formatDuration(gap);
                                 // Create gap marker
                                 const markerDiv = document.createElement('div');
                                 markerDiv.className = 'gap-marker';
                                 markerDiv.style.userSelect = 'none';  // Prevent text selection cursor
-                                markerDiv.textContent = `~~~~~~~~~~~~~~~~~~~~ [gap of ${Math.round(gap)} seconds] ~~~~~~~~~~~~~~~~~~~~~`;
+                                markerDiv.textContent = `~~~~~~~~~~~~~~~~~~~~ [gap of ${formattedGap}] ~~~~~~~~~~~~~~~~~~~~~`;
 
-                                // Store metadata
+                                // Store metadata - BOTH timestamps AND log IDs
                                 markerDiv.dataset.olderTimestamp = lastDisplayedTimestamp;
                                 markerDiv.dataset.newerTimestamp = log.timestamp;
                                 markerDiv.dataset.gapKey = gapKey;
                                 markerDiv.dataset.gapSeconds = Math.round(gap);
+                                markerDiv.dataset.olderLogId = lastDisplayedLogId;
+                                markerDiv.dataset.newerLogId = log.log_id;
 
                                 // Helper to measure text width
                                 function measureTextWidth(text, element) {
@@ -7444,7 +7743,7 @@ class WebController(Controller):
 
                                     if (clickX <= fullTextWidth) {
                                         // Find center text position
-                                        const centerText = `[gap of ${Math.round(gap)} seconds]`;
+                                        const centerText = `[gap of ${formattedGap}]`;
                                         const centerTextWidth = measureTextWidth(centerText, markerDiv);
                                         const fullText = markerDiv.textContent;
                                         const leftSquiggles = fullText.indexOf(centerText);
@@ -7455,17 +7754,17 @@ class WebController(Controller):
 
                                         if (clickX < centerStart) {
                                             markerDiv.style.cursor = UP_ARROW_CURSOR;
-                                            markerDiv.title = '↑ Load older logs above this gap';
+                                            markerDiv.title = `↑ Load older logs above this gap (${formattedGap})`;
                                         } else if (clickX > centerEnd) {
                                             markerDiv.style.cursor = DOWN_ARROW_CURSOR;
-                                            markerDiv.title = '↓ Load newer logs below this gap';
+                                            markerDiv.title = `↓ Load newer logs below this gap (${formattedGap})`;
                                         } else {
                                             markerDiv.style.cursor = 'default';
-                                            markerDiv.title = `Gap of ${Math.round(gap)} seconds - click ~ to fill`;
+                                            markerDiv.title = `Gap of ${formattedGap} - click ~ to fill`;
                                         }
                                     } else {
                                         markerDiv.style.cursor = 'default';
-                                        markerDiv.title = `Gap of ${Math.round(gap)} seconds - click on the ~ marks to fill`;
+                                        markerDiv.title = `Gap of ${formattedGap} - click on the ~ marks to fill`;
                                     }
                                 });
 
@@ -7476,7 +7775,7 @@ class WebController(Controller):
                                     const fullTextWidth = measureTextWidth(markerDiv.textContent, markerDiv);
 
                                     if (clickX <= fullTextWidth) {
-                                        const centerText = `[gap of ${Math.round(gap)} seconds]`;
+                                        const centerText = `[gap of ${formattedGap}]`;
                                         const centerTextWidth = measureTextWidth(centerText, markerDiv);
                                         const fullText = markerDiv.textContent;
                                         const leftSquiggles = fullText.indexOf(centerText);
@@ -7502,10 +7801,10 @@ class WebController(Controller):
                                 });
 
                                 debugWindow.appendChild(markerDiv);
-                                    logElements.push(markerDiv);
-                                    logTexts.push(markerDiv.textContent);
-                                    logTimestamps.push(lastDisplayedTimestamp + (gap / 2));
-                                    visibleCount++;
+                                logElements.push(markerDiv);
+                                logTexts.push(markerDiv.textContent);
+                                logTimestamps.push(lastDisplayedTimestamp + (gap / 2));
+                                visibleCount++;
                             }
                             // If deadGaps.has(gapKey), skip marker entirely (logs will be adjacent)
                         }
@@ -7518,7 +7817,7 @@ class WebController(Controller):
                     logDiv.setAttribute('data-timestamp', log.timestamp);
                     logDiv.setAttribute('data-log_id', log.log_id || '0');
                     const highlightedContent = applyHighlighting(log.message);
-                    logDiv.innerHTML = highlightedContent
+                    logDiv.innerHTML = highlightedContent;
                     logDiv.addEventListener('click', handleLogClick(logDiv));
 
                     debugWindow.appendChild(logDiv);
@@ -7528,6 +7827,7 @@ class WebController(Controller):
                     visibleCount++;
 
                     lastDisplayedTimestamp = log.timestamp;
+                    lastDisplayedLogId = log.log_id;  // Update log ID too
                 }
             }
 
@@ -7778,8 +8078,7 @@ class WebController(Controller):
                 const foundLogId = parseInt(targetElement.getAttribute('data-log_id'), 10);
 
                 if (!isNaN(foundTimestamp) && !isNaN(foundLogId)) {
-                    searchCursor = foundTimestamp;
-                    searchCursorDb = foundTimestamp;
+                    searchTimestamp = foundTimestamp;
                     searchLogId = foundLogId;
                     if (direction) {
                         lastSearchDirection = direction;
@@ -7788,8 +8087,7 @@ class WebController(Controller):
                     console.log('  Updated cursor to timestamp:', foundTimestamp, 'log_id:', foundLogId);
                 } else if (timestamp) {
                     // Fallback to provided timestamp if parsing fails
-                    searchCursor = timestamp;
-                    searchCursorDb = timestamp;
+                    searchTimestamp = timestamp;
                     if (direction) {
                         lastSearchDirection = direction;
                     }
@@ -7878,8 +8176,7 @@ class WebController(Controller):
 
         // Reset cursor when:
         function resetSearch() {
-            searchCursor = null;
-            searchCursorDb = null;
+            searchTimestamp = null;
             searchLogId = null;
             lastSearchDirection = null;
             autoScrolling = false;
@@ -7927,9 +8224,10 @@ class WebController(Controller):
             console.log('searchLocalBuffer: caseSensitive:', searchCaseSensitive);
             console.log('searchLocalBuffer: wholeWord:', searchWholeWord);
             console.log('searchLocalBuffer: direction:', direction);
+            console.log('searchLocalBuffer: searchLogId:', searchLogId);
             console.log('searchLocalBuffer: logBuffer length:', logBuffer.length);
 
-            // Build matches array
+            // Build matches array from logBuffer
             const matches = [];
             let coreDumpCount = 0;
             let coreDumpRejected = 0;
@@ -7937,7 +8235,6 @@ class WebController(Controller):
             for (let i = 0; i < logBuffer.length; i++) {
                 const entry = logBuffer[i];
 
-                // Check if this is a CORE_DUMP entry
                 const isCoreDump = entry.message.includes('CORE_DUMP');
                 if (isCoreDump) {
                     coreDumpCount++;
@@ -7955,18 +8252,9 @@ class WebController(Controller):
                     });
                 } else if (isCoreDump) {
                     coreDumpRejected++;
-                    console.log('searchLocalBuffer: REJECTED CORE_DUMP entry:', {
-                        log_id: entry.log_id,
-                        timestamp: entry.timestamp,
-                        shouldDisplay: shouldDisplay,
-                        matchesCriteria: matchesCriteria,
-                        message_preview: entry.message.substring(0, 80)
-                    });
                 }
             }
 
-            console.log('searchLocalBuffer: total CORE_DUMP entries in buffer:', coreDumpCount);
-            console.log('searchLocalBuffer: CORE_DUMP entries rejected:', coreDumpRejected);
             console.log('searchLocalBuffer: total matches found:', matches.length);
 
             if (matches.length === 0) {
@@ -7974,7 +8262,9 @@ class WebController(Controller):
                 return { found: false };
             }
 
-            // Log first few matches
+            // Sort matches by log_id
+            matches.sort((a, b) => a.log_id - b.log_id);
+
             console.log('searchLocalBuffer: first 5 matches:');
             for (let i = 0; i < Math.min(5, matches.length); i++) {
                 console.log(`  [${i}] log_id=${matches[i].log_id}, ts=${matches[i].timestamp}`);
@@ -7984,32 +8274,13 @@ class WebController(Controller):
                 console.log(`  [${i}] log_id=${matches[i].log_id}, ts=${matches[i].timestamp}`);
             }
 
-            // Determine reference timestamp
-            let referenceTimestamp;
-            if (searchCursor !== null && !autoScrolling) {
-                referenceTimestamp = searchCursor;
-                console.log('searchLocalBuffer: using cursor timestamp:', referenceTimestamp);
-            } else {
-                referenceTimestamp = (direction === 'next')
-                    ? getVisibleTimestamp('newest')
-                    : getVisibleTimestamp('oldest');
-                console.log('searchLocalBuffer: using viewport timestamp:', referenceTimestamp);
-            }
-
-            // ADDED: Detailed match checking with tolerance
-            const EPSILON = 0.0001;  // 0.1ms tolerance for floating point
-
-            // Find the closest match in the specified direction
+            // Find the closest match in the specified direction using LOG_ID
             let bestIndex = -1;
             if (direction === 'next') {
-                // Find smallest timestamp > reference
                 for (let i = 0; i < matches.length; i++) {
-                    const isGreater = matches[i].timestamp > referenceTimestamp;
-                    const isGreaterWithTolerance = matches[i].timestamp > (referenceTimestamp + EPSILON);
-                    console.log(`  checking match[${i}]: ts=${matches[i].timestamp.toFixed(6)}, ref=${referenceTimestamp.toFixed(6)}, diff=${(matches[i].timestamp - referenceTimestamp).toFixed(6)}, >? ${isGreater} (with tolerance: ${isGreaterWithTolerance})`);
-                    if (matches[i].timestamp > referenceTimestamp) {
+                    if (searchLogId === null || matches[i].log_id > searchLogId) {
                         bestIndex = i;
-                        console.log(`    -> FOUND at index ${i}`);
+                        console.log(`  found next match at index ${i}, log_id=${matches[i].log_id}`);
                         break;
                     }
                 }
@@ -8018,14 +8289,10 @@ class WebController(Controller):
                     return { found: false, needMore: true };
                 }
             } else {
-                // Find largest timestamp < reference
                 for (let i = matches.length - 1; i >= 0; i--) {
-                    const isLess = matches[i].timestamp < referenceTimestamp;
-                    const isLessWithTolerance = matches[i].timestamp < (referenceTimestamp - EPSILON);
-                    console.log(`  checking match[${i}]: ts=${matches[i].timestamp.toFixed(6)}, ref=${referenceTimestamp.toFixed(6)}, diff=${(matches[i].timestamp - referenceTimestamp).toFixed(6)}, <? ${isLess} (with tolerance: ${isLessWithTolerance})`);
-                    if (matches[i].timestamp < referenceTimestamp) {
+                    if (searchLogId === null || matches[i].log_id < searchLogId) {
                         bestIndex = i;
-                        console.log(`    -> FOUND at index ${i}`);
+                        console.log(`  found prev match at index ${i}, log_id=${matches[i].log_id}`);
                         break;
                     }
                 }
@@ -8036,40 +8303,76 @@ class WebController(Controller):
             }
 
             const match = matches[bestIndex];
+
+            // IMPORTANT: Check if there's a gap marker between the current position and this match
+            // If there is a gap, we need to trigger a database search instead
+            if (searchLogId !== null) {
+                const hasGap = checkForGapBetween(searchLogId, match.log_id);
+                if (hasGap) {
+                    console.log('searchLocalBuffer: gap detected between current position and match, triggering database search');
+                    // Return needMore so the database search is triggered
+                    return { found: false, needMore: true };
+                }
+            }
+
             console.log('searchLocalBuffer: selected match:', { log_id: match.log_id, timestamp: match.timestamp });
 
             const element = findLogElementByLogId(match.log_id);
             console.log('searchLocalBuffer: element found by log_id:', !!element);
 
-            // Gap marker detection
-            if (searchCursor !== null && !autoScrolling) {
-                const cursorElement = findLogElementByTimestamp(searchCursor);
-                if (cursorElement && element) {
-                    const elements = Array.from(debugWindow.children);
-                    const cursorIndex = elements.indexOf(cursorElement);
-                    const matchIndex = elements.indexOf(element);
-                    const start = Math.min(cursorIndex, matchIndex);
-                    const end = Math.max(cursorIndex, matchIndex);
-
-                    for (let i = start; i <= end; i++) {
-                        if (elements[i].classList.contains('gap-marker')) {
-                            console.log('searchLocalBuffer: gap marker detected, falling back to database');
-                            return { found: false, gapDetected: true };
-                        }
-                    }
-                }
+            if (!element) {
+                console.log('searchLocalBuffer: element not found, need more');
+                return { found: false, needMore: true };
             }
 
             console.log('searchLocalBuffer: ========== SUCCESS ==========');
             return {
                 found: true,
                 element: element,
-                timestamp: match.timestamp,
                 log_id: match.log_id,
-                wrapped: bestIndex === 0 || bestIndex === matches.length - 1,
+                timestamp: match.timestamp,
+                wrapped: false,
                 matchNumber: bestIndex + 1,
                 totalMatches: matches.length
             };
+        }
+
+        // Helper function to check if there's a gap marker between two log IDs
+        function checkForGapBetween(fromLogId, toLogId) {
+            console.log(`checkForGapBetween: from=${fromLogId}, to=${toLogId}`);
+            let foundGap = false;
+            let gapCount = 0;
+
+            // Iterate through logElements looking for gap markers
+            for (let i = 0; i < logElements.length; i++) {
+                const el = logElements[i];
+                if (el.classList && el.classList.contains('gap-marker')) {
+                    const olderLogId = parseInt(el.dataset.olderLogId, 10);
+                    const newerLogId = parseInt(el.dataset.newerLogId, 10);
+
+                    if (!isNaN(olderLogId) && !isNaN(newerLogId)) {
+                        gapCount++;
+                        // Check if this gap lies between fromLogId and toLogId
+                        if (fromLogId < toLogId) {
+                            // Searching forward: gap should be after fromLogId and before toLogId
+                            if (olderLogId > fromLogId && newerLogId <= toLogId) {
+                                console.log(`  -> GAP FOUND! between ${fromLogId} and ${toLogId} (${olderLogId}->${newerLogId})`);
+                                foundGap = true;
+                                break;
+                            }
+                        } else {
+                            // Searching backward: gap should be before fromLogId and after toLogId
+                            if (olderLogId >= toLogId && newerLogId < fromLogId) {
+                                console.log(`  -> GAP FOUND! between ${fromLogId} and ${toLogId} (${olderLogId}->${newerLogId})`);
+                                foundGap = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            console.log(`checkForGapBetween: checked ${gapCount} gap markers, returning ${foundGap}`);
+            return foundGap;
         }
 
         async function performSearch(direction, forceReset = false) {
@@ -8080,55 +8383,46 @@ class WebController(Controller):
             const nextBtn = document.getElementById('searchNextBtn');
             const cancelBtn = document.getElementById('searchCancelBtn');
 
-            const searchTerm = searchInput.value.trim();
+            console.log(`[DEBUG] performSearch START: direction=${direction}, forceReset=${forceReset}, isSearching=${isSearching}`);
 
-            console.log('performSearch called, direction=', direction, 'isSearching=', isSearching);
+            const searchTerm = searchInput.value.trim();
 
             if (!searchTerm) {
                 showTemporaryMessage('⚠️ Enter search term', 'error');
                 return;
             }
 
-            // Try local search if we're not forcing reset and not already searching
+            // Cancel any ongoing background journal queries
+            if (activeFetchController) {
+                console.log('[DEBUG] performSearch: aborting activeFetchController');
+                activeFetchController.abort();
+                activeFetchController = null;
+            }
+
+            // Try local search first
             if (!forceReset && !isSearching && logBuffer.length > 0) {
-                console.log('performSearch: trying local buffer search first...');
                 const localResult = searchLocalBuffer(searchTerm, direction);
-
                 if (localResult.found) {
-                    console.log('performSearch: ✅ LOCAL HIT! Match', localResult.matchNumber, '/', localResult.totalMatches, 'timestamp:', localResult.timestamp);
-
-                    // Update cursor
-                    searchCursor = localResult.timestamp;
-                    searchCursorDb = localResult.timestamp;
+                    // Update cursor state
                     searchLogId = localResult.log_id;
+                    searchTimestamp = localResult.timestamp;
                     lastSearchDirection = direction;
                     updateCursorHighlight();
 
-                    // Scroll to match - need to find element by log_id
-                    const element = findLogElementByLogId(localResult.log_id);
-                    if (!element) {
-                        console.error('performSearch: could not find element for log_id', localResult.log_id);
-                        showTemporaryMessage('❌ Could not locate log entry', 'error');
-                        return;
-                    }
-
-                    element.scrollIntoView({ block: 'center', behavior: 'smooth' });
-                    element.classList.add('log-cursor');
-                    element.style.backgroundColor = '#ff9800';
+                    // Scroll to match
+                    localResult.element.scrollIntoView({ block: 'center', behavior: 'smooth' });
+                    localResult.element.classList.add('log-cursor');
+                    localResult.element.style.backgroundColor = '#ff9800';
                     setTimeout(() => {
-                        if (element) element.style.backgroundColor = '';
+                        if (localResult.element) localResult.element.style.backgroundColor = '';
                     }, 300);
 
-                    if (localResult.wrapped) {
-                        showTemporaryMessage(`↺ Wrapped to ${localResult.matchNumber}/${localResult.totalMatches}`, 'search');
-                    } else {
-                        showTemporaryMessage(`${localResult.matchNumber}/${localResult.totalMatches}`, 'search');
-                    }
+                    showTemporaryMessage(`${localResult.matchNumber}/${localResult.totalMatches}`, 'search');
                     return;
                 }
-
-                console.log('performSearch: no local matches, falling back to database');
-                showTemporaryMessage(`🔍 Searching database for "${searchTerm}"...`, 'search');
+                if (localResult.needMore) {
+                    showTemporaryMessage('🔍 Reached end of loaded logs, searching database...', 'search');
+                }
             }
 
             if (isSearching) {
@@ -8139,27 +8433,22 @@ class WebController(Controller):
             isSearching = true;
             currentSearchAborted = false;
 
-            // Disable all except cancel button
+            // Disable inputs during search
             searchInput.disabled = true;
             caseBtn.disabled = true;
             wordBtn.disabled = true;
             prevBtn.disabled = true;
             nextBtn.disabled = true;
 
-            let fromTimestamp;
-
-            // Determine starting point for database search
-            if (!forceReset && searchCursorDb !== null && !autoScrolling) {
-                fromTimestamp = searchCursorDb;
+            // Determine starting log_id for database search
+            let fromLogId = null;
+            if (!forceReset && searchLogId !== null && !autoScrolling) {
+                fromLogId = searchLogId;
                 if (direction === 'next') {
-                    fromTimestamp += 0.001;
+                    fromLogId += 1;
                 } else {
-                    fromTimestamp -= 0.001;
+                    fromLogId -= 1;
                 }
-            } else {
-                fromTimestamp = (direction === 'next')
-                    ? getVisibleTimestamp('oldest')
-                    : getVisibleTimestamp('newest');
             }
 
             const progressSpan = document.getElementById('searchProgress');
@@ -8167,7 +8456,7 @@ class WebController(Controller):
             try {
                 const filters = getCurrentSearchFilters();
 
-                // Start search
+                // Start database search using LOG_ID
                 const startResponse = await fetch('/api/search', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -8175,15 +8464,12 @@ class WebController(Controller):
                         action: 'start',
                         search: searchTerm,
                         direction: direction,
-                        from_timestamp: fromTimestamp,
-                        time_window: 3600,
-                        max_time_window: 604800,
+                        from_log_id: fromLogId,        // Primary: Log ID positioning
                         case_sensitive: searchCaseSensitive,
                         whole_word: searchWholeWord,
                         exclude_ctrl: filters.exclude_ctrl,
                         include_nodes: filters.include_nodes,
-                        min_log_level: filters.min_log_level,
-                        debug: true
+                        min_log_level: filters.min_log_level
                     })
                 });
 
@@ -8207,81 +8493,83 @@ class WebController(Controller):
                 if (startData.found === true && startData.session_id) {
                     console.log('DATABASE MATCH:');
                     console.log('  log_id:', startData.log_id);
-                    console.log('  timestamp:', startData.timestamp);
-                    console.log('  message preview:', startData.message.substring(0, 200));
+                    console.log('  epoch_time (db):', startData.epoch_time);
 
-                    // Check if this log_id is in logBuffer right now
-                    const inBuffer = logBuffer.some(log => log.log_id === startData.log_id);
-                    console.log('  In logBuffer right now:', inBuffer);
+                    // Check if already in buffer
+                    const existingElement = findLogElementByLogId(startData.log_id);
 
-                    if (inBuffer) {
-                        // Find it in logBuffer and log its timestamp
-                        const bufferEntry = logBuffer.find(log => log.log_id === startData.log_id);
-                        console.log('  Buffer entry timestamp:', bufferEntry.timestamp);
-                        console.log('  Buffer entry message preview:', bufferEntry.message.substring(0, 100));
-                    }
+                    if (existingElement) {
+                        // Already in buffer - just scroll to it
+                        console.log('  Match already in buffer, scrolling directly');
+                        searchLogId = startData.log_id;
+                        searchTimestamp = parseFloat(existingElement.getAttribute('data-timestamp'));
+                        lastSearchDirection = direction;
+                        updateCursorHighlight();
 
-                    // Check if it's in logElements
-                    let inElements = false;
-                    let elementIndex = -1;
-                    for (let i = 0; i < logElements.length; i++) {
-                        const rid = parseInt(logElements[i].getAttribute('data-log_id'));
-                        if (rid === startData.log_id) {
-                            inElements = true;
-                            elementIndex = i;
-                            break;
+                        existingElement.scrollIntoView({ block: 'center', behavior: 'smooth' });
+                        existingElement.classList.add('log-cursor');
+                        existingElement.style.backgroundColor = '#ff9800';
+                        setTimeout(() => {
+                            if (existingElement) existingElement.style.backgroundColor = '';
+                        }, 300);
+
+                        if (startData.wrapped) {
+                            const wrapMsg = direction === 'next' ? '↺ Wrapped to earliest logs' : '↺ Wrapped to latest logs';
+                            showTemporaryMessage(wrapMsg, 'search');
+                        } else {
+                            const shortMsg = startData.message.length > 80 ? startData.message.substring(0, 77) + '...' : startData.message;
+                            showTemporaryMessage(`✅ Found: ${shortMsg}`, 'search');
                         }
-                    }
-                    console.log('  In logElements:', inElements, inElements ? `at index ${elementIndex}` : '');
 
-                    let scrollTimestamp = startData.timestamp;
-                    console.log('  Before getJournalTimestampByLogId: scrollTimestamp=', scrollTimestamp);
-
-                    if (startData.log_id && startData.log_id > 0) {
-                        console.log('  Calling getJournalTimestampByLogId with log_id=', startData.log_id);
-                        scrollTimestamp = await getJournalTimestampByLogId(startData.log_id, startData.timestamp);
-                        console.log('  After getJournalTimestampByLogId: scrollTimestamp=', scrollTimestamp);
-                    } else {
-                        console.log('  Skipping getJournalTimestampByLogId - no log_id or log_id=0');
+                        activeSearchSession = startData.session_id;
+                        return;
                     }
 
-                    console.log('  Setting searchCursor...');
-                    searchCursor = scrollTimestamp;
-                    searchCursorDb = startData.timestamp;
+                    // Not in buffer - need to fetch from journal using epoch_time
+                    console.log('  Match not in buffer, fetching from journal');
+                    const fetchTimestamp = startData.epoch_time;  // Use database epoch_time for journal seek
+
+                    // Show progress while fetching
+                    if (progressSpan) {
+                        progressSpan.innerHTML = '<span class="search-spinner">⏳</span>';
+                    }
+
+                    // Fetch surrounding logs from journal
+                    await fetchAndScrollToTimestamp(fetchTimestamp, startData.log_id, direction);
+
                     searchLogId = startData.log_id;
+                    searchTimestamp = fetchTimestamp;
                     lastSearchDirection = direction;
                     updateCursorHighlight();
-                    console.log('  Cursor set, showing temporary message...');
 
                     if (startData.wrapped) {
                         const wrapMsg = direction === 'next' ? '↺ Wrapped to earliest logs' : '↺ Wrapped to latest logs';
                         showTemporaryMessage(wrapMsg, 'search');
-                    }
-
-                    if (startData.window_expanded) {
-                        const windowHours = (startData.time_window_used / 3600).toFixed(1);
-                        showTemporaryMessage(`🔍 Found ${startData.total_matches} matches in last ${windowHours} hours`, 'search');
                     } else {
                         const shortMsg = startData.message.length > 80 ? startData.message.substring(0, 77) + '...' : startData.message;
                         showTemporaryMessage(`✅ Found: ${shortMsg}`, 'search');
                     }
 
-                    console.log('  About to call scrollToMatch...');
-                    await scrollToMatch(scrollTimestamp, startData.log_id, direction);
-                    console.log('  scrollToMatch completed');
+                    if (progressSpan) {
+                        progressSpan.innerHTML = '';
+                    }
+
                     activeSearchSession = startData.session_id;
-                    console.log('  Search session saved');
                     return;
                 }
 
-                // Polling for results (fallback)
+                // Polling for results (fallback for slower searches)
                 const session_id = startData.session_id;
                 activeSearchSession = session_id;
 
                 let found = false;
                 let finished = false;
                 let pollCount = 0;
-                const maxPolls = 600;
+                const maxPolls = 600;  // 5 minutes max (500ms * 600 = 300 seconds)
+
+                if (progressSpan) {
+                    progressSpan.innerHTML = '<span class="search-spinner">⏳</span>';
+                }
 
                 while (!found && !finished && pollCount < maxPolls && !currentSearchAborted) {
                     await new Promise(resolve => setTimeout(resolve, 500));
@@ -8314,27 +8602,54 @@ class WebController(Controller):
 
                     if (pollData.found) {
                         found = true;
+                        console.log('POLL MATCH FOUND:');
+                        console.log('  log_id:', pollData.log_id);
+                        console.log('  epoch_time:', pollData.epoch_time);
 
-                        let scrollTimestamp = pollData.timestamp;
-                        if (pollData.log_id && pollData.log_id > 0) {
-                            scrollTimestamp = await getJournalTimestampByLogId(pollData.log_id, pollData.timestamp);
+                        // Check if already in buffer
+                        const existingElement = findLogElementByLogId(pollData.log_id);
+
+                        if (existingElement) {
+                            // Already in buffer - just scroll to it
+                            console.log('  Match already in buffer, scrolling directly');
+                            searchLogId = pollData.log_id;
+                            searchTimestamp = parseFloat(existingElement.getAttribute('data-timestamp'));
+                            lastSearchDirection = direction;
+                            updateCursorHighlight();
+
+                            existingElement.scrollIntoView({ block: 'center', behavior: 'smooth' });
+                            existingElement.classList.add('log-cursor');
+                            existingElement.style.backgroundColor = '#ff9800';
+                            setTimeout(() => {
+                                if (existingElement) existingElement.style.backgroundColor = '';
+                            }, 300);
+
+                            if (pollData.wrapped) {
+                                const wrapMsg = direction === 'next' ? '↺ Wrapped to earliest logs' : '↺ Wrapped to latest logs';
+                                showTemporaryMessage(wrapMsg, 'search');
+                            } else {
+                                const shortMsg = pollData.message.length > 80 ? pollData.message.substring(0, 77) + '...' : pollData.message;
+                                showTemporaryMessage(`✅ Found: ${shortMsg}`, 'search');
+                            }
+                            break;
                         }
 
-                        searchCursor = scrollTimestamp;
-                        searchCursorDb = pollData.timestamp;
+                        // Not in buffer - fetch from journal
+                        const fetchTimestamp = pollData.epoch_time;
+                        await fetchAndScrollToTimestamp(fetchTimestamp, pollData.log_id, direction);
+
                         searchLogId = pollData.log_id;
+                        searchTimestamp = fetchTimestamp;
                         lastSearchDirection = direction;
                         updateCursorHighlight();
 
                         if (pollData.wrapped) {
                             const wrapMsg = direction === 'next' ? '↺ Wrapped to earliest logs' : '↺ Wrapped to latest logs';
                             showTemporaryMessage(wrapMsg, 'search');
+                        } else {
+                            const shortMsg = pollData.message.length > 80 ? pollData.message.substring(0, 77) + '...' : pollData.message;
+                            showTemporaryMessage(`✅ Found: ${shortMsg}`, 'search');
                         }
-
-                        const shortMsg = pollData.message.length > 80 ? pollData.message.substring(0, 77) + '...' : pollData.message;
-                        showTemporaryMessage(`✅ Found: ${shortMsg}`, 'search');
-
-                        await scrollToMatch(scrollTimestamp, pollData.log_id, direction);
                         break;
                     }
 
@@ -8342,6 +8657,15 @@ class WebController(Controller):
                         finished = true;
                         break;
                     }
+
+                    // Update progress indicator
+                    if (progressSpan && pollData.current_index !== undefined && pollData.total_matches) {
+                        progressSpan.innerHTML = `${pollData.current_index + 1}/${pollData.total_matches}`;
+                    }
+                }
+
+                if (progressSpan) {
+                    progressSpan.innerHTML = '';
                 }
 
                 if (!found && !finished && !currentSearchAborted) {
@@ -8352,7 +8676,7 @@ class WebController(Controller):
 
             } catch (e) {
                 console.error('Search error:', e);
-                showTemporaryMessage(`❌ Search failed: ${e.message}`, 'search');
+                showTemporaryMessage(`❌ Search failed: ${e.message}`, 'error');
             } finally {
                 isSearching = false;
                 currentSearchAborted = false;
@@ -8361,10 +8685,7 @@ class WebController(Controller):
                 wordBtn.disabled = false;
                 prevBtn.disabled = false;
                 nextBtn.disabled = false;
-
-                if (progressSpan) {
-                    progressSpan.textContent = '';
-                }
+                cancelBtn.disabled = false;
             }
         }
 
@@ -8383,11 +8704,11 @@ class WebController(Controller):
                 el.classList.remove('log-cursor');
             });
 
-            // Find and highlight the log with cursor timestamp
-            if (searchCursor !== null) {
+            // Find and highlight the log with matching log_id
+            if (searchLogId !== null) {
                 for (let i = 0; i < logElements.length; i++) {
-                    const ts = parseFloat(logElements[i].getAttribute('data-timestamp'));
-                    if (Math.abs(ts - searchCursor) < 0.001) {
+                    const logId = parseInt(logElements[i].getAttribute('data-log_id'), 10);
+                    if (logId === searchLogId) {
                         logElements[i].classList.add('log-cursor');
                         break;
                     }
@@ -8550,18 +8871,17 @@ class WebController(Controller):
 
             // Jump to cursor button
             jumpToCursorBtn.addEventListener('click', () => {
-                if (searchCursor !== null) {
-                    scrollToTimestamp(searchCursor);
-                    showTemporaryMessage(`Jumped to cursor at ${new Date(searchCursor * 1000).toLocaleTimeString()}`, 'search');
+                if (searchTimestamp !== null) {
+                    scrollToTimestamp(searchTimestamp);
+                    showTemporaryMessage(`Jumped to cursor at ${new Date(searchTimestamp * 1000).toLocaleTimeString()}`, 'search');
                 } else {
                     showTemporaryMessage('No cursor set', 'info');
                 }
             });
 
-            // Cursor clear button - also clear searchCursorDb
+            // Cursor clear button
             cursorClearBtn.addEventListener('click', () => {
-                searchCursor = null;
-                searchCursorDb = null;
+                searchTimestamp = null;
                 lastSearchDirection = null;
                 updateCursorHighlight();
                 showTemporaryMessage('Cursor cleared - next search will start from viewport', 'search');
