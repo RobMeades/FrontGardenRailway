@@ -283,7 +283,7 @@ class HandleFirmware:
                         <th>Application (Variant)</th>
                         <th>Track</th>
                         <th>Last Reported Software Version</th>
-                        <th>Last Boot</th>
+                        <th>Time Since Last Boot</th>
                         <th>Change Track</th>
                     </tr>
                 </thead>
@@ -308,11 +308,11 @@ class HandleFirmware:
                         return days + "d " +
                             String(hours).padStart(2, '0') + ":" +
                             String(minutes).padStart(2, '0') + ":" +
-                            String(secs).padStart(2, '0') + " ago";
+                            String(secs).padStart(2, '0');
                     } else {
                         return String(hours).padStart(2, '0') + ":" +
                             String(minutes).padStart(2, '0') + ":" +
-                            String(secs).padStart(2, '0') + " ago";
+                            String(secs).padStart(2, '0');
                     }
                 }
 
