@@ -175,7 +175,19 @@ For isolation, the Raspberry Pi should be installed on a VLAN of the home networ
   WantedBy=multi-user.target
   ```
 
-  ...then, still on the local PC, `sudo systemctl start fgr_crash_decoder` and `sudo systemctl enable fgr_crash_decoder` to make it run at boot
+  ...then, still on the local PC, `sudo systemctl start fgr_crash_decoder` and `sudo systemctl enable fgr_crash_decoder` to make it run at boot.  Should you not get the nice URL thingy from `log_server.py` for some reason, you can query the database directly from the Pi with something like:
+
+  ```
+  sudo sqlite3 /mnt/ssd/logs.db "SELECT * FROM crash_dumps ORDER BY timestamp_utc DESC LIMIT 50;"
+  ```
+
+  ...then take the left-most field, form it into a URL something like:
+
+  ```
+  http://127.0.0.1:8080/1781624858_10.10.3.7
+  ```
+
+  ...paste it into your browser and it should be exactly like you clicked on the `log_server.py` link.
 
 - Enter `ro` again to make the file system of the Raspberry Pi read-only once more.
 
