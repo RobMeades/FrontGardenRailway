@@ -308,11 +308,11 @@ class HandleFirmware:
                         return days + "d " +
                             String(hours).padStart(2, '0') + ":" +
                             String(minutes).padStart(2, '0') + ":" +
-                            String(secs).padStart(2, '0');
+                            String(secs).padStart(2, '0') + " ago";
                     } else {
                         return String(hours).padStart(2, '0') + ":" +
                             String(minutes).padStart(2, '0') + ":" +
-                            String(secs).padStart(2, '0');
+                            String(secs).padStart(2, '0') + " ago";
                     }
                 }
 
@@ -323,39 +323,27 @@ class HandleFirmware:
                         const currentTime = Math.floor(Date.now() / 1000);
 
                         for (const [ip, meta] of Object.entries(masterInventory)) {
-                            // Fixed: using double backslash in the regex replace
                             const rowId = "row-" + ip.replace(/\\./g, '-');
                             const row = document.getElementById(rowId);
                             if (!row) continue;
 
                             const nodeData = telemetry[ip] || { "version": "Never Checked In", "last_seen": null };
                             const versionCell = row.querySelector('.col-version code');
-                            const statusCell = row.querySelector('.col-status');
                             const timerCell = row.querySelector('.col-timer');
 
-                            // 1. Update Version Code Text
-                            versionCell.textContent = nodeData.version;
-
-                            // 2. Update Live Elapsed Timer - now using d HH:MM:SS format
-                            if (nodeData.last_seen) {
-                                const elapsed = currentTime - Math.floor(nodeData.last_seen);
-                                timerCell.textContent = formatElapsedTime(elapsed);
-                            } else {
-                                timerCell.textContent = "N/A";
+                            // Update Version
+                            if (versionCell) {
+                                versionCell.textContent = nodeData.version;
                             }
 
-                            // 3. Re-calculate status color badges fluidly
-                            const currentMode = (meta.mode || 'stable').toLowerCase();
-                            if (nodeData.version.includes("Never")) {
-                                statusCell.innerHTML = '<span class="badge gray">Offline</span>';
-                            } else if (nodeData.version.includes("-d") && currentMode === "beta") {
-                                statusCell.innerHTML = '<span class="badge green">Dev Tracking Live</span>';
-                            } else if (nodeData.version.includes("-d") && currentMode === "stable") {
-                                statusCell.innerHTML = '<span class="badge orange">Dev Build (Pending Stable)</span>';
-                            } else if (currentMode === "beta") {
-                                statusCell.innerHTML = '<span class="badge blue">Update Pending</span>';
-                            } else {
-                                statusCell.innerHTML = '<span class="badge green">Stable Release Running</span>';
+                            // Update Timer
+                            if (timerCell) {
+                                if (nodeData.last_seen) {
+                                    const elapsed = currentTime - Math.floor(nodeData.last_seen);
+                                    timerCell.textContent = formatElapsedTime(elapsed);
+                                } else {
+                                    timerCell.textContent = "N/A";
+                                }
                             }
                         }
                     } catch (err) {
