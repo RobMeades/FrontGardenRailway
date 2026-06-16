@@ -225,8 +225,13 @@ class FGRLogServer:
                             # The URL protocol handler will pick this up!
                             # and crash_decoder.py, when triggered, will
                             # know what to do
-                            link_msg = f"🛑 CRASH! Decode: http://127.0.0.1:8080//{crash_id}"
-                            self.lib_logger.log(link_msg, log_level=3)  # ERROR level
+                            link_msg = f"🛑 CRASH! Decode: http://127.0.0.1:8080/{crash_id}"
+                            self.lib_logger.log(
+                                source='NODE',
+                                node_ip=ip,
+                                message=link_msg,
+                                log_level=3  # ERROR level
+                            )
                             print(f"[LogServer] Crash captured: {crash_id} -> {link_msg}")
                         else:
                             print(f"[LogServer] Database not available, crash {crash_id} not saved")
@@ -365,7 +370,7 @@ class FGRLogServer:
                     # Check for crash dump data
                     self._intercept_and_parse_crash(ip, log_text)
 
-                    # FIX: Determine message_type based on content (restoring old behavior)
+                    # Determine message_type based on content
                     message_type = 'LOG'
                     if 'metrics:' in log_text:
                         message_type = 'METRIC'

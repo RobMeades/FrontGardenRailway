@@ -229,7 +229,6 @@ class HandleFirmware:
                 <td>{meta.get('app')} ({meta.get('variant')})</td>
                 <td><span class="track-label {meta.get('mode', 'stable').lower()}">{meta.get('mode', 'stable').upper()}</span></td>
                 <td class="col-version"><code>Syncing...</code></td>
-                <td class="col-status"><span class="badge gray">Connecting...</span></td>
                 <td class="col-timer">N/A</td>
                 <td>
                     <form action="/toggle-mode" method="post" style="margin:0;">
@@ -243,34 +242,35 @@ class HandleFirmware:
             </tr>
             """
 
-        html_content = f"""
+        # Build the HTML - now using double-escaped backslashes for the regex
+        html_content = """
         <!DOCTYPE html>
         <html>
         <head>
             <title>FGR OTA Dashboard</title>
             <meta name="viewport" content="width=device-width, initial-scale=1">
             <style>
-                body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 40px; background: #f4f7f6; color: #333; }}
-                h1 {{ color: #1a3a2a; margin-bottom: 5px; }}
-                p.sub {{ color: #666; margin-top: 0; margin-bottom: 30px; }}
-                table {{ width: 100%; border-collapse: collapse; background: #fff; box-shadow: 0 4px 6px rgba(0,0,0,0.05); border-radius: 8px; overflow: hidden; }}
-                th, td {{ padding: 15px; text-align: left; border-bottom: 1px solid #eee; }}
-                th {{ background: #1a3a2a; color: white; text-transform: uppercase; font-size: 12px; letter-spacing: 0.5px; }}
-                tr:hover {{ background-color: #f9fbf9; }}
-                .badge {{ padding: 4px 8px; border-radius: 12px; font-size: 11px; font-weight: bold; display: inline-block; }}
-                .badge.green {{ background: #e2f7ed; color: #157347; }}
-                .badge.orange {{ background: #fff3cd; color: #664d03; }}
-                .badge.blue {{ background: #cfe2ff; color: #084298; }}
-                .badge.gray {{ background: #e2e3e5; color: #41464b; }}
-                .track-label {{ padding: 2px 6px; border-radius: 4px; font-size: 11px; font-weight: bold; color: white; }}
-                .track-label.stable {{ background: #2b5c43; }}
-                .track-label.beta {{ background: #7b2cbf; }}
-                .btn {{ padding: 6px 12px; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; font-weight: bold; color: white; transition: background 0.2s; }}
-                .btn.beta {{ background: #2b5c43; }} /* Button styling fixes to match current mode target toggle action */
-                .btn.beta:hover {{ background: #1f4431; }}
-                .btn.stable {{ background: #7b2cbf; }}
-                .btn.stable:hover {{ background: #62219b; }}
-                .alert-info {{ background: #e2f0d9; border: 1px solid #bcdca7; color: #385723; padding: 12px; border-radius: 4px; margin-bottom: 20px; font-size: 13px; }}
+                body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 40px; background: #f4f7f6; color: #333; }
+                h1 { color: #1a3a2a; margin-bottom: 5px; }
+                p.sub { color: #666; margin-top: 0; margin-bottom: 30px; }
+                table { width: 100%; border-collapse: collapse; background: #fff; box-shadow: 0 4px 6px rgba(0,0,0,0.05); border-radius: 8px; overflow: hidden; }
+                th, td { padding: 15px; text-align: left; border-bottom: 1px solid #eee; }
+                th { background: #1a3a2a; color: white; text-transform: uppercase; font-size: 12px; letter-spacing: 0.5px; }
+                tr:hover { background-color: #f9fbf9; }
+                .badge { padding: 4px 8px; border-radius: 12px; font-size: 11px; font-weight: bold; display: inline-block; }
+                .badge.green { background: #e2f7ed; color: #157347; }
+                .badge.orange { background: #fff3cd; color: #664d03; }
+                .badge.blue { background: #cfe2ff; color: #084298; }
+                .badge.gray { background: #e2e3e5; color: #41464b; }
+                .track-label { padding: 2px 6px; border-radius: 4px; font-size: 11px; font-weight: bold; color: white; }
+                .track-label.stable { background: #2b5c43; }
+                .track-label.beta { background: #7b2cbf; }
+                .btn { padding: 6px 12px; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; font-weight: bold; color: white; transition: background 0.2s; }
+                .btn.beta { background: #2b5c43; }
+                .btn.beta:hover { background: #1f4431; }
+                .btn.stable { background: #7b2cbf; }
+                .btn.stable:hover { background: #62219b; }
+                .alert-info { background: #e2f0d9; border: 1px solid #bcdca7; color: #385723; padding: 12px; border-radius: 4px; margin-bottom: 20px; font-size: 13px; }
             </style>
         </head>
         <body>
@@ -282,32 +282,53 @@ class HandleFirmware:
                         <th>IP</th>
                         <th>Application (Variant)</th>
                         <th>Track</th>
-                        <th>Reported Software Version</th>
-                        <th>Deployment Status</th>
+                        <th>Last Reported Software Version</th>
                         <th>Last Boot</th>
                         <th>Change Track</th>
                     </tr>
                 </thead>
                 <tbody>
-                    {table_rows}
+                    """ + table_rows + """
                 </tbody>
             </table>
 
             <script>
-                const masterInventory = {inventory_json};
+                const masterInventory = """ + inventory_json + """;
 
-                async function syncTelemetry() {{
-                    try {{
+                // Helper function to format elapsed time as "d HH:MM:SS"
+                function formatElapsedTime(seconds) {
+                    if (seconds < 0) return "N/A";
+
+                    const days = Math.floor(seconds / 86400);
+                    const hours = Math.floor((seconds % 86400) / 3600);
+                    const minutes = Math.floor((seconds % 3600) / 60);
+                    const secs = Math.floor(seconds % 60);
+
+                    if (days > 0) {
+                        return days + "d " +
+                            String(hours).padStart(2, '0') + ":" +
+                            String(minutes).padStart(2, '0') + ":" +
+                            String(secs).padStart(2, '0');
+                    } else {
+                        return String(hours).padStart(2, '0') + ":" +
+                            String(minutes).padStart(2, '0') + ":" +
+                            String(secs).padStart(2, '0');
+                    }
+                }
+
+                async function syncTelemetry() {
+                    try {
                         const response = await fetch('/api/telemetry');
                         const telemetry = await response.json();
                         const currentTime = Math.floor(Date.now() / 1000);
 
-                        for (const [ip, meta] of Object.entries(masterInventory)) {{
-                            const rowId = "row-" + ip.replace(/\./g, '-');
+                        for (const [ip, meta] of Object.entries(masterInventory)) {
+                            // Fixed: using double backslash in the regex replace
+                            const rowId = "row-" + ip.replace(/\\./g, '-');
                             const row = document.getElementById(rowId);
                             if (!row) continue;
 
-                            const nodeData = telemetry[ip] || {{ "version": "Never Checked In", "last_seen": null }};
+                            const nodeData = telemetry[ip] || { "version": "Never Checked In", "last_seen": null };
                             const versionCell = row.querySelector('.col-version code');
                             const statusCell = row.querySelector('.col-status');
                             const timerCell = row.querySelector('.col-timer');
@@ -315,32 +336,32 @@ class HandleFirmware:
                             // 1. Update Version Code Text
                             versionCell.textContent = nodeData.version;
 
-                            // 2. Update Live Elapsed Timer
-                            if (nodeData.last_seen) {{
+                            // 2. Update Live Elapsed Timer - now using d HH:MM:SS format
+                            if (nodeData.last_seen) {
                                 const elapsed = currentTime - Math.floor(nodeData.last_seen);
-                                timerCell.textContent = elapsed < 60 ? `${{elapsed}}s ago` : `${{Math.floor(elapsed / 60)}}m ago`;
-                            }} else {{
+                                timerCell.textContent = formatElapsedTime(elapsed);
+                            } else {
                                 timerCell.textContent = "N/A";
-                            }}
+                            }
 
                             // 3. Re-calculate status color badges fluidly
                             const currentMode = (meta.mode || 'stable').toLowerCase();
-                            if (nodeData.version.includes("Never")) {{
+                            if (nodeData.version.includes("Never")) {
                                 statusCell.innerHTML = '<span class="badge gray">Offline</span>';
-                            }} else if (nodeData.version.includes("-d") && currentMode === "beta") {{
+                            } else if (nodeData.version.includes("-d") && currentMode === "beta") {
                                 statusCell.innerHTML = '<span class="badge green">Dev Tracking Live</span>';
-                            }} else if (nodeData.version.includes("-d") && currentMode === "stable") {{
+                            } else if (nodeData.version.includes("-d") && currentMode === "stable") {
                                 statusCell.innerHTML = '<span class="badge orange">Dev Build (Pending Stable)</span>';
-                            }} else if (currentMode === "beta") {{
+                            } else if (currentMode === "beta") {
                                 statusCell.innerHTML = '<span class="badge blue">Update Pending</span>';
-                            }} else {{
+                            } else {
                                 statusCell.innerHTML = '<span class="badge green">Stable Release Running</span>';
-                            }}
-                        }}
-                    }} catch (err) {{
+                            }
+                        }
+                    } catch (err) {
                         console.error("Telemetry fetch fault:", err);
-                    }}
-                }}
+                    }
+                }
 
                 // Run sync immediately on window load, then refresh fluidly every 1 second
                 syncTelemetry();
