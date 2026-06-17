@@ -793,14 +793,21 @@ class Controller:
         for node in self.nodes.values():
             if node.sock:
                 try:
+                    # Try to shutdown gracefully first;
+                    # this way the node gets to find out
+                    # straight away
+                    node.sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+                try:
                     node.sock.close()
-                except Exception:
+                except OSError:
                     pass
 
         if self.listen_sock:
             try:
                 self.listen_sock.close()
-            except Exception:
+            except OSError:
                 pass
 
         if self.listen_thread:
@@ -1173,9 +1180,8 @@ class Controller:
         return node.reference_counter
 
     def send_request_to_node(self, node_name: str, req_type: int,
-                             contents: bytes = b"",
-                             timeout: float = 5.0) -> Optional[fgr.FGRMsg]:
-        """Send a request to a node and wait for confirmation"""
+                            contents: bytes = b"",
+                            timeout: float = 5.0) -> Optional[fgr.FGRMsg]:
         node = self.nodes.get(node_name)
         if not node or not node.sock:
             self.logger.error(f"Node {node_name} not connected")
@@ -1185,41 +1191,51 @@ class Controller:
         msg = fgr.FGRMsg.create_req(req_type, reference, contents)
 
         if self.logger.isEnabledFor(logging.DEBUG):
-            self.logger.debug(f"[{node_name}] Sending REQ type=0x{req_type:03X}, ref={reference}, len={len(contents)}")
+            self.logger.debug(f"[{node_name}] Sending REQ type=0x{req_type:03X}, ref={reference}")
+
+        success, error = fgr.send_message_with_error(node.sock, msg)
+
+        if not success:
+            self.logger.error(f"[{node_name}] REQ send FAILED: type=0x{req_type:03X}, ref={reference}, error={error}")
+            return None
 
         response_queue = queue.Queue(maxsize=1)
         node.pending_requests[reference] = response_queue
 
         try:
-            if not fgr.send_message(node.sock, msg):
-                node.pending_requests.pop(reference, None)
-                return None
-
-            try:
-                return response_queue.get(timeout=timeout)
-            except queue.Empty:
-                self.logger.warning(f"Timeout waiting for confirmation from {node_name}")
-                node.pending_requests.pop(reference, None)
-                return None
-        except Exception as e:
-            self.logger.error(f"Error sending to {node_name}: {e}")
+            return response_queue.get(timeout=timeout)
+        except queue.Empty:
+            self.logger.warning(f"Timeout waiting for confirmation from {node_name}")
             node.pending_requests.pop(reference, None)
             return None
 
     def send_response_to_node(self, node_name: str, rsp_type: int,
-                              reference: int, contents: bytes = b"") -> bool:
-        """Send a response to an indication"""
+                            reference: int, contents: bytes = b"") -> bool:
         node = self.nodes.get(node_name)
         if not node or not node.sock:
             self.logger.error(f"Node {node_name} not connected")
             return False
 
+        # DEBUG: Check if socket is writable
+        import select
+        _, writable, _ = select.select([], [node.sock], [], 0.0)
+        if not writable:
+            self.logger.error(f"[{node_name}] Socket is NOT writable before send!")
+            # Don't return - let's see what send does
+
         msg = fgr.FGRMsg.create_rsp(rsp_type, reference, contents)
 
         if self.logger.isEnabledFor(logging.DEBUG):
-            self.logger.debug(f"[{node_name}] Sending RSP type=0x{rsp_type:03X}, ref={reference}, len={len(contents)}")
+            self.logger.debug(f"[{node_name}] Sending RSP type=0x{rsp_type:03X}, ref={reference}")
 
-        return fgr.send_message(node.sock, msg)
+        success, error = fgr.send_message_with_error(node.sock, msg)
+
+        if not success:
+            self.logger.error(f"[{node_name}] RSP send FAILED: type=0x{rsp_type:03X}, ref={reference}, error={error}")
+        else:
+            self.logger.debug(f"[{node_name}] RSP send returned success")
+
+        return success
 
     def cfg_node(self, node_name: str, cfg_data: bytes, timeout: float = 5.0) -> bool:
         """Configure a node"""

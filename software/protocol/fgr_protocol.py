@@ -431,6 +431,21 @@ def send_message(sock: socket.socket, msg: FGRMsg) -> bool:
         print(f"Error sending message: {e}")
         return False
 
+def send_message_with_error(sock: socket.socket, msg: FGRMsg) -> Tuple[bool, Optional[str]]:
+    """Send a protocol message and return (success, error_message)"""
+    try:
+        data = msg.pack()
+        sock.sendall(data)
+        return True, None
+    except BrokenPipeError as e:
+        return False, f"Broken pipe: {e}"
+    except ConnectionResetError as e:
+        return False, f"Connection reset: {e}"
+    except OSError as e:
+        return False, f"OS error: {e}"
+    except Exception as e:
+        return False, f"Unexpected error: {e}"
+
 def receive_message(sock: socket.socket, timeout: Optional[float] = None) -> Optional[FGRMsg]:
     """Receive and unpack a message (handles TCP streaming properly).
     
