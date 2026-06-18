@@ -31,6 +31,7 @@ P=$(journalctl --identifier=python -n 1 --output=short-iso 2>/dev/null | awk "{p
 
 if [ -n "$J" ] && [ -n "$P" ]; then
     LAG=$(($(date -d "$P" +%s) - $(date -d "$J" +%s)))
+    if [ $LAG -lt 0 ]; then LAG=0; fi
     echo "Lag: ${LAG}s"
 
     # Track min/max lag
