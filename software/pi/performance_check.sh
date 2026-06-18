@@ -16,7 +16,7 @@
 
 # Written by Deep Seek, tested by Rob :-)
 
-# watch -n 10 performance_check.sh
+# watch -n 10 ./performance_check.sh
 # Quick status check for FGR system
 
 echo "=== FGR System Performance Check ==="

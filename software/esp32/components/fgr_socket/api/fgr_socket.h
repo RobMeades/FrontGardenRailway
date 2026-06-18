@@ -423,6 +423,25 @@ int32_t fgr_socket_receive_start(int sock,
                                  fgr_socket_rx_cb_t rx_cb,
                                  void *rx_cb_param, void **context);
 
+/** Suspend receiving on a socket: call this if the socket
+ * has become disconnected.
+ *
+ * @param context the same pointer as was passed to
+ *                fgr_socket_receive_start().
+ * @return        ESP_OK on success, else a negative value from esp_err_t.
+ */
+int32_t fgr_socket_receive_suspend(void **context);
+
+/** Resume reception on a socket: call this after
+ * fgr_socket_receive_suspend() to resume reception on the new socket.
+ *
+ * @param sock    the socket to resume on .
+ * @param context the same pointer as was passed to
+ *                fgr_socket_receive_start().
+ * @return        ESP_OK on success, else a negative value from esp_err_t.
+ */
+int32_t fgr_socket_receive_resume(int sock, void **context);
+
 /** Stop receiving data on a socket.  When this function has returned
  * reconnect_cb() and rx_cb() will no longer be called.
  *

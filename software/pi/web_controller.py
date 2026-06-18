@@ -962,30 +962,45 @@ class WebController(Controller):
 
             # Helper function to process a journal entry
             def process_entry(entry):
-                message = entry.get('MESSAGE', '')
+                process_start = time.time()
+
+                # Materialize the entry once
+                entry_dict = dict(entry)
+
+                message = entry_dict.get('MESSAGE', '')
                 if not message:
                     return
 
                 message = message.rstrip()
 
-                journal_ts = entry.get('__REALTIME_TIMESTAMP')
+                journal_ts = entry_dict.get('__REALTIME_TIMESTAMP')
                 journal_ts_value = journal_ts.timestamp() if journal_ts else None
 
-                # Get custom fields - always convert to int
-                source = entry.get('FGR_SOURCE', '')
-                node_ip = entry.get('FGR_NODE_IP', '')
-                log_level = int(entry.get('FGR_LOG_LEVEL', 0))
-                log_id = int(entry.get('FGR_LOG_ID', 0))
+                if journal_ts_value:
+                    age = time.time() - journal_ts_value
+                    if age > 10:
+                        self._log_admin(f"Journal reader lag: {age:.1f}s behind (log_id={entry_dict.get('FGR_LOG_ID', '?')})")
 
-                # Parse metrics from node logs
+                source = entry_dict.get('FGR_SOURCE', '')
+                node_ip = entry_dict.get('FGR_NODE_IP', '')
+                log_level = int(entry_dict.get('FGR_LOG_LEVEL', 0))
+                log_id = int(entry_dict.get('FGR_LOG_ID', 0))
+
+                t0 = time.time()
                 if source == 'NODE' and node_ip:
                     metrics_result = self._parse_metrics_from_log(message, node_ip)
                     if metrics_result:
                         node_ip, metrics_data = metrics_result
                         self._update_node_metrics(node_ip, metrics_data)
+                parse_metrics_time = time.time() - t0
 
-                # Store raw components - let _add_log_raw handle formatting
+                t0 = time.time()
                 self._add_log_raw(source, node_ip, log_level, message, journal_ts_value, log_id)
+                add_log_time = time.time() - t0
+
+                total_time = time.time() - process_start
+                if total_time > 0.05:
+                    self._log_admin(f"SLOW process_entry: {total_time:.3f}s (parse_metrics={parse_metrics_time:.3f}s, add_log={add_log_time:.3f}s) for log_id={log_id}")
 
             # Get the cursor of the last entry
             j.seek_tail()
@@ -1762,35 +1777,25 @@ class WebController(Controller):
                 j = journal.Reader(path='/var/log/journal')
                 j.add_match(SYSLOG_IDENTIFIER=JOURNAL_IDENTIFIER)
 
-                # Get earliest timestamp
+                # Get earliest timestamp - just the first entry
                 j.seek_head()
                 earliest = None
-                earliest_count = 0
-                for entry in j:
-                    earliest_count += 1
-                    if entry.get('SYSLOG_IDENTIFIER') == JOURNAL_IDENTIFIER:
-                        earliest_ts = entry.get('__REALTIME_TIMESTAMP')
-                        if earliest_ts:
-                            earliest = earliest_ts.timestamp()  # UTC timestamp
-                        break
-                    if earliest_count > 10000:
-                        break
+                entry = j.get_next()
+                if entry:
+                    earliest_ts = entry.get('__REALTIME_TIMESTAMP')
+                    if earliest_ts:
+                        earliest = earliest_ts.timestamp()
 
-                # Get latest timestamp
+                # Get latest timestamp - just the last entry
                 j.seek_tail()
                 latest = None
-                latest_count = 0
-                # Read backwards until we find a match
-                for entry in j:
-                    latest_count += 1
-                    if entry.get('SYSLOG_IDENTIFIER') == JOURNAL_IDENTIFIER:
-                        latest_ts = entry.get('__REALTIME_TIMESTAMP')
-                        if latest_ts:
-                            latest = latest_ts.timestamp()  # UTC timestamp
-                        break
-                    if latest_count > 1000:
-                        break
+                entry = j.get_previous()
+                if entry:
+                    latest_ts = entry.get('__REALTIME_TIMESTAMP')
+                    if latest_ts:
+                        latest = latest_ts.timestamp()
 
+                j.close()
                 return earliest, latest
 
             earliest, latest = await asyncio.to_thread(_get_range)
@@ -7364,8 +7369,10 @@ class WebController(Controller):
                 source: source
             });
 
-            // Sort
-            logBuffer.sort((a, b) => a.timestamp - b.timestamp);
+            // Sort periodically - only every 100 logs (logs arrive near-chronologically)
+            if (logBuffer.length % 100 === 0) {
+                logBuffer.sort((a, b) => a.timestamp - b.timestamp);
+            }
 
             // Add to DOM if it passes filters
             if (shouldDisplayLog(message)) {

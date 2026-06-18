@@ -12,11 +12,19 @@ All credit goes to Chris Dzombak and those who helped him compile the guide.  Th
   sudo reboot now
   ```
 
-- Disable the swap file with:
+- Disable the swap file (new mechanism on Trixie) with:
 
   ```
-  sudo swapoff -a
-  sudo systemctl mask swap.target
+  sudo systemctl stop rpi-zram-writeback.service rpi-zram-writeback.timer
+  sudo systemctl mask rpi-zram-writeback.service rpi-zram-writeback.timer
+  sudo systemctl stop dev-zram0.swap
+  sudo systemctl disable rpi-zram-writeback.service rpi-zram-writeback.timer
+  sudo systemctl disable dev-zram0.swap
+  sudo systemctl mask dev-zram0.swap
+  sudo systemctl stop systemd-zram-setup@zram0.service
+  sudo systemctl mask systemd-zram-setup@zram0.service
+  sudo swapoff /dev/zram0
+  swapon --show
   ```
 
 - Reboot and verify that the swap file has gone by running:

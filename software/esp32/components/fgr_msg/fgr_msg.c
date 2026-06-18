@@ -443,16 +443,24 @@ static void socket_reconnect_cb(int sock, void *param)
                                                        FGR_SOCKET_TCP_KEEP_ALIVE_PROBE_INTERVAL_SECONDS,
                                                        FGR_SOCKET_TCP_KEEP_ALIVE_COUNT);
         if (err != ESP_OK) {
-            ESP_LOGW(TAG, "fgr_socket_enable_tcp_keep_alive() returned error: %s.", esp_err_to_name(err));
+            ESP_LOGW(TAG, "fgr_socket_enable_tcp_keep_alive() returned error: %s.", esp_err_to_name(-err));
         }
         err = fgr_socket_enable_tcp_no_delay(sock);
         if (err != ESP_OK) {
-            ESP_LOGW(TAG, "fgr_socket_enable_tcp_no_delay() returned error: %s.", esp_err_to_name(err));
+            ESP_LOGW(TAG, "fgr_socket_enable_tcp_no_delay() returned error: %s.", esp_err_to_name(-err));
         }
         fgr_metrics_event_bool_set(FGR_METRIC_EVENT_BOOL_CONTROLLER_CONNECTION, true, 0);
 
         context->sock = sock;
         context->connected = true;
+
+        if (context->context_rx) {
+            err = fgr_socket_receive_resume(sock, &context->context_rx);
+            if (err != ESP_OK) {
+                ESP_LOGW(TAG, "fgr_socket_receive_resume() returned error: %s.", esp_err_to_name(-err));
+            }
+        }
+
         // Set the debug LED back to normal
         fgr_debug_led_breathe_set(FGR_DEBUG_LED_COLOUR_NONE);
 
@@ -464,7 +472,22 @@ static void socket_reconnect_cb(int sock, void *param)
 // connection has gone down.
 static void socket_down_cb(void *param)
 {
-    (void) param;
+    context_t *context = (context_t *) param;
+
+    if (context->lock) {
+
+        CONTEXT_LOCK(context->lock, "socket_down_cb()");
+
+        if (context->context_rx) {
+            // Suspend receives
+            int32_t err = fgr_socket_receive_suspend(&context->context_rx);
+            if (err != ESP_OK) {
+                ESP_LOGW(TAG, "fgr_socket_receive_suspend() returned error: %s.", esp_err_to_name(-err));
+            }
+        }
+
+        CONTEXT_UNLOCK(context->lock, "socket_down_cb()");
+    }
 
     // Make the debug LED breathe an appropriate colour
     fgr_debug_led_breathe_set(FGR_DEBUG_LED_COLOUR_BAD);

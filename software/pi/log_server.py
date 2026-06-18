@@ -76,7 +76,7 @@ class FGRLogServer:
 
         # Initialize LibLogger
         self.lib_logger = LibLogger()
-        self.lib_logger.init(self.db_path)
+        self.lib_logger.init(self.db_path, retention_days=7, enable_trim=True)
 
         # Server state
         self.server_socket: Optional[socket.socket] = None

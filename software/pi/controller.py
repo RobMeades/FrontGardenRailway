@@ -723,7 +723,7 @@ class Controller:
                 # Try to shutdown gracefully first
                 node.sock.shutdown(socket.SHUT_RDWR)
             except Exception as e:
-                # Ignore errors on shutdown - socket might already be closed
+                # Ignore errors - socket might already be closed
                 self.logger.debug(f"Error during socket shutdown for {node.identifier()}: {e}")
             try:
                 node.sock.close()
@@ -908,14 +908,15 @@ class Controller:
                         # Close the old socket (after thread has finished)
                         old_sock = node.sock
                         node.sock = None
-                        try:
-                            old_sock.shutdown(socket.SHUT_RDWR)
-                        except Exception as e:
-                            self.logger.debug(f"Error shutting down old socket: {e}")
-                        try:
-                            old_sock.close()
-                        except Exception as e:
-                            self.logger.debug(f"Error closing old socket: {e}")
+                        if old_sock:
+                            try:
+                                old_sock.shutdown(socket.SHUT_RDWR)
+                            except Exception as e:
+                                self.logger.debug(f"Error shutting down old socket: {e}")
+                            try:
+                                old_sock.close()
+                            except Exception as e:
+                                self.logger.debug(f"Error closing old socket: {e}")
 
                         # Clear pending requests
                         for ref, q in node.pending_requests.items():

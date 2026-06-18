@@ -128,6 +128,8 @@ class LibLogger:
             self._attached_handlers = []  # Track attached handlers for cleanup
             self._db_conn = None
             self._db_conn_lock = threading.Lock()
+            self.RETENTION_DAYS = None  # Default to None (no trimming)
+            self.ENABLE_TRIM = False
 
             # Shared buffer for log_ids (deque is thread-safe for append/popleft)
             self.log_id_buffer = collections.deque()
@@ -137,13 +139,20 @@ class LibLogger:
             self.BUFFER_RESERVE_SIZE = 2000
             self.BUFFER_REFILL_THRESHOLD = 1000
 
-    def init(self, db_path: Optional[Path] = None) -> None:
+    def init(self, db_path: Optional[Path] = None, retention_days: int = None, enable_trim: bool = False) -> None:
         if self._initialized:
             return
+
+        self.RETENTION_DAYS = retention_days
+        self.ENABLE_TRIM = enable_trim
 
         if db_path:
             self.db_path = Path(db_path)
             print(f"[LibLogger] Database mode enabled: {self.db_path}")
+            if retention_days is not None:
+                print(f"[LibLogger] Retention: {retention_days} days")
+            else:
+                print("[LibLogger] Retention: unlimited (no trimming)")
             self._init_tables()
             self._start_writer_thread()
 
@@ -168,7 +177,7 @@ class LibLogger:
         """Create a temporary database connection WITH auto-commit"""
         conn = sqlite3.connect(str(self.db_path), timeout=5.0, isolation_level=None)
         conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA synchronous=OFF")
         return conn
 
     def _get_connection(self):
@@ -177,7 +186,7 @@ class LibLogger:
             if self._db_conn is None:
                 self._db_conn = sqlite3.connect(str(self.db_path), timeout=5.0, isolation_level=None)
                 self._db_conn.execute("PRAGMA journal_mode=WAL")
-                self._db_conn.execute("PRAGMA synchronous=NORMAL")
+                self._db_conn.execute("PRAGMA synchronous=OFF")
                 self._db_conn.execute("PRAGMA busy_timeout=10000")
             return self._db_conn
 
@@ -349,7 +358,72 @@ class LibLogger:
                     if "locked" in str(e) and attempt < 2:
                         time.sleep(0.05 * (2 ** attempt))
                         continue
-                    raise
+                        raise
+
+    def trim_old_logs(self, days: int = 7, batch_size: int = 1000) -> int:
+        """
+        Delete logs older than the specified number of days.
+        Deletes in small batches to avoid blocking the database.
+        Returns the total number of rows deleted.
+        """
+        if self.db_path is None:
+            return 0
+
+        try:
+            conn = self._get_temp_connection()
+        except Exception as e:
+            print(f"[LibLogger] ERROR: Could not connect to database for trim: {e}")
+            return 0
+
+        total_deleted = 0
+
+        try:
+            cursor = conn.cursor()
+            cutoff = time.time() - (days * 86400)
+
+            print(f"[LibLogger] Trimming logs older than {days} days")
+
+            while True:
+                try:
+                    cursor.execute(
+                        "DELETE FROM logs WHERE log_id IN "
+                        "(SELECT log_id FROM logs WHERE epoch_time < ? LIMIT ?)",
+                        (cutoff, batch_size)
+                    )
+                    deleted = cursor.rowcount
+                    total_deleted += deleted
+
+                    if deleted < batch_size:
+                        break
+
+                    time.sleep(0.1)
+
+                except sqlite3.OperationalError as e:
+                    # Database locked - retry after a short pause
+                    if "locked" in str(e).lower():
+                        print(f"[LibLogger] Trim: database locked, retrying...")
+                        time.sleep(0.5)
+                        continue
+                    else:
+                        print(f"[LibLogger] ERROR: Trim operation failed: {e}")
+                        break
+                except Exception as e:
+                    print(f"[LibLogger] ERROR: Trim operation failed: {e}")
+                    break
+
+            if total_deleted > 0:
+                print(f"[LibLogger] Trimmed {total_deleted} logs older than {days} days")
+
+            return total_deleted
+
+        except Exception as e:
+            print(f"[LibLogger] ERROR: Trim failed: {e}")
+            return total_deleted
+        finally:
+            try:
+                conn.close()
+            except Exception as e:
+                print(f"[LibLogger] ERROR: Could not close database connection: {e}")
 
     def _get_next_log_id(self) -> int:
         """Get next log_id from buffer - called by ANY thread."""
@@ -387,10 +461,12 @@ class LibLogger:
             batch_count = 0
             last_flush_time = time.time()
             last_buffer_check = time.time()
+            last_trim_time = time.time()
 
-            MAX_BATCH_SIZE = 100
-            FLUSH_INTERVAL = 1.0
+            MAX_BATCH_SIZE = 500
+            FLUSH_INTERVAL = 5.0
             BUFFER_CHECK_INTERVAL = 1.0
+            TRIM_INTERVAL = 86400  # 24 hours
 
             while not self._stop_writer.is_set():
                 now = time.time()
@@ -405,6 +481,17 @@ class LibLogger:
                         except Exception as e:
                             print(f"[LibLogger] Buffer refill failed: {e}")
                     last_buffer_check = now
+
+                # Trim old logs once per day - only if enabled and retention set
+                if self.ENABLE_TRIM and self.RETENTION_DAYS is not None and (now - last_trim_time >= TRIM_INTERVAL):
+                    try:
+                        deleted = self.trim_old_logs(days=self.RETENTION_DAYS)
+                        if deleted > 0:
+                            print(f"[LibLogger] Daily trim: removed {deleted} old logs")
+                        last_trim_time = now
+                    except Exception as e:
+                        print(f"[LibLogger] ERROR: Daily trim failed: {e}")
+                        # Continue running - don't stop the writer thread
 
                 try:
                     query, params = self.write_queue.get(timeout=0.1)

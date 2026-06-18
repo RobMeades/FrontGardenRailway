@@ -22,10 +22,11 @@ import sys
 import signal
 import time
 import subprocess
-import tempfile
 import os
 import re
-from datetime import datetime, timedelta
+import csv
+import io
+from datetime import datetime
 
 DATABASE_PATH = "/mnt/ssd/logs.db"
 
@@ -65,79 +66,25 @@ def parse_date(date_str):
 
     raise ValueError(f"Unable to parse date: '{date_str}'. Use format YYYY-MM-DD or YYYY-MM-DD HH:MM")
 
-def extract_esp_timestamp(message):
-    """Extract ESP-IDF timestamp from message if present.
-    ESP-IDF format: "I (1234) tag: message" where 1234 is milliseconds since boot.
+def format_timestamp(timestamp_str):
     """
-    # Look for pattern like "W (9115083)" or "I (9122073)"
-    match = re.search(r'[A-Z] \((\d+)\)', message)
-    if match:
-        return int(match.group(1))
-    return None
-
-def calibrate_node_time(rows, debug=False):
+    Format a timestamp string consistently.
+    Handles "2026-06-17T21:23:13.741828Z" format.
+    Returns "YYYY-MM-DD HH:MM:SS.mmm" (3 decimal places).
     """
-    Calibrate ESP timestamps to real time.
-    ESP timestamps are in milliseconds since boot.
-    Returns a dict with node_ip -> boot_time (datetime object)
-    """
-    calibration = {}
-    node_data = {}
+    # Remove 'Z' and replace 'T' with space if present
+    clean_ts = timestamp_str.replace('Z', '').replace('T', ' ')
 
-    for row in rows:
-        timestamp, tag, msg_type, message, node_ip = row
-        esp_ts = extract_esp_timestamp(message)
-
-        if esp_ts is not None:
-            try:
-                # Parse the server timestamp
-                server_time_str = timestamp.replace('T', ' ').replace('Z', '')
-                if '.' in server_time_str:
-                    server_time = datetime.strptime(server_time_str, "%Y-%m-%d %H:%M:%S.%f")
-                else:
-                    server_time = datetime.strptime(server_time_str, "%Y-%m-%d %H:%M:%S")
-
-                if node_ip not in node_data:
-                    node_data[node_ip] = []
-                node_data[node_ip].append((esp_ts, server_time))
-            except ValueError:
-                debug_print(debug, f"Could not parse server timestamp: {timestamp}")
-                continue
-
-    for node_ip, samples in node_data.items():
-        if not samples:
-            continue
-
-        # Sort by ESP timestamp to find the earliest sample (closest to boot)
-        samples.sort(key=lambda x: x[0])
-
-        # Use the earliest sample for calibration
-        esp_ts_ms, server_time = samples[0]
-
-        # ESP timestamps are in milliseconds since boot
-        esp_seconds = esp_ts_ms / 1000.0
-
-        # Calculate boot time: server_time - esp_seconds
-        boot_time = server_time - timedelta(seconds=esp_seconds)
-
-        calibration[node_ip] = boot_time
-
-        debug_print(debug, f"Calibrated {node_ip}: boot_time={boot_time}, esp_ts={esp_ts_ms}ms")
-
-    return calibration
-
-def adjust_timestamp(server_timestamp, message, calibration, node_ip):
-    """Adjust the timestamp if calibration is available."""
-    esp_ts = extract_esp_timestamp(message)
-
-    if esp_ts is not None and node_ip in calibration:
-        boot_time = calibration[node_ip]
-        esp_seconds = esp_ts / 1000.0  # Convert milliseconds to seconds
-        real_time = boot_time + timedelta(seconds=esp_seconds)
-        return real_time.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]  # Keep 3 decimal places
-
-    # Fall back to server timestamp
-    return server_timestamp
+    # Try to parse with microseconds
+    try:
+        if '.' in clean_ts:
+            dt = datetime.strptime(clean_ts, "%Y-%m-%d %H:%M:%S.%f")
+        else:
+            dt = datetime.strptime(clean_ts, "%Y-%m-%d %H:%M:%S")
+        return dt.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]  # Keep 3 decimal places
+    except ValueError:
+        # If parsing fails, return as-is
+        return timestamp_str
 
 def ensure_index_exists(db_path, debug=False):
     """Check if the composite index exists and create it if it doesn't."""
@@ -194,8 +141,8 @@ def ensure_index_exists(db_path, debug=False):
 
 def run_sqlite_query(db_path, query, params, timeout_seconds, debug=False):
     """Run a SQLite query in a subprocess with timeout."""
-    # Build the command with parameters
-    cmd = ['sqlite3', db_path]
+    # Use CSV mode with proper quoting to handle special characters in messages
+    cmd = ['sqlite3', '-csv', db_path]
 
     # Add each parameter as a .param set command
     for i, param in enumerate(params):
@@ -226,12 +173,11 @@ def run_sqlite_query(db_path, query, params, timeout_seconds, debug=False):
         if process.returncode != 0:
             raise Exception(f"SQLite error (code {process.returncode}): {stderr}")
 
-        # Parse output - each line is a row with pipe-separated values
+        # Parse CSV output with proper quoting
         if stdout.strip():
             rows = []
-            for line in stdout.strip().split('\n'):
-                # Split by '|' (sqlite3 default separator)
-                row = line.split('|')
+            reader = csv.reader(io.StringIO(stdout))
+            for row in reader:
                 rows.append(tuple(row))
             return rows
         else:
@@ -273,23 +219,26 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=f"""
 Examples:
-  {sys.argv[0]} 10.10.3.2                    # Show all logs for node 10.10.3.2
-  {sys.argv[0]} 10.10.3.2 -c                 # Show logs for node + controller
-  {sys.argv[0]} 10.10.3.2 -n 50              # Show last 50 logs for node
-  {sys.argv[0]} 10.10.3.2 -c -n 100          # Show last 100 logs for node + controller
-  {sys.argv[0]} 10.10.3.2 -s "2026-06-01"    # Show logs from June 1, 2026 onwards
-  {sys.argv[0]} 10.10.3.2 -s "2026-06-01 10:00" -e "2026-06-01 18:00"  # Time range
-  {sys.argv[0]} 10.10.3.2 -a                 # Adjust timestamps to real time using ESP timestamps
+  {sys.argv[0]}                              # Show all logs from all nodes
+  {sys.argv[0]} --node 10.10.3.2             # Show logs for node 10.10.3.2
+  {sys.argv[0]} --node 10.10.3.2 -c          # Show logs for node + controller
+  {sys.argv[0]} --node 10.10.3.2 -n 50       # Show last 50 logs for node
+  {sys.argv[0]} -s "2026-06-01"              # Show all logs from June 1, 2026 onwards
+  {sys.argv[0]} -s "2026-06-01 10:00" -e "2026-06-01 18:00"  # Time range
 
 Note: First run may require sudo to create an index for better performance.
       This is a one-time setup - subsequent runs will not need sudo.
+
+      For queries without --node (all nodes), performance may be slower.
+      Use --count or date filters to limit results.
         """
     )
 
     parser.add_argument(
-        "ip",
+        "--node", "-i",
         type=str,
-        help="Target node IP address to filter logs by (e.g., 10.10.3.2)"
+        default=None,
+        help="Target node IP address to filter logs by (e.g., 10.10.3.2). If not specified, shows all nodes."
     )
 
     parser.add_argument(
@@ -328,13 +277,6 @@ Note: First run may require sudo to create an index for better performance.
     )
 
     parser.add_argument(
-        "-a",
-        action="store_true",
-        default=False,
-        help="Adjust timestamps to real time using ESP-IDF timestamps (calibrates against server arrival time)"
-    )
-
-    parser.add_argument(
         "--timeout", "-t",
         type=int,
         default=30,
@@ -367,48 +309,28 @@ Note: First run may require sudo to create an index for better performance.
         print(f"To optimize, run with sudo once to create the index.", file=sys.stderr)
         print(f"", file=sys.stderr)
 
-    # First, do a quick check to see if we have any data for this IP
-    try:
-        debug_print(args.debug, "Performing quick count check...")
-        quick_conn = sqlite3.connect(args.db)
-        quick_conn.execute("PRAGMA cache_size = 10000")
-        quick_cursor = quick_conn.cursor()
-
-        # Quick count to see if IP exists
-        if args.c:
-            quick_cursor.execute("SELECT COUNT(*) FROM logs WHERE node_ip IN (?, '0.0.0.0')", (args.ip,))
-        else:
-            quick_cursor.execute("SELECT COUNT(*) FROM logs WHERE node_ip = ?", (args.ip,))
-        count = quick_cursor.fetchone()[0]
-        quick_conn.close()
-
-        debug_print(args.debug, f"Found {count} total rows for this IP")
-
-        if count == 0:
-            ip_display = f"{args.ip} (plus controller)" if args.c else args.ip
-            print(f"No log records found for {ip_display} in {args.db}")
-            return
-
-        # If count is large, warn user
-        if count > 10000 and args.count is None:
-            print(f"Warning: Found {count} rows for this IP. Consider using --count to limit results.", file=sys.stderr)
-
-    except Exception as e:
-        debug_print(args.debug, f"Quick check failed: {e}")
-
     # Build the query
     where_conditions = []
     params = []
 
-    # IP filter
-    if args.c:
-        debug_print(args.debug, f"Including controller logs (0.0.0.0) for IP: {args.ip}")
-        where_conditions.append("node_ip IN (?, '0.0.0.0')")
-        params.append(args.ip)
+    # IP filter - if node is specified, filter by it, otherwise show all
+    if args.node:
+        if args.c:
+            debug_print(args.debug, f"Including controller logs (0.0.0.0) for IP: {args.node}")
+            where_conditions.append("node_ip IN (?, '0.0.0.0')")
+            params.append(args.node)
+        else:
+            debug_print(args.debug, f"Filtering for node IP: {args.node}")
+            where_conditions.append("node_ip = ?")
+            params.append(args.node)
     else:
-        debug_print(args.debug, f"Filtering for node IP: {args.ip}")
-        where_conditions.append("node_ip = ?")
-        params.append(args.ip)
+        if args.c:
+            debug_print(args.debug, "Showing all nodes including controller logs")
+            # Always true, but we need to include controller logs
+            where_conditions.append("(node_ip != '0.0.0.0' OR node_ip = '0.0.0.0')")
+        else:
+            debug_print(args.debug, "Showing all nodes (excluding controller)")
+            where_conditions.append("node_ip != '0.0.0.0'")
 
     # Date range filters
     if start_dt:
@@ -426,8 +348,8 @@ Note: First run may require sudo to create an index for better performance.
     # Build the complete WHERE clause
     where_clause = " AND ".join(where_conditions)
 
-    # Build the query - use INDEXED BY if the index exists, otherwise let SQLite decide
-    if index_exists:
+    # Build the query - use INDEXED BY if we have a specific node (for the composite index)
+    if index_exists and args.node:
         query = f"""
             SELECT timestamp_utc, log_tag, message_type, message, node_ip
             FROM logs INDEXED BY idx_logs_node_ip_epoch
@@ -436,13 +358,14 @@ Note: First run may require sudo to create an index for better performance.
         """
         debug_print(args.debug, "Using composite index idx_logs_node_ip_epoch")
     else:
+        # For all-nodes queries, use a simpler query with the epoch index
         query = f"""
             SELECT timestamp_utc, log_tag, message_type, message, node_ip
             FROM logs
             WHERE {where_clause}
             ORDER BY epoch_time DESC
         """
-        debug_print(args.debug, "Composite index not available - using default query plan")
+        debug_print(args.debug, "Using default query plan (no node filter - may be slower)")
 
     # Append LIMIT clause
     if args.count is not None:
@@ -457,6 +380,17 @@ Note: First run may require sudo to create an index for better performance.
     debug_print(args.debug, "PARAMETERS:")
     debug_print(args.debug, params)
     debug_print(args.debug, "=" * 60)
+
+    # Warn about performance for all-nodes queries
+    if not args.node and args.count is None:
+        print("\n" + "=" * 70, file=sys.stderr)
+        print("INFO: Querying all nodes without a --node filter or --count limit.", file=sys.stderr)
+        print("This may be slow on large databases.", file=sys.stderr)
+        print("To speed up:", file=sys.stderr)
+        print("  - Use --node to filter by a specific IP", file=sys.stderr)
+        print("  - Use --count to limit results (e.g., -n 1000)", file=sys.stderr)
+        print("  - Add date filters with -s and -e", file=sys.stderr)
+        print("=" * 70 + "\n", file=sys.stderr)
 
     # Execute query in subprocess with timeout
     print(f"Executing query (timeout: {args.timeout}s)... Press Ctrl+C to cancel", file=sys.stderr)
@@ -490,7 +424,16 @@ Note: First run may require sudo to create an index for better performance.
         stop_spinner = True
         spinner_thread.join(timeout=0.5)
         print(f"\nQuery timed out after {args.timeout} seconds.", file=sys.stderr)
-        if not index_exists:
+        if not args.node:
+            print("\n" + "=" * 70, file=sys.stderr)
+            print("The query timed out because it's scanning all nodes.", file=sys.stderr)
+            print("Try:", file=sys.stderr)
+            print("  1. Use --node to filter by a specific IP", file=sys.stderr)
+            print("  2. Use --count to limit results: -n 1000", file=sys.stderr)
+            print("  3. Add date filters: -s '2026-06-17' -e '2026-06-17 12:00'", file=sys.stderr)
+            print("  4. Increase timeout: --timeout 120", file=sys.stderr)
+            print("=" * 70, file=sys.stderr)
+        elif not index_exists:
             print("\n" + "=" * 70, file=sys.stderr)
             print("The query is slow because the composite index is missing.", file=sys.stderr)
             print("Please create it with:", file=sys.stderr)
@@ -514,7 +457,10 @@ Note: First run may require sudo to create an index for better performance.
     debug_print(args.debug, f"Query took {elapsed_time:.2f} seconds")
 
     if not rows:
-        ip_display = f"{args.ip} (plus controller)" if args.c else args.ip
+        if args.node:
+            ip_display = f"{args.node} (plus controller)" if args.c else args.node
+        else:
+            ip_display = "all nodes (plus controller)" if args.c else "all nodes (excluding controller)"
         print(f"\nNo log records found for {ip_display} in {args.db}")
         if start_dt or end_dt:
             date_range = []
@@ -525,47 +471,30 @@ Note: First run may require sudo to create an index for better performance.
             print(f"Date filter: {' '.join(date_range)}")
         return
 
-    # If -c is specified without -a, warn about timestamp offsets
-    if args.c and not args.a:
-        print("\n" + "=" * 70, file=sys.stderr)
-        print("WARNING: You are viewing both node and controller logs.", file=sys.stderr)
-        print("Node timestamps are server arrival times, controller timestamps are", file=sys.stderr)
-        print("generation times. They may not be aligned.", file=sys.stderr)
-        print("Try using the -a flag to adjust node timestamps to real time", file=sys.stderr)
-        print("using ESP-IDF timestamps embedded in the log messages.", file=sys.stderr)
-        print("=" * 70 + "\n", file=sys.stderr)
-
-    # Calibrate timestamps if -a is specified
-    calibration = None
-    if args.a:
-        debug_print(args.debug, "Calibrating ESP timestamps to real time...")
-        calibration = calibrate_node_time(rows, args.debug)
-        if calibration:
-            debug_print(args.debug, f"Calibrated {len(calibration)} nodes")
-        else:
-            print("Warning: No ESP timestamps found in messages - using server timestamps", file=sys.stderr)
-
     # Header - just a simple summary
     print(f"\nQuery completed in {elapsed_time:.2f} seconds, {len(rows)} entries", file=sys.stderr)
+    if args.node:
+        print(f"Node: {args.node}", file=sys.stderr)
+    else:
+        print(f"Node: ALL", file=sys.stderr)
     if start_dt:
         print(f"From: {start_dt.strftime('%Y-%m-%d %H:%M:%S')}", file=sys.stderr)
     if end_dt:
         print(f"To:   {end_dt.strftime('%Y-%m-%d %H:%M:%S')}", file=sys.stderr)
-    if args.a and calibration:
-        print(f"Node timestamps adjusted to real time using ESP-IDF calibration", file=sys.stderr)
     print("", file=sys.stderr)
 
     # Determine the maximum width needed for the source field
-    # This ensures all sources align nicely for column-select editing
     max_source_width = 15  # Minimum width
     sources = set()
     for row in rows:
-        _, _, _, _, node_ip = row
-        if args.c and node_ip == '0.0.0.0':
-            source = "CONTROLLER"
-        else:
-            source = node_ip
-        sources.add(source)
+        if len(row) >= 5:
+            node_ip = row[4]
+
+            if args.c and node_ip == '0.0.0.0':
+                source = "CONTROLLER"
+            else:
+                source = node_ip
+            sources.add(source)
 
     for source in sources:
         max_source_width = max(max_source_width, len(source))
@@ -575,7 +504,15 @@ Note: First run may require sudo to create an index for better performance.
 
     # Reverse rows to print in ascending chronological order (oldest -> newest)
     for row in reversed(rows):
-        timestamp, tag, msg_type, message, node_ip = row
+        if len(row) < 5:
+            debug_print(args.debug, f"Skipping row with insufficient columns: {len(row)}")
+            continue
+
+        timestamp = row[0]
+        tag = row[1]
+        msg_type = row[2]
+        message = row[3]
+        node_ip = row[4]
 
         # Determine source label
         if args.c and node_ip == '0.0.0.0':
@@ -586,22 +523,10 @@ Note: First run may require sudo to create an index for better performance.
         # Get severity character
         severity = get_severity_char(tag, msg_type)
 
-        # Adjust timestamp if calibration is available
-        if args.a and calibration and node_ip in calibration:
-            # Adjust the timestamp using ESP-IDF calibration
-            display_time = adjust_timestamp(timestamp, message, calibration, node_ip)
-        else:
-            # Format server timestamp to be more compact
-            display_time = timestamp
-            if 'T' in display_time:
-                display_time = display_time.replace('T', ' ').replace('Z', '')
-                # Truncate microseconds to 3 digits
-                if '.' in display_time:
-                    parts = display_time.split('.')
-                    display_time = parts[0] + '.' + parts[1][:3]
+        # Format timestamp consistently
+        display_time = format_timestamp(timestamp)
 
         # Right-pad the source to the maximum width for column alignment
-        # This makes it easy for column-select editors
         source_padded = source.ljust(max_source_width)
 
         # Print in simple format: timestamp | source | severity | message
