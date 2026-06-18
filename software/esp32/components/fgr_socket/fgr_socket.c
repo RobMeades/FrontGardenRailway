@@ -983,11 +983,13 @@ void fgr_socket_receive_stop(void **context)
         context_rx_t *context_rx = (context_rx_t *) *context;
         if (context_rx && context_rx->lock) {
 
+            if (context_rx->task_handle) {
+                // Need to do this before taking the lock or we
+                // will lock-up the task exit
+                fgr_task_destroy(context_rx->task_handle);
+                context_rx->task_handle = NULL;
+            }
             CONTEXT_LOCK(context_rx->lock, "fgr_socket_receive_stop()");
-
-            fgr_task_destroy(context_rx->task_handle);
-            context_rx->task_handle = NULL;
-
             CONTEXT_UNLOCK(context_rx->lock, "fgr_socket_receive_stop()");
             vSemaphoreDelete(context_rx->lock);
             free(*context);
