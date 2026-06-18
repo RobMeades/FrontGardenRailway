@@ -19,7 +19,9 @@
 # watch -n 10 ./performance_check.sh
 # Quick status check for FGR system
 
-echo "=== FGR System Performance Check ==="
+LAG_FILE="/tmp/lag_stats.txt"
+
+echo "=== FGR System Status ==="
 echo "Time: $(date)"
 echo ""
 
@@ -30,6 +32,21 @@ P=$(journalctl --identifier=python -n 1 --output=short-iso 2>/dev/null | awk "{p
 if [ -n "$J" ] && [ -n "$P" ]; then
     LAG=$(($(date -d "$P" +%s) - $(date -d "$J" +%s)))
     echo "Lag: ${LAG}s"
+
+    # Track min/max lag
+    if [ ! -f "$LAG_FILE" ]; then
+        echo "$LAG" > "$LAG_FILE"
+        echo "$LAG" >> "$LAG_FILE"
+        MIN=$LAG
+        MAX=$LAG
+    else
+        MIN=$(sort -n "$LAG_FILE" | head -1)
+        MAX=$(sort -n "$LAG_FILE" | tail -1)
+        if [ $LAG -lt $MIN ]; then MIN=$LAG; fi
+        if [ $LAG -gt $MAX ]; then MAX=$LAG; fi
+        echo "$LAG" >> "$LAG_FILE"
+    fi
+    echo "Min lag: ${MIN}s, Max lag: ${MAX}s"
 else
     echo "Lag: N/A (no logs)"
 fi
