@@ -7124,9 +7124,10 @@ class WebController(Controller):
 
             return new Promise(async (resolve, reject) => {
                 try {
-                    console.log('[DEBUG] fetchAndScrollToTimestamp: about to fetch /api/journal/query');
-                    console.time('fetchAndScrollToTimestamp: journal_query');
-                    const response = await fetch('/api/journal/query', {
+                    // -------- Step 1: Initial query (500/500) --------
+                    console.log('[DEBUG] fetchAndScrollToTimestamp: Step 1 - initial query (500/500)');
+                    console.time('fetchAndScrollToTimestamp: step1_journal_query');
+                    const response1 = await fetch('/api/journal/query', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
@@ -7135,35 +7136,92 @@ class WebController(Controller):
                             after: 500
                         })
                     });
-                    const data = await response.json();
-                    console.log(`[DEBUG] fetchAndScrollToTimestamp: journal query completed, logs=${data.logs?.length}`);
-                    console.timeEnd('fetchAndScrollToTimestamp: journal_query');
+                    const data1 = await response1.json();
+                    console.timeEnd('fetchAndScrollToTimestamp: step1_journal_query');
+                    console.log(`[DEBUG] fetchAndScrollToTimestamp: Step 1 returned ${data1.logs?.length} logs`);
 
-                    if (data.status === 'ok' && data.logs && data.logs.length > 0) {
-                        console.log(`[DEBUG] fetchAndScrollToTimestamp: processing ${data.logs.length} logs`);
-                        const newLogs = data.logs;
-                        const filteredNewLogs = newLogs.filter(log => shouldDisplayLog(log.message));
-                        console.log(`[DEBUG] fetchAndScrollToTimestamp: after filter: ${filteredNewLogs.length} logs`);
-                        const uniqueNewLogs = filterUniqueLogs(filteredNewLogs);
-                        console.log(`[DEBUG] fetchAndScrollToTimestamp: after dedup: ${uniqueNewLogs.length} logs`);
-
-                        if (uniqueNewLogs.length > 0) {
-                            console.log('[DEBUG] fetchAndScrollToTimestamp: queueing ADD_HISTORICAL_BATCH');
-                            console.time('fetchAndScrollToTimestamp: queue_operation');
-                            await queueDebugViewOperation(DebugViewOperation.ADD_HISTORICAL_BATCH, {
-                                logs: uniqueNewLogs,
-                                targetLogId: targetLogId,
-                                direction: direction
-                            });
-                            console.timeEnd('fetchAndScrollToTimestamp: queue_operation');
-                        } else {
-                            console.log('[DEBUG] fetchAndScrollToTimestamp: uniqueNewLogs is empty, skipping queue');
-                        }
-                    } else {
+                    // Check if we have any logs
+                    if (data1.status !== 'ok' || !data1.logs || data1.logs.length === 0) {
                         console.log('[DEBUG] fetchAndScrollToTimestamp: no logs returned from journal');
+                        console.timeEnd('fetchAndScrollToTimestamp');
+                        resolve();
+                        return;
                     }
+
+                    // -------- Step 2: Check if target is in the results --------
+                    const logIds1 = data1.logs.map(log => log.log_id);
+                    const targetFound = logIds1.includes(targetLogId);
+
+                    let allLogs = data1.logs;
+
+                    if (targetFound) {
+                        console.log(`[DEBUG] fetchAndScrollToTimestamp: target log_id ${targetLogId} found in initial query`);
+                    } else {
+                        console.log(`[DEBUG] fetchAndScrollToTimestamp: target log_id ${targetLogId} NOT found, scanning forward`);
+
+                        // -------- Step 3: Determine the last timestamp from the response --------
+                        const lastLog = data1.logs[data1.logs.length - 1];
+                        const lastTimestamp = lastLog.timestamp;
+                        const lastLogId = lastLog.log_id;
+
+                        console.log(`[DEBUG] fetchAndScrollToTimestamp: last log in response: log_id=${lastLogId}, timestamp=${lastTimestamp}`);
+
+                        // If the target has a higher log_id than the last one, scan forward
+                        if (targetLogId > lastLogId) {
+                            console.log('[DEBUG] fetchAndScrollToTimestamp: target is after the last log, fetching more');
+
+                            // -------- Step 4: Fetch the next batch (starting from last timestamp) --------
+                            console.time('fetchAndScrollToTimestamp: step2_journal_query');
+                            const response2 = await fetch('/api/journal/query', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({
+                                    timestamp: lastTimestamp,
+                                    before: 0,
+                                    after: 1000  // Fetch more to cover the gap
+                                })
+                            });
+                            const data2 = await response2.json();
+                            console.timeEnd('fetchAndScrollToTimestamp: step2_journal_query');
+                            console.log(`[DEBUG] fetchAndScrollToTimestamp: Step 2 returned ${data2.logs?.length} logs`);
+
+                            if (data2.status === 'ok' && data2.logs && data2.logs.length > 0) {
+                                // Combine the results (skip the first log to avoid duplication, it's the same as lastLog)
+                                const additionalLogs = data2.logs.slice(1);
+                                allLogs = [...data1.logs, ...additionalLogs];
+                                console.log(`[DEBUG] fetchAndScrollToTimestamp: combined ${allLogs.length} logs`);
+                            } else {
+                                console.log('[DEBUG] fetchAndScrollToTimestamp: no additional logs returned');
+                            }
+                        } else {
+                            console.log('[DEBUG] fetchAndScrollToTimestamp: target is before the first log, not handled');
+                            // This case shouldn't happen based on our understanding (journal timestamp is always later)
+                        }
+                    }
+
+                    // -------- Step 5: Process the combined logs --------
+                    console.log(`[DEBUG] fetchAndScrollToTimestamp: processing ${allLogs.length} logs`);
+                    const filteredNewLogs = allLogs.filter(log => shouldDisplayLog(log.message));
+                    console.log(`[DEBUG] fetchAndScrollToTimestamp: after filter: ${filteredNewLogs.length} logs`);
+                    const uniqueNewLogs = filterUniqueLogs(filteredNewLogs);
+                    console.log(`[DEBUG] fetchAndScrollToTimestamp: after dedup: ${uniqueNewLogs.length} logs`);
+
+                    if (uniqueNewLogs.length > 0) {
+                        console.log('[DEBUG] fetchAndScrollToTimestamp: queueing ADD_HISTORICAL_BATCH');
+                        console.time('fetchAndScrollToTimestamp: queue_operation');
+                        await queueDebugViewOperation(DebugViewOperation.ADD_HISTORICAL_BATCH, {
+                            logs: uniqueNewLogs,
+                            targetLogId: targetLogId,
+                            direction: direction
+                        });
+                        console.timeEnd('fetchAndScrollToTimestamp: queue_operation');
+                    } else {
+                        console.log('[DEBUG] fetchAndScrollToTimestamp: uniqueNewLogs is empty, skipping queue');
+                    }
+
                     console.timeEnd('fetchAndScrollToTimestamp');
                     resolve();
+
                 } catch (e) {
                     console.error('[DEBUG] fetchAndScrollToTimestamp error:', e);
                     console.timeEnd('fetchAndScrollToTimestamp');
