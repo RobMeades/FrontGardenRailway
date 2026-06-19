@@ -81,28 +81,7 @@ I found the Pi Zero W on-board Wifi to be far too unstable, see these posts for 
 Hence I switched to a Pi Zero I happened to have spare (could also use a Pi Zero W and switch to `wlan1`) and plugged in an AR9271 USB Wifi dongle: be careful which you choose!  the TPLink AC600 (`rtl8811au` chipset) looks good but only one of the three Linux drivers (which you must build yourself for Linux kernel versions > 6.14 (Trixie is 6.12)) I tried worked and the working one did not support transmission of TIM information elements which are required for a standards-compliant Wifi AP (ESP32 refused to connect).  The AR9271 dongle is huge but is known to work with Linux which has built-in drivers for it.  It _will_ extend the restart time of the Network Manager service to several minutes, but what can you do...
 
 # AR9271 USB Wifi Driver Instability: Enable Pi Zero HW Watchdog
-And, whaddaya know, the `AR9271` driver has known instabilities also, instabilities which can crash the Linux kernel (`ath9k_htc_ani_work` de-referencing a NULL pointer), bless its little cotton socks.  The only way out of _this_ bind is to enable the HW watchdog on the Pi, which will at least boot the system back to life.  Do this with:
-
-```
-sudo apt update
-sudo apt install watchdog
-```
-
-...then `nano etc/watchdog.conf` and uncomment the lines `watchdog-device = /dev/watchdog` and `watchdog-timeout = 60` before starting and enable it with:
-
-```
-sudo systemctl start watchdog
-sudo systemctl enable watchdog
-```
-
-...the `sudo nano /boot/firmware/config.txt` and add to the end of it:
-
-```
-# Enable HW watchdog (make sure you have a watchdog service running _first_!)
-dtparam=watchdog=on
-```
-
-...then reboot.
+And, whaddaya know, the `AR9271` driver has known instabilities also, instabilities which can crash the Linux kernel (`ath9k_htc_ani_work` dereferencing a NULL pointer), bless its little cotton socks.  The only way out of _this_ is to rely on the watchdog which is already enabled on a Pi Zero by default.  Fingers crossed.
 
 # Broadcomm Driver Instability
 There appears to be [a\[nother\] bug](https://github.com/raspberrypi/linux/issues/6975) in the `brcmfmac` driver, in that the driver holds onto a station that has disconnected without notice for anywhere from 27 to 90+ seconds. No matter how many times the device boots up within this time, if it sends an association frame while that stale kernel window is active, the Pi completely ignores it.  Because the Pi ignores the frames indefinitely while the old session decays, the device connection times out, resulting in a persistent Wifi 201 error.  More details here:

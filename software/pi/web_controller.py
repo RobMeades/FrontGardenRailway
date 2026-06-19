@@ -979,7 +979,15 @@ class WebController(Controller):
                 if journal_ts_value:
                     age = time.time() - journal_ts_value
                     if age > 10:
-                        self._log_admin(f"Journal reader lag: {age:.1f}s behind (log_id={entry_dict.get('FGR_LOG_ID', '?')})")
+                        if not hasattr(process_entry, '_last_lag_report'):
+                            process_entry._last_lag_report = 0
+
+                        now = time.time()
+                        # Only report once every 60 seconds to avoid flooding
+                        # the journal and hence affecting the measurement
+                        if now - process_entry._last_lag_report > 60 or age > 300:
+                            self._log_admin(f"Journal reader lag: {age:.1f}s behind (log_id={entry_dict.get('FGR_LOG_ID', '?')})")
+                            process_entry._last_lag_report = now
 
                 source = entry_dict.get('FGR_SOURCE', '')
                 node_ip = entry_dict.get('FGR_NODE_IP', '')
