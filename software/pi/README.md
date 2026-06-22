@@ -1,10 +1,11 @@
 # Introduction
 This folder contains the Python scripts that run on the Raspberry Pi server of the front garden railway (plus one that runs on the build PC), plus explanatory `README.md`s describing how to set it up.
 
-- `pi_read_only_file_system.md`: how to set up the Raspberry Pi to have a read only SD card, for robustness to power just going away,
-- `pi_wifi_ap.md`: how to set up the Pi as a Wi-Fi access point,
-- `pi_wifi_dhcp_mac.md`: how to set up the Pi to do DHCP with static IP addresses for known things, and only allow known MAC addresses to connect,
-- `pi_installation.md`: how to install all of this properly on a Raspberry Pi Zero.
+- [`pi_read_only_file_system.md`](pi_read_only_file_system): how to set up the Raspberry Pi to have a read only SD card, for robustness to power just going away; DO THIS FIRST,
+- [`pi_wifi_ap.md`](pi_wifi_ap.md): how to set up the Pi as a Wi-Fi access point; DO THIS SECOND,
+- [`pi_wifi_dhcp_mac.md`](pi_wifi_dhcp_mac.md): how to set up the Pi to do DHCP with static IP addresses for known things, and only allow known MAC addresses to connect; DO THIS, UMMH, THIRDLY,
+- [`pi_services.md`](pi_services.md): how to install all of the services for the Front Garden Railway; DO THIS FOURTHRIGHTLY.
+- [`pi_installation.md`](pi_installation.md): how to install all of this properly on your network; DO THIS LAST.
 
 - `https_server.py`: the HTTPS server that provides OTA updates to the connected ESP32s and a small web dashboard to monitor what version they are running and switch nodes to development mode,
 - `binary_file_version.py`: a utility that extracts the version information from an ESP32 compiled binary file,

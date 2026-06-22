@@ -34,9 +34,14 @@
 #
 # ...to save a plot every minute
 
-CSV_FILE="/tmp/lag_stats.csv"
-LAG_FILE="/tmp/lag_stats.txt"
-STATUS_FILE="/tmp/fgr_status.json"
+# Output directory (survives reboot)
+OUTPUT_DIR="/mnt/ssd/monitoring"
+mkdir -p "$OUTPUT_DIR"
+
+CSV_FILE="$OUTPUT_DIR/lag_stats.csv"
+LAG_FILE="$OUTPUT_DIR/lag_stats.txt"
+STATUS_FILE="$OUTPUT_DIR/fgr_status.json"
+DIAG_LOG="$OUTPUT_DIR/diagnostics.log"
 
 # --- Parse arguments ---
 LOG_CSV=0
@@ -82,7 +87,7 @@ get_metrics() {
     fi
 
     RATE=$(journalctl --since "1 minute ago" 2>/dev/null | wc -l)
-    FREELIST=$(sudo sqlite3 /mnt/ssd/logs.db "PRAGMA freelist_count;" 2>/dev/null)
+    FREELIST=$(sqlite3 /mnt/ssd/logs.db "PRAGMA freelist_count;" 2>/dev/null)
     if [ -z "$FREELIST" ]; then
         FREELIST="-1"
     fi
@@ -153,7 +158,6 @@ if [ $WATCH_MODE -eq 1 ]; then
     MEM="${MEM_USED}/${MEM_TOTAL}"
 
     # Update min/max lag
-    LAG_FILE="/tmp/lag_stats.txt"
     if [ "$LAG" != "N/A" ] && [ "$LAG" -ge 0 ] 2>/dev/null; then
         if [ ! -f "$LAG_FILE" ]; then
             echo "$LAG" > "$LAG_FILE"
@@ -227,7 +231,7 @@ cat > "$STATUS_FILE" <<EOF
 }
 EOF
 
-# --- Track min/max lag (original behavior) ---
+# --- Track min/max lag ---
 if [ "$LAG" != "N/A" ] && [ "$LAG" -ge 0 ] 2>/dev/null; then
     if [ ! -f "$LAG_FILE" ]; then
         echo "$LAG" > "$LAG_FILE"
@@ -271,3 +275,56 @@ if [ -n "$FREELIST" ] && [ "$FREELIST" -gt 50000 ] 2>/dev/null; then
     echo "⚠️  WARNING: Freelist is $FREELIST - VACUUM recommended!"
     echo "   Schedule maintenance: sudo systemctl stop log_server; sudo sqlite3 /mnt/ssd/logs.db 'VACUUM;'; sudo systemctl start log_server"
 fi
+
+# --- DIAGNOSTICS (low impact, written every run) ---
+{
+echo "=== $(date -Iseconds) ==="
+
+echo "--- LOADAVG ---"
+cat /proc/loadavg 2>&1
+
+echo "--- TOP PROCESSES BY CPU ---"
+ps -eo pid,ppid,%cpu,%mem,state,args --sort=-%cpu --no-headers 2>/dev/null | head -15
+
+echo "--- D-STATE PROCESSES ---"
+ps -eo pid,state,wchan,cmd --no-headers 2>/dev/null | grep " D " | grep -v grep || echo "None"
+
+echo "--- LOG SERVER PROCESS ---"
+pgrep -f "log_server.py" -l 2>&1 || echo "Not found"
+for pid in $(pgrep -f "log_server.py" 2>/dev/null); do
+    ps -p "$pid" -o pid,state,wchan,cmd --no-headers 2>&1
+done
+
+echo "--- PYTHON CONTROLLER ---"
+pgrep -f "web_controller.py" -l 2>&1 || echo "Not found"
+for pid in $(pgrep -f "web_controller.py" 2>/dev/null); do
+    ps -p "$pid" -o pid,state,wchan,cmd --no-headers 2>&1
+done
+
+echo "--- KERNEL (USB/IO/ERRORS) ---"
+dmesg 2>/dev/null | grep -i "usb\|sd[a-z]\|i/o\|error\|reset" | tail -5 || echo "None"
+
+echo "--- MOUNT STATUS ---"
+mount | grep /mnt/ssd 2>&1
+
+echo "--- SOCKETS (port 5001) ---"
+ss -tpn 2>/dev/null | grep 5001 || echo "None"
+
+echo "--- WIFI (AP mode) ---"
+ip addr show wlan0 2>/dev/null | grep "state"
+ip addr show wlan0 2>/dev/null | grep "inet "
+/usr/sbin/iw dev wlan0 info 2>/dev/null | grep -E "channel|frequency" || echo "No info"
+echo "Connected stations:"
+STATIONS=$(/usr/sbin/iw dev wlan0 station dump 2>/dev/null | grep "Station")
+if [ -n "$STATIONS" ]; then
+    echo "$STATIONS"
+else
+    echo "None"
+fi
+
+echo "--- SYSTEMD ---"
+systemctl is-system-running 2>&1
+systemctl --failed --no-legend 2>&1 || echo "No failed units"
+
+echo "========================================="
+} >> "$DIAG_LOG" 2>&1

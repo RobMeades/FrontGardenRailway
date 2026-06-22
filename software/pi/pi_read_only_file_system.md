@@ -1,8 +1,10 @@
+# RO Main SSD
+
 These notes taken from:
 
 https://www.dzombak.com/blog/2024/03/running-a-raspberry-pi-with-a-read-only-root-filesystem/
 
-All credit goes to Chris Dzombak and those who helped him compile the guide.  The process below worked for me on a Raspberry Pi Zero W (1.1 and 2) running Raspberry Pi OS 13 (Trixie), headless version over a Wifi network (hence disabling of Wifi is not included below).
+All credit goes to Chris Dzombak and those who helped him compile the guide.  The process below worked for me on a Raspberry Pi Zero W (1.1 and 2), then a Raspberry Pi 5, all running Raspberry Pi OS 13 (Trixie), headless version over a Wifi network (hence disabling of Wifi is not included below).
 
 - Run an update and reboot:
 
@@ -45,9 +47,9 @@ All credit goes to Chris Dzombak and those who helped him compile the guide.  Th
 
   `sudo nano /boot/firmware/cmdline.txt`
 
-  ...and append `fsck.mode=skip noswap` to the line, so it will look something like:
+  ...and append `fsck.mode=skip` to the line, so it will look something like:
 
-  `console=serial0,115200 console=tty1 root=PARTUUID=76b4450a-02 rootfstype=ext4 elevator=deadline fsck.repair=yes rootwait fsck.mode=skip noswap`
+  `console=serial0,115200 console=tty1 root=PARTUUID=76b4450a-02 rootfstype=ext4 elevator=deadline fsck.repair=yes rootwait fsck.mode=skip`
 
 - Disable automatic periodic re-building of the `manpages` cache with:
 
@@ -108,7 +110,7 @@ All credit goes to Chris Dzombak and those who helped him compile the guide.  Th
 
   ```
   sudo systemctl disable systemd-timesyncd.service
-  sudo apt install ntpsec
+  sudo apt install ntpsec ntpsec-ntpdate
   ```
 
 - Edit `sudo nano /etc/ntpsec/ntp.conf` and
@@ -236,7 +238,7 @@ All credit goes to Chris Dzombak and those who helped him compile the guide.  Th
 
 - `sudo nano /boot/firmware/cmdline.txt` and append `ro` to the line, e.g.:
 
-  `console=serial0,115200 console=tty1 root=PARTUUID=76b4450a-02 rootfstype=ext4 elevator=deadline fsck.repair=yes rootwait fsck.mode=skip noswap ro`
+  `console=serial0,115200 console=tty1 root=PARTUUID=76b4450a-02 rootfstype=ext4 elevator=deadline fsck.repair=yes rootwait fsck.mode=skip ro`
 
 - `sudo nano /etc/fstab` and change the lines that refer to your SD card. In column 4, after the word defaults (without adding any whitespace), add the `,ro` flag to both SD card mounts and, if it is not there already, add the `,noatime` option to the `/` mount, e.g.:
 
@@ -249,7 +251,7 @@ All credit goes to Chris Dzombak and those who helped him compile the guide.  Th
 
 - To allow you to switch between read-only (bash command `ro`) and read-write (bash command `rw`) mode, `sudo nano /etc/bash.bashrc` and add the following lines to the end:
 
-```
+  ```
   set_bash_prompt(){
       fs_mode=$(mount | sed -n -e "s/^\/dev\/.* on \/ .*(\(r[w|o]\).*/\1/p")
       PS1='\[\033[01;32m\]\u@\h${fs_mode:+($fs_mode)}\[\033[00m\]:\[\033[01;34m\]\w\[\033[00m\]\$ '
@@ -258,7 +260,7 @@ All credit goes to Chris Dzombak and those who helped him compile the guide.  Th
 
   alias ro='sudo mount -o remount,ro / ; sudo mount -o remount,ro /boot/firmware'
   alias rw='sudo mount -o remount,rw / ; sudo mount -o remount,rw /boot/firmware'
-```
+  ```
 
 - To use `bash_logout` to switch to read-only mode when you log out, `sudo nano /etc/bash.bash_logout` (creating the file if necessary) and make sure the file includes the line:
 
@@ -278,3 +280,96 @@ All credit goes to Chris Dzombak and those who helped him compile the guide.  Th
 
  ...then scroll through and look for any issues.  When looking for issues, you will undoubtedly see some errors from various processes.  You will want to investigate those.  Start by checking "is this actually broken?".  Often there will be messages from e.g. `avahi-daemon` or `snapd` that are unhappy they cannot go about their business normally on a read-only filesystem.  But as long as that software is still working for your purposes, you can safely ignore their complaints.
 
+# RW SSD For Storage
+It is best have another (e.g. 32 Gbyte) SSD plugged into the Pi for long-term storage of binaries for the ESP32 devices, a database of logs, the journal, etc.  The SSD that MUST HAVE BEEN EXT4 formatted if you are to use it for `journal` storage, which is advisable.
+
+- Plug it into the Raspberry Pi, check with `lsblk` and, if it for instance appears as `/dev/sda`, mount it and check that it as mounted with:
+
+  ```
+  sudo mkdir -p /mnt/ssd
+  sudo mount /dev/sda1 /mnt/ssd
+  lsblk
+  ```
+
+  ...then make the mount persistent by getting the `PARTUUID` of the partition with `sudo blkid /dev/sda1` and then `sudo nano /etc/fstab` and add a line as follows, adding no spurious spaces at the start:
+  
+  ```
+  PARTUUID=<PARTUUID> /mnt/ssd ext4 defaults,noatime,nofail 0 2
+  ```
+
+  ...(obviously replacing `<PARTUUID>` with the `PARTUUID` for your SSD) then check that you got that write by confirming the mount with:
+ 
+  ```
+  sudo mount -a
+  lsblk
+  ```
+  
+# Journal To SSD
+To move the journal back out of RAM and onto this SSD:
+
+- Stop the journal and create the necessary storage:
+
+  ```
+  sudo systemctl stop systemd-journald
+  sudo rm -rf /var/log/journal
+  sudo mkdir -p /mnt/ssd/journal
+  sudo chown root:systemd-journal /mnt/ssd/journal
+  sudo chmod 2755 /mnt/ssd/journal
+  sudo mkdir -p /var/log/journal
+  sudo mount --bind /mnt/ssd/journal /var/log/journal
+  ````
+
+  Note: ignore the message about triggering units when you stop `system-journald`, it is harmless.
+
+- `sudo nano /etc/fstab`, remove the line referring to `var/log` (leave `/var/lib/logrotate` where it is) then add:
+  
+  `/mnt/ssd/journal /var/log/journal none bind 0 0`
+
+- `sudo nano /etc/systemd/journald.conf` and make it something like:
+  
+  ```
+  [Journal]
+  Storage=persistent
+  SystemMaxUse=2G
+  SystemMaxFileSize=100M
+  MaxRetentionSec=7day
+  ```
+
+- Workaround the Trixie (in more ways than one) `40-rpi-volatile-storage.conf` `journald` configuration file by creating your own higher priority one with `sudo nano /usr/lib/systemd/journald.conf.d/90-rpi-persistent-storage.conf` and give it contents:
+  
+  ```
+  [Journal]
+  Storage=persistent
+  ```
+
+- Make sure that `systemd-journald` does not try to start logging until the SSD has been mounted by creating a drop-in directory with:
+  
+  ```
+  sudo mkdir -p /etc/systemd/system/systemd-journald.service.d
+  ```
+  
+  ...then `sudo nano /etc/systemd/system/systemd-journald.service.d/00-wait-for-ssd.conf` and paste into it:
+  
+  ```
+  [Unit]
+  After=var-log-journal.mount
+  Requires=var-log-journal.mount
+  ```
+
+- Bring the journal back up with:
+
+  ```
+  sudo systemctl daemon-reload
+  sudo systemctl start systemd-journald
+  sudo journalctl --flush
+  ```
+
+- Finally check with:
+  
+  ```
+  mount | grep journal
+  df -h /var/log/journal
+  systemctl status systemd-journald
+  journalctl -n 5
+  journalctl --disk-usage
+  ```

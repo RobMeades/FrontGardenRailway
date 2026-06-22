@@ -644,8 +644,9 @@ class WebController(Controller):
                  port: int = CONTROLLER_PORT_DEFAULT,
                  nodes_dir: str = None, cfg_file: str = None,
                  http_port: int = HTTP_PORT_DEFAULT,
+                 log_server_port: int = 0, log_server_host: str = "127.0.0.1",
                  db_path: Path = None):
-        super().__init__(listen_ip, port, nodes_dir, cfg_file, db_path)
+        super().__init__(listen_ip, port, nodes_dir, cfg_file, log_server_port, log_server_host)
 
         self.http_port = http_port
 
@@ -10800,6 +10801,10 @@ def main():
     parser.add_argument("--log-level", type=str, default="INFO",
                         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
                         help="Logging level (default: INFO)")
+    parser.add_argument("--log-server-port", type=int, default=5001,
+                        help="Port of the log server to forward logs to (default: 5001)")
+    parser.add_argument("--log-server-host", type=str, default="127.0.0.1",
+                        help="Host of the log server to forward logs to (default: 127.0.0.1)")
     parser.add_argument("--db-path", type=Path, default=None,
                         help="Path to SQLite database for metrics graphs (e.g., /mnt/ssd/logs.db)."
                         " If not provided, graph features will be disabled.")
@@ -10827,6 +10832,8 @@ def main():
         nodes_dir=args.nodes_dir,
         cfg_file=cfg_file,
         http_port=args.http_port,
+        log_server_port=args.log_server_port,
+        log_server_host=args.log_server_host,
         db_path=args.db_path
     )
 

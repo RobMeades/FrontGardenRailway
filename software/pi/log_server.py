@@ -32,10 +32,12 @@ import threading
 import base64
 import json
 from pathlib import Path
-from typing import Optional, Dict, Tuple
+from typing import Optional, Dict, Tuple, Any
 from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
+from dataclasses import dataclass, field
+from enum import IntEnum
 
 # Add the protocol directory to Python path
 script_dir = Path(__file__).resolve().parent
@@ -55,6 +57,37 @@ except ImportError as e:
 from LibLogger import LibLogger
 
 
+class ConnectionState(IntEnum):
+    """Connection states for log server clients"""
+    DISCONNECTED = 0
+    CONNECTED = 1
+    HANDSHAKING = 2
+    READY = 3
+    ERROR = 4
+
+
+@dataclass
+class LogClient:
+    """Represents a connected client (node) to the log server"""
+    ip: str
+    port: int
+    sock: Optional[socket.socket] = None
+    state: ConnectionState = ConnectionState.DISCONNECTED
+    rx_thread: Optional[threading.Thread] = None
+    stop_event: threading.Event = field(default_factory=threading.Event)
+    connection_time: float = 0
+    connection_id: int = 0
+    message_count: int = 0
+    last_activity: float = 0
+    # Crash capture state
+    crash_hash: Optional[str] = None
+    crash_lines: list = field(default_factory=list)
+
+    def identifier(self) -> str:
+        """Return client identifier as 'ip:port'"""
+        return f"{self.ip}:{self.port}"
+
+
 class FGRLogServer:
     """FGR Protocol Log Server with crash dump capture"""
 
@@ -69,6 +102,10 @@ class FGRLogServer:
         self.retention_days = retention_days
         self.staging_path = staging_path
 
+        # Client tracking - map IP to client state
+        self.clients: Dict[str, LogClient] = {}
+        self.clients_lock = threading.Lock()
+
         # Load configuration map if available
         self.node_cfg_path = node_cfg_path or str(script_dir / "nodes_esp32_deploy.json")
         self.node_cfg = {}
@@ -76,12 +113,15 @@ class FGRLogServer:
 
         # Initialize LibLogger
         self.lib_logger = LibLogger()
-        self.lib_logger.init(self.db_path, retention_days=7, enable_trim=True)
+        self.lib_logger.init(
+            mode='server',
+            db_path=self.db_path,
+            retention_days=7,
+            enable_trim=True
+        )
 
         # Server state
         self.server_socket: Optional[socket.socket] = None
-        self.client_threads: Dict[socket.socket, threading.Thread] = {}
-        self.active_crashes: Dict[str, dict] = {}
         self.running = True
 
         # Statistics
@@ -102,12 +142,42 @@ class FGRLogServer:
         # Launch the web server for crash dumps
         self._start_web_server()
 
+        self._start_heartbeat_thread()
+
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
+
+    def _start_heartbeat_thread(self):
+        """Start background thread that logs a heartbeat message every minute."""
+        def heartbeat_loop():
+            heartbeat_count = 0
+            while self.running:
+                time.sleep(60)  # Once per minute
+                if not self.running:
+                    break
+                heartbeat_count += 1
+                # Log to journal and database
+                self.lib_logger.log(
+                    source='SERVER',
+                    node_ip='0.0.0.0',
+                    message=f"Heartbeat #{heartbeat_count} - clients: {len(self.clients)}, "
+                            f"messages: {self.stats['log_messages']}, errors: {self.stats['errors']}",
+                    log_level=1,  # INFO level
+                    log_tag='HEARTBEAT',
+                    message_type='STATUS'
+                )
+
+        heartbeat_thread = threading.Thread(target=heartbeat_loop, daemon=True)
+        heartbeat_thread.start()
+        print("[LogServer] Heartbeat thread started (60s interval)")
 
     def _signal_handler(self, signum: int, frame) -> None:
         print(f"\nReceived signal {signum}, shutting down...")
         self.running = False
+        # Signal all clients to stop
+        with self.clients_lock:
+            for client in self.clients.values():
+                client.stop_event.set()
 
     def _get_level_name(self, level: int) -> str:
         level_names = {
@@ -157,8 +227,6 @@ class FGRLogServer:
                 time.sleep(86400)  # Once per day
 
                 if self.lib_logger.is_db_available() and self.retention_days > 0:
-                    # Keep only last 1000 crash dumps regardless of age
-                    # (crash dumps are important, but we don't need millions)
                     try:
                         self.lib_logger.execute_sql("""
                             DELETE FROM crash_dumps
@@ -175,35 +243,53 @@ class FGRLogServer:
         cleanup_thread = threading.Thread(target=cleanup_loop, daemon=True)
         cleanup_thread.start()
 
-    def _intercept_and_parse_crash(self, ip: str, line: str):
+    def _intercept_and_parse_crash(self, ip: str, line: str, client: LogClient):
         """
         State machine parsing standard firmware crashes across shared connections.
+        Supports both Linux backtrace format (watchdog reset) and ESP32 core dump
+        format (power-on reset).
         """
-        # 1. Catch the unique firmware hash signature
+        # Check for ESP32 core dump start (power-on reset - no BACKTRACE)
+        if "CORE_DUMP START" in line and client.crash_hash is None:
+            # Generate a hash from the IP and timestamp
+            import hashlib
+            hash_input = f"{ip}_{time.time()}_{client.message_count}"
+            client.crash_hash = hashlib.sha256(hash_input.encode()).hexdigest()
+            client.crash_lines = []
+            print(f"[LogServer] Started capturing core dump for {ip}, hash={client.crash_hash[:16]}...")
+            return
+
+        # Catch the unique firmware hash signature (watchdog reset)
         if "BACKTRACE:" in line:
             parts = line.split("BACKTRACE:")
             if len(parts) > 1:
-                # Extracts raw SHA256 build footprint hash emitted right after crash boot
                 fw_hash = parts[1].strip().split()[0]
-                if len(fw_hash) == 64:  # Validate it is a standard sha256 sequence
-                    self.active_crashes[ip] = {"hash": fw_hash, "lines": []}
+                if len(fw_hash) == 64:
+                    client.crash_hash = fw_hash
+                    client.crash_lines = []
                     print(f"[LogServer] Started capturing crash for {ip}, hash={fw_hash[:16]}...")
+                    return
 
-        # 2. Slice and pack the Base64 stream lines
-        elif "CORE_DUMP:" in line and ip in self.active_crashes:
+        # Slice and pack the Base64 stream lines
+        if "CORE_DUMP:" in line and client.crash_hash is not None:
+            # Skip START and END markers
             if "START" in line:
                 return
             elif "END" in line:
-                crash_data = self.active_crashes.pop(ip, None)
-                if crash_data and crash_data["lines"]:
-                    # Format crash_id as: timestamp_node_ip (e.g., 1781301107_10.10.3.5)
+                crash_data = {
+                    "hash": client.crash_hash,
+                    "lines": client.crash_lines.copy()
+                }
+                client.crash_hash = None
+                client.crash_lines = []
+
+                if crash_data["lines"]:
                     crash_id = f"{int(time.time())}_{ip}"
-                    raw_b64 = "".join(crash_data["lines"])  # Concatenate raw B64
+                    raw_b64 = "".join(crash_data["lines"])
 
                     try:
-                        core_binary = base64.b64decode(raw_b64)  # Decode on-the-fly
+                        core_binary = base64.b64decode(raw_b64)
 
-                        # Insert into Database using LibLogger's SQL executor
                         if self.lib_logger.is_db_available():
                             insert_sql = """
                                 INSERT INTO crash_dumps (crash_id, timestamp_utc, ip, fw_hash, core_blob)
@@ -220,17 +306,12 @@ class FGRLogServer:
                             with self.lock:
                                 self.stats['crashes'] += 1
 
-
-                            # Journal Link (The trigger for your PC)
-                            # The URL protocol handler will pick this up!
-                            # and crash_decoder.py, when triggered, will
-                            # know what to do
-                            link_msg = f"🛑 CRASH! Decode: http://127.0.0.1:8080/{crash_id}"
+                            link_msg = f"🛑 CRASH! Decode: http://127.0.0.1:8060/data/{crash_id}"
                             self.lib_logger.log(
                                 source='NODE',
                                 node_ip=ip,
                                 message=link_msg,
-                                log_level=3  # ERROR level
+                                log_level=3
                             )
                             print(f"[LogServer] Crash captured: {crash_id} -> {link_msg}")
                         else:
@@ -241,9 +322,13 @@ class FGRLogServer:
                         with self.lock:
                             self.stats['errors'] += 1
             else:
-                # Isolate clean base64 data string chunk discarding trailing console layout arrows
-                clean_chunk = line.split("CORE_DUMP:")[1].strip().rstrip(">")
-                self.active_crashes[ip]["lines"].append(clean_chunk)
+                # Extract the base64 data (remove the "CORE_DUMP:" prefix)
+                clean_chunk = line.split("CORE_DUMP:")[1].strip()
+                # Remove any trailing non-base64 characters (like log level indicators)
+                import re
+                clean_chunk = re.sub(r'[^A-Za-z0-9+/=]', '', clean_chunk)
+                if clean_chunk:
+                    client.crash_lines.append(clean_chunk)
 
     def _start_web_server(self):
         """Start minimal web server for crash data endpoints."""
@@ -251,13 +336,12 @@ class FGRLogServer:
 
         class CrashDataHandler(BaseHTTPRequestHandler):
             def log_message(self, format, *args):
-                pass  # Suppress web requests
+                pass
 
             def do_GET(self):
                 try:
                     path = self.path
 
-                    # Handle /data/{crash_id} - returns raw binary core dump
                     if path.startswith('/data/'):
                         crash_id = path.split('/')[-1]
                         print(f"[LogServer] /data/ request for crash ID {crash_id}")
@@ -281,7 +365,6 @@ class FGRLogServer:
                             self.send_error(404, "Crash dump not found")
                         return
 
-                    # Handle /meta/{crash_id} - returns JSON metadata
                     elif path.startswith('/meta/'):
                         crash_id = path.split('/')[-1]
                         print(f"[LogServer] /meta/ request for crash ID {crash_id}")
@@ -306,7 +389,6 @@ class FGRLogServer:
                             self.send_error(404, "Crash dump not found")
                         return
 
-                    # Anything else -> 404
                     else:
                         self.send_error(404, "Not found")
 
@@ -335,31 +417,125 @@ class FGRLogServer:
         web_thread = threading.Thread(target=web_worker, daemon=True)
         web_thread.start()
 
-    def _handle_client(self, client_socket: socket.socket, client_address: tuple) -> None:
+    def _disconnect_client(self, client: LogClient) -> None:
+        """Internal: disconnect a client"""
+        if client.state == ConnectionState.DISCONNECTED:
+            return
+
+        ip = client.ip
+        port = client.port
+
+        # Store reference to current socket
+        current_sock = client.sock
+
+        self.lib_logger.log_admin(
+            f"Disconnecting client {ip}:{port} (msgs={client.message_count}, state={client.state})",
+            log_level=6
+        )
+
+        # Set stop event to signal receive thread
+        client.stop_event.set()
+
+        # Wait for receive thread to finish
+        if client.rx_thread and client.rx_thread.is_alive():
+            self.lib_logger.log_admin(f"Waiting for receive thread for {ip}:{port} to finish...", log_level=6)
+            client.rx_thread.join(timeout=2.0)
+            if client.rx_thread.is_alive():
+                self.lib_logger.log_admin(f"Receive thread for {ip}:{port} did not terminate after 2 seconds!", log_level=3)
+            else:
+                self.lib_logger.log_admin(f"Receive thread for {ip}:{port} terminated successfully", log_level=6)
+
+        # Close the socket
+        client.sock = None
+        if current_sock:
+            try:
+                current_sock.shutdown(socket.SHUT_RDWR)
+            except Exception as e:
+                pass
+            try:
+                current_sock.close()
+            except Exception as e:
+                pass
+
+        client.state = ConnectionState.DISCONNECTED
+        self.lib_logger.log_admin(f"Client {ip}:{port} disconnected", log_level=6)
+
+    def _handle_client(self, client_sock: socket.socket, client_address: tuple) -> None:
         """Handle a single client connection."""
         ip = client_address[0]
         port = client_address[1]
+        client_sock.settimeout(1.0)
 
-        client_socket.settimeout(1.0)
-        print(f"[LogServer] New connection from {ip}:{port}")
+        # Check if this IP is already connected
+        with self.clients_lock:
+            existing_client = self.clients.get(ip)
+
+            if existing_client and existing_client.state != ConnectionState.DISCONNECTED:
+                # Reconnection - clean up old connection
+                self.lib_logger.log_admin(
+                    f"Reconnection from {ip}:{port}, cleaning up old connection "
+                    f"(old_port={existing_client.port}, state={existing_client.state})",
+                    log_level=6
+                )
+
+                # Wait for old receive thread to finish
+                if existing_client.rx_thread and existing_client.rx_thread.is_alive():
+                    self.lib_logger.log_admin(f"Waiting for old receive thread for {ip} to finish...", log_level=6)
+                    existing_client.rx_thread.join(timeout=3.0)
+                    if existing_client.rx_thread.is_alive():
+                        self.lib_logger.log_admin(f"Old receive thread for {ip} did not terminate after 3 seconds!", log_level=3)
+
+                # Close old socket
+                old_sock = existing_client.sock
+                existing_client.sock = None
+                if old_sock:
+                    try:
+                        old_sock.shutdown(socket.SHUT_RDWR)
+                    except Exception:
+                        pass
+                    try:
+                        old_sock.close()
+                    except Exception:
+                        pass
+
+                existing_client.stop_event.set()
+                existing_client.stop_event = threading.Event()
+                existing_client.state = ConnectionState.DISCONNECTED
+
+            # Create or update client
+            if existing_client:
+                client = existing_client
+                client.port = port
+                client.sock = client_sock
+                client.connection_id += 1
+                client.message_count = 0
+                client.crash_hash = None
+                client.crash_lines = []
+            else:
+                client = LogClient(ip=ip, port=port, sock=client_sock)
+                self.clients[ip] = client
+
+            client.state = ConnectionState.CONNECTED
+            client.connection_time = time.time()
+            client.last_activity = time.time()
+
+        self.lib_logger.log_admin(
+            f"Client {ip}:{port} connected (connection #{client.connection_id})",
+            log_level=6
+        )
+
+        with self.lock:
+            self.stats['connections'] += 1
 
         try:
-            while self.running:
+            while self.running and not client.stop_event.is_set():
                 try:
-                    msg = receive_message(client_socket, timeout=1.0)
+                    msg = receive_message(client_sock, timeout=1.0)
                     if msg is None:
-                        # Check if socket is still alive
-                        try:
-                            client_socket.setblocking(False)
-                            if not client_socket.recv(1, socket.MSG_PEEK):
-                                break
-                        except (BlockingIOError, socket.timeout):
-                            pass
-                        except (OSError, ConnectionError):
-                            break
-                        finally:
-                            client_socket.setblocking(True)
                         continue
+
+                    client.message_count += 1
+                    client.last_activity = time.time()
 
                     log_text = msg.get_log_message()
                     log_level = msg.reference
@@ -368,7 +544,7 @@ class FGRLogServer:
                         self.stats['log_messages'] += 1
 
                     # Check for crash dump data
-                    self._intercept_and_parse_crash(ip, log_text)
+                    self._intercept_and_parse_crash(ip, log_text, client)
 
                     # Determine message_type based on content
                     message_type = 'LOG'
@@ -392,22 +568,20 @@ class FGRLogServer:
                 except Exception as e:
                     with self.lock:
                         self.stats['errors'] += 1
-                    print(f"[LogServer] Client handling exception [{ip}]: {e}")
+                    self.lib_logger.log_admin(f"Client handling exception [{ip}]: {e}", log_level=3)
                     continue
 
         finally:
-            try:
-                client_socket.shutdown(socket.SHUT_RDWR)
-            except:
-                pass
-            try:
-                client_socket.close()
-            except:
-                pass
-            with self.lock:
-                if client_socket in self.client_threads:
-                    del self.client_threads[client_socket]
-            print(f"[LogServer] Connection closed from {ip}:{port}")
+            # Clean up
+            with self.clients_lock:
+                # Only disconnect if this is still the current client for this IP
+                if self.clients.get(ip) is client:
+                    self._disconnect_client(client)
+                else:
+                    self.lib_logger.log_admin(
+                        f"Client {ip}:{port} connection closed but was replaced (not disconnecting)",
+                        log_level=6
+                    )
 
     def start(self) -> None:
         """Start the log server."""
@@ -432,18 +606,16 @@ class FGRLogServer:
 
             while self.running:
                 try:
-                    client_socket, client_address = self.server_socket.accept()
+                    client_sock, client_address = self.server_socket.accept()
 
-                    with self.lock:
-                        self.stats['connections'] += 1
-                        client_thread = threading.Thread(
-                            target=self._handle_client,
-                            args=(client_socket, client_address),
-                            daemon=True,
-                            name=f"Client-{client_address[0]}"
-                        )
-                        self.client_threads[client_socket] = client_thread
-                        client_thread.start()
+                    # Start client handler thread
+                    client_thread = threading.Thread(
+                        target=self._handle_client,
+                        args=(client_sock, client_address),
+                        daemon=True,
+                        name=f"LogClient-{client_address[0]}"
+                    )
+                    client_thread.start()
 
                 except socket.timeout:
                     continue
@@ -459,6 +631,12 @@ class FGRLogServer:
         """Stop the log server."""
         print("\n[LogServer] Shutting down...")
         self.running = False
+
+        # Disconnect all clients
+        with self.clients_lock:
+            for client in self.clients.values():
+                self._disconnect_client(client)
+            self.clients.clear()
 
         if self.server_socket:
             try:

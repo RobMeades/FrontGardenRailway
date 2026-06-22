@@ -516,14 +516,21 @@ class Controller:
     """
 
     def __init__(self, listen_ip: str = "10.10.3.1", port: int = 5000,
-                 nodes_dir: str = None, cfg_file: str = None, db_path: str = None):
+                 nodes_dir: str = None, cfg_file: str = None,
+                 log_server_port: int = 0, log_server_host: str = "127.0.0.1"):
         self.listen_ip = listen_ip
         self.port = port
         self.logger = logging.getLogger("Controller")
-        self.lib_logger = LibLogger()
-        self.lib_logger.init(Path(db_path))
-        # Attach to logger - captures ALL logs automatically
-        self.lib_logger.attach_to_logger(self.logger, source='CTRL')
+        if log_server_port > 0:
+            self.lib_logger = LibLogger()
+            self.lib_logger.init(
+                mode='client',
+                server_host=log_server_host,
+                server_port=log_server_port,
+                fallback_to_journal=True
+            )
+            # Attach to logger - captures ALL logs automatically
+            self.lib_logger.attach_to_logger(self.logger, source='CTRL')
 
         if nodes_dir is None:
             self.nodes_dir = SCRIPT_DIR / "nodes"
@@ -1354,6 +1361,12 @@ def parse_args():
                         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
                         help="Logging level (default: INFO)")
 
+    parser.add_argument("--log-server-port", type=int, default=5001,
+                        help="Port of the log server to forward logs to (default: 5001)")
+
+    parser.add_argument("--log-server-host", type=str, default="127.0.0.1",
+                        help="Host of the log server to forward logs to (default: 127.0.0.1)")
+
     return parser.parse_args()
 
 
@@ -1407,7 +1420,9 @@ def main():
         listen_ip=args.ip,
         port=args.port,
         nodes_dir=args.nodes_dir,
-        cfg_file=cfg_file
+        cfg_file=cfg_file,
+        log_server_port=args.log_server_port,
+        log_server_host=args.log_server_host
     )
 
     # If no config file and no nodes loaded, add defaults
