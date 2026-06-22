@@ -20,6 +20,9 @@ FGR Log Server - Receives logs from nodes via FGR protocol.
 This script listens for FGR protocol log messages from nodes, writes
 them to both SQLite database and systemd journal using LibLogger,
 and provides crash dump capture and web serving functionality.
+
+Clients connecting from 127.0.0.1 are identified as the controller,
+all other clients are identified as nodes
 """
 
 import sys
@@ -79,6 +82,7 @@ class LogClient:
     connection_id: int = 0
     message_count: int = 0
     last_activity: float = 0
+    is_controller: bool = False  # <-- NEW: Flag to identify controller connections
     # Crash capture state
     crash_hash: Optional[str] = None
     crash_lines: list = field(default_factory=list)
@@ -429,7 +433,8 @@ class FGRLogServer:
         current_sock = client.sock
 
         self.lib_logger.log_admin(
-            f"Disconnecting client {ip}:{port} (msgs={client.message_count}, state={client.state})",
+            f"Disconnecting {'CONTROLLER' if client.is_controller else 'NODE'} client {ip}:{port} "
+            f"(msgs={client.message_count}, state={client.state})",
             log_level=6
         )
 
@@ -511,8 +516,13 @@ class FGRLogServer:
                 client.message_count = 0
                 client.crash_hash = None
                 client.crash_lines = []
+                # Keep existing is_controller flag if it was set previously
+                # (it should already be correct from first connection)
             else:
                 client = LogClient(ip=ip, port=port, sock=client_sock)
+                # NEW: Determine if this is the controller based on IP
+                # Controller connects from 127.0.0.1 (localhost)
+                client.is_controller = (ip == '127.0.0.1')
                 self.clients[ip] = client
 
             client.state = ConnectionState.CONNECTED
@@ -520,7 +530,8 @@ class FGRLogServer:
             client.last_activity = time.time()
 
         self.lib_logger.log_admin(
-            f"Client {ip}:{port} connected (connection #{client.connection_id})",
+            f"Client {ip}:{port} connected (connection #{client.connection_id}, "
+            f"{'CONTROLLER' if client.is_controller else 'NODE'})",
             log_level=6
         )
 
@@ -551,9 +562,12 @@ class FGRLogServer:
                     if 'metrics:' in log_text:
                         message_type = 'METRIC'
 
+                    # NEW: Use the client's is_controller flag to set source
+                    source = 'CTRL' if client.is_controller else 'NODE'
+
                     # Log to journal and database using LibLogger
                     self.lib_logger.log(
-                        source='NODE',
+                        source=source,  # <-- Use detected source
                         node_ip=ip,
                         message=log_text,
                         log_level=log_level,
