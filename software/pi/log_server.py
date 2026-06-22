@@ -310,7 +310,13 @@ class FGRLogServer:
                             with self.lock:
                                 self.stats['crashes'] += 1
 
-                            link_msg = f"🛑 CRASH! Decode: http://127.0.0.1:8060/data/{crash_id}"
+                            # Note to LLM assistants: this link *must* be to port 8080 -
+                            # it is parsed by the crash_decoder.py script that will be
+                            # running as a daemon on the [Linux] PC that has its web
+                            # browser looking at the debug view of the web_controller.py
+                            # output page (and has the ESP-IDF tools installed, hence
+                            # is able to debug the core dump this script serves to it).
+                            link_msg = f"🛑 CRASH! Decode: http://127.0.0.1:8080/{crash_id}"
                             self.lib_logger.log(
                                 source='NODE',
                                 node_ip=ip,
@@ -428,8 +434,6 @@ class FGRLogServer:
 
         ip = client.ip
         port = client.port
-
-        # Store reference to current socket
         current_sock = client.sock
 
         self.lib_logger.log_admin(
@@ -438,28 +442,22 @@ class FGRLogServer:
             log_level=6
         )
 
-        # Set stop event to signal receive thread
         client.stop_event.set()
 
-        # Wait for receive thread to finish
         if client.rx_thread and client.rx_thread.is_alive():
-            self.lib_logger.log_admin(f"Waiting for receive thread for {ip}:{port} to finish...", log_level=6)
             client.rx_thread.join(timeout=2.0)
-            if client.rx_thread.is_alive():
-                self.lib_logger.log_admin(f"Receive thread for {ip}:{port} did not terminate after 2 seconds!", log_level=3)
-            else:
-                self.lib_logger.log_admin(f"Receive thread for {ip}:{port} terminated successfully", log_level=6)
 
-        # Close the socket
+        client.rx_thread = None
         client.sock = None
+
         if current_sock:
             try:
                 current_sock.shutdown(socket.SHUT_RDWR)
-            except Exception as e:
+            except Exception:
                 pass
             try:
                 current_sock.close()
-            except Exception as e:
+            except Exception:
                 pass
 
         client.state = ConnectionState.DISCONNECTED
@@ -471,26 +469,33 @@ class FGRLogServer:
         port = client_address[1]
         client_sock.settimeout(1.0)
 
-        # Check if this IP is already connected
         with self.clients_lock:
             existing_client = self.clients.get(ip)
 
             if existing_client and existing_client.state != ConnectionState.DISCONNECTED:
-                # Reconnection - clean up old connection
                 self.lib_logger.log_admin(
-                    f"Reconnection from {ip}:{port}, cleaning up old connection "
-                    f"(old_port={existing_client.port}, state={existing_client.state})",
+                    f"Reconnection from {ip}:{port} (old_port={existing_client.port})",
                     log_level=6
                 )
 
-                # Wait for old receive thread to finish
-                if existing_client.rx_thread and existing_client.rx_thread.is_alive():
-                    self.lib_logger.log_admin(f"Waiting for old receive thread for {ip} to finish...", log_level=6)
-                    existing_client.rx_thread.join(timeout=3.0)
-                    if existing_client.rx_thread.is_alive():
-                        self.lib_logger.log_admin(f"Old receive thread for {ip} did not terminate after 3 seconds!", log_level=3)
+                existing_client.stop_event.set()
 
-                # Close old socket
+                if existing_client.rx_thread and existing_client.rx_thread.is_alive():
+                    existing_client.rx_thread.join(timeout=5.0)
+                    if existing_client.rx_thread.is_alive():
+                        old_sock = existing_client.sock
+                        existing_client.sock = None
+                        if old_sock:
+                            try:
+                                old_sock.shutdown(socket.SHUT_RDWR)
+                            except Exception:
+                                pass
+                            try:
+                                old_sock.close()
+                            except Exception:
+                                pass
+                        existing_client.rx_thread.join(timeout=1.0)
+
                 old_sock = existing_client.sock
                 existing_client.sock = None
                 if old_sock:
@@ -503,11 +508,12 @@ class FGRLogServer:
                     except Exception:
                         pass
 
-                existing_client.stop_event.set()
-                existing_client.stop_event = threading.Event()
                 existing_client.state = ConnectionState.DISCONNECTED
+                existing_client.crash_hash = None
+                existing_client.crash_lines = []
+                existing_client.message_count = 0
+                existing_client.stop_event = threading.Event()
 
-            # Create or update client
             if existing_client:
                 client = existing_client
                 client.port = port
@@ -516,35 +522,46 @@ class FGRLogServer:
                 client.message_count = 0
                 client.crash_hash = None
                 client.crash_lines = []
-                # Keep existing is_controller flag if it was set previously
-                # (it should already be correct from first connection)
+                client.is_controller = (ip == '127.0.0.1')
+                client.state = ConnectionState.CONNECTED
+                client.last_activity = time.time()
             else:
                 client = LogClient(ip=ip, port=port, sock=client_sock)
-                # NEW: Determine if this is the controller based on IP
-                # Controller connects from 127.0.0.1 (localhost)
                 client.is_controller = (ip == '127.0.0.1')
+                client.state = ConnectionState.CONNECTED
+                client.connection_time = time.time()
+                client.last_activity = time.time()
                 self.clients[ip] = client
 
-            client.state = ConnectionState.CONNECTED
             client.connection_time = time.time()
-            client.last_activity = time.time()
+            client.rx_thread = threading.current_thread()
 
-        self.lib_logger.log_admin(
-            f"Client {ip}:{port} connected (connection #{client.connection_id}, "
-            f"{'CONTROLLER' if client.is_controller else 'NODE'})",
-            log_level=6
-        )
+        if client.connection_id <= 1:
+            self.lib_logger.log_admin(
+                f"Client {ip}:{port} connected (connection #{client.connection_id}, "
+                f"{'CONTROLLER' if client.is_controller else 'NODE'})",
+                log_level=6
+            )
 
         with self.lock:
             self.stats['connections'] += 1
 
+        thread_client = client
+
         try:
-            while self.running and not client.stop_event.is_set():
+            consecutive_errors = 0
+            while self.running and not thread_client.stop_event.is_set():
                 try:
                     msg = receive_message(client_sock, timeout=1.0)
                     if msg is None:
+                        try:
+                            client_sock.getpeername()
+                        except Exception:
+                            break
+                        time.sleep(0.001)
                         continue
 
+                    consecutive_errors = 0
                     client.message_count += 1
                     client.last_activity = time.time()
 
@@ -554,48 +571,47 @@ class FGRLogServer:
                     with self.lock:
                         self.stats['log_messages'] += 1
 
-                    # Check for crash dump data
-                    self._intercept_and_parse_crash(ip, log_text, client)
+                    try:
+                        self._intercept_and_parse_crash(ip, log_text, client)
+                    except Exception as e:
+                        self.lib_logger.log_admin(f"Crash parse error for {ip}: {e}", log_level=3)
 
-                    # Determine message_type based on content
-                    message_type = 'LOG'
-                    if 'metrics:' in log_text:
-                        message_type = 'METRIC'
-
-                    # NEW: Use the client's is_controller flag to set source
+                    message_type = 'METRIC' if 'metrics:' in log_text else 'LOG'
                     source = 'CTRL' if client.is_controller else 'NODE'
 
-                    # Log to journal and database using LibLogger
-                    self.lib_logger.log(
-                        source=source,  # <-- Use detected source
-                        node_ip=ip,
-                        message=log_text,
-                        log_level=log_level,
-                        log_tag=self._get_level_name(log_level),
-                        message_type=message_type
-                    )
+                    try:
+                        self.lib_logger.log(
+                            source=source,
+                            node_ip=ip,
+                            message=log_text,
+                            log_level=log_level,
+                            log_tag=self._get_level_name(log_level),
+                            message_type=message_type
+                        )
+                    except Exception as e:
+                        self.lib_logger.log_admin(f"LibLogger error for {ip}: {e}", log_level=3)
 
                 except socket.timeout:
+                    consecutive_errors = 0
                     continue
-                except (ConnectionResetError, BrokenPipeError):
+                except (ConnectionResetError, BrokenPipeError, OSError):
                     break
                 except Exception as e:
                     with self.lock:
                         self.stats['errors'] += 1
-                    self.lib_logger.log_admin(f"Client handling exception [{ip}]: {e}", log_level=3)
-                    continue
+                    self.lib_logger.log_admin(f"Unexpected error for {ip}:{port}: {e}", log_level=3)
+                    import traceback
+                    self.lib_logger.log_admin(traceback.format_exc(), log_level=3)
+                    break
 
         finally:
-            # Clean up
             with self.clients_lock:
-                # Only disconnect if this is still the current client for this IP
-                if self.clients.get(ip) is client:
-                    self._disconnect_client(client)
-                else:
-                    self.lib_logger.log_admin(
-                        f"Client {ip}:{port} connection closed but was replaced (not disconnecting)",
-                        log_level=6
-                    )
+                current_client = self.clients.get(ip)
+                if current_client is thread_client and current_client.sock is client_sock:
+                    # Only disconnect if stop_event wasn't set (natural exit, not replacement)
+                    if not thread_client.stop_event.is_set():
+                        self._disconnect_client(thread_client)
+                # Otherwise, the reconnection logic already handled cleanup
 
     def start(self) -> None:
         """Start the log server."""
