@@ -386,11 +386,3 @@ To move the journal back out of RAM and onto this SSD (or to an NVME SSD on an M
   journalctl -n 5
   journalctl --disk-usage
   ```
-  
-  
-  
-* * * * * /home/rob/FrontGardenRailway/software/pi/performance_check.sh --csv > /dev/null 2>&1
-Jun 24 00:04:01 FGR CRON[28143]: pam_unix(cron:session): session opened for user rob(uid=1000) by rob(uid=0)
-Jun 24 00:04:01 FGR CRON[28145]: (rob) CMD (/home/rob/FrontGardenRailway/software/pi/performance_check.sh --csv > /dev/null 2>&1)
-Jun 24 00:04:01 FGR CRON[28143]: pam_unix(cron:session): session closed for user rob
-
