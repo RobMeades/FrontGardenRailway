@@ -136,6 +136,10 @@ Connect to a Pi Zero using a serial terminal, or a bigger Pi using Ethernet, and
 
   `sudo nmcli connection modify FGR 802-11-wireless.mode ap 802-11-wireless.band bg ipv4.method shared ipv4.addresses 10.10.3.1/24`
 
+- Also set retries to zero to stop the Network Manager black-listing a device that repeatedly tries to connect:
+
+  `sudo nmcli -f connection.autoconnect-retries connection show FGR`
+
 - If there is a pre-existing Wifi station configuration, make sure it does not auto-connect ever with:
 
   ```
