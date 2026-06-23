@@ -9320,7 +9320,7 @@ class WebController(Controller):
 
             const graphGrid = document.getElementById('graphGrid');
             if (graphGrid) {
-                    graphGrid.innerHTML = `<div style="grid-column:1/-1;text-align:center;padding:40px;">📊 Loading data... (can take a while on a littul Pi Zero)</div>`;
+                    graphGrid.innerHTML = `<div style="grid-column:1/-1;text-align:center;padding:40px;">📊 Loading data... (can take a while)</div>`;
             }
 
             try {

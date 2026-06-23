@@ -288,6 +288,8 @@ int32_t fgr_network_init(const char *ssid, const char *password,
             if (err != ESP_OK) {
                 g_initialised = false;
                 if (g_sta_netif) {
+                    // Call disconnect first or dhcp_fine_tmr() may panic later
+                    esp_wifi_disconnect();
                     esp_netif_destroy_default_wifi(g_sta_netif);
                     g_sta_netif = NULL;
                     // Can't clean up g_wifi_semaphore as it may still be taken
@@ -304,6 +306,8 @@ int32_t fgr_network_init(const char *ssid, const char *password,
 void fgr_network_deinit()
 {
     if (g_sta_netif != NULL) {
+        // Call disconnect first or dhcp_fine_tmr() may panic later
+        esp_wifi_disconnect();
         esp_netif_destroy_default_wifi(g_sta_netif);
         g_sta_netif = NULL;
     }

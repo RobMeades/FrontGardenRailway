@@ -254,7 +254,7 @@ class FGRLogServer:
         format (power-on reset).
         """
         # Check for ESP32 core dump start (power-on reset - no BACKTRACE)
-        if "CORE_DUMP START" in line and client.crash_hash is None:
+        if "CORE DUMP START" in line and client.crash_hash is None:
             # Generate a hash from the IP and timestamp
             import hashlib
             hash_input = f"{ip}_{time.time()}_{client.message_count}"
