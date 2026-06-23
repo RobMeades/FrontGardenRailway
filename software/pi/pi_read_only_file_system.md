@@ -281,49 +281,62 @@ All credit goes to Chris Dzombak and those who helped him compile the guide.  Th
  ...then scroll through and look for any issues.  When looking for issues, you will undoubtedly see some errors from various processes.  You will want to investigate those.  Start by checking "is this actually broken?".  Often there will be messages from e.g. `avahi-daemon` or `snapd` that are unhappy they cannot go about their business normally on a read-only filesystem.  But as long as that software is still working for your purposes, you can safely ignore their complaints.
 
 # RW SSD For Storage
-It is best have another (e.g. 32 Gbyte) SSD plugged into the Pi for long-term storage of binaries for the ESP32 devices, a database of logs, the journal, etc.  The SSD that MUST HAVE BEEN EXT4 formatted if you are to use it for `journal` storage, which is advisable.
+It is best have another (e.g. 32 Gbyte) SSD plugged into the Pi for long-term storage of binaries for the ESP32 devices, a database of logs, the journal, etc.  The SSD that MUST HAVE BEEN EXT4 formatted if you are to use it for `journal` storage, which is advisable.  When I moved to the Pi 5 I powered it with a PoE HAT that included an M2 socket, so could use an NVME SSD in that socket for this purpose and changed the mount point to `/mnt/fgr_data`.
 
 - Plug it into the Raspberry Pi, check with `lsblk` and, if it for instance appears as `/dev/sda`, mount it and check that it as mounted with:
 
   ```
-  sudo mkdir -p /mnt/ssd
-  sudo mount /dev/sda1 /mnt/ssd
+  sudo mkdir -p /mnt/fgr_data
+  sudo mount /dev/sda1 /mnt/fgr_data
   lsblk
   ```
 
-  ...then make the mount persistent by getting the `PARTUUID` of the partition with `sudo blkid /dev/sda1` and then `sudo nano /etc/fstab` and add a line as follows, adding no spurious spaces at the start:
-  
+  ...or for the NVME case:
+
   ```
-  PARTUUID=<PARTUUID> /mnt/ssd ext4 defaults,noatime,nofail 0 2
+  sudo mkdir -p /mnt/fgr_data
+  sudo mount /dev/nvme0n1p1 /mnt/fgr_data
+  lsblk
   ```
 
-  ...(obviously replacing `<PARTUUID>` with the `PARTUUID` for your SSD) then check that you got that write by confirming the mount with:
+  ...then make the mount persistent by getting the `UUID` of the partition with `sudo blkid /dev/nvme0n1p1` and then `sudo nano /etc/fstab` and add a line as follows, adding no spurious spaces at the start:
+  
+  ```
+  UUID=<UUID> /mnt/fgr_data ext4 defaults,nofail,noatime,x-systemd.device-timeout=10 0 2
+  ```
+
+  ...(obviously replacing `<UUID>` with the `UUID` for your SSD) then check that you got that write by confirming the mount with:
  
   ```
   sudo mount -a
   lsblk
   ```
+  ...and, while you're at it, create a `tmp` directory on the SSD (you will need it later) with:
+  
+  ```
+  mkdir /mnt/fgr_data/tmp
+  ```
   
 # Journal To SSD
-To move the journal back out of RAM and onto this SSD:
+To move the journal back out of RAM and onto this SSD (or to an NVME SSD on an M2 PoE hat):
 
 - Stop the journal and create the necessary storage:
 
   ```
   sudo systemctl stop systemd-journald
   sudo rm -rf /var/log/journal
-  sudo mkdir -p /mnt/ssd/journal
-  sudo chown root:systemd-journal /mnt/ssd/journal
-  sudo chmod 2755 /mnt/ssd/journal
+  sudo mkdir -p /mnt/fgr_data/journal
+  sudo chown root:systemd-journal /mnt/fgr_data/journal
+  sudo chmod 2755 /mnt/fgr_data/journal
   sudo mkdir -p /var/log/journal
-  sudo mount --bind /mnt/ssd/journal /var/log/journal
+  sudo mount --bind /mnt/fgr_data/journal /var/log/journal
   ````
 
   Note: ignore the message about triggering units when you stop `system-journald`, it is harmless.
 
-- `sudo nano /etc/fstab`, remove the line referring to `var/log` (leave `/var/lib/logrotate` where it is) then add:
+- `sudo nano /etc/fstab`, remove the line referring to `/var/log` (leave `/var/lib/logrotate` where it is) then add:
   
-  `/mnt/ssd/journal /var/log/journal none bind 0 0`
+  `/mnt/fgr_data/journal /var/log/journal none bind 0 0`
 
 - `sudo nano /etc/systemd/journald.conf` and make it something like:
   
@@ -373,3 +386,11 @@ To move the journal back out of RAM and onto this SSD:
   journalctl -n 5
   journalctl --disk-usage
   ```
+  
+  
+  
+* * * * * /home/rob/FrontGardenRailway/software/pi/performance_check.sh --csv > /dev/null 2>&1
+Jun 24 00:04:01 FGR CRON[28143]: pam_unix(cron:session): session opened for user rob(uid=1000) by rob(uid=0)
+Jun 24 00:04:01 FGR CRON[28145]: (rob) CMD (/home/rob/FrontGardenRailway/software/pi/performance_check.sh --csv > /dev/null 2>&1)
+Jun 24 00:04:01 FGR CRON[28143]: pam_unix(cron:session): session closed for user rob
+

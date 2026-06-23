@@ -11,15 +11,15 @@ A good way to work during development is to use the [https_server.py](../pi/http
 
 Some examples:
 
-- This will build development versions of all nodes, put them in `~/fw`, then deploy them to `/mnt/ssd/fw` on the server machine (i.e. in the `beta` sub-directory):
+- This will build development versions of all nodes, put them in `~/fw`, then deploy them to `/mnt/fgr_data/fw` on the server machine (i.e. in the `beta` sub-directory):
  
-  `python nodes_esp32_deploy.py --staging ~/fw --remote-target <your username>@<server IP>:/mnt/ssd/fw`
+  `python nodes_esp32_deploy.py --staging ~/fw --remote-target <your username>@<server IP>:/mnt/fgr_data/fw`
 
 - This will do the same for production (i.e. in the `production` sub-directory); you will be prompted to make sure you have updated an relevant version numbers:
  
-  `python nodes_esp32_deploy.py --staging ~/fw --production --remote-target <your username>@<server IP>:/mnt/ssd/fw`
+  `python nodes_esp32_deploy.py --staging ~/fw --production --remote-target <your username>@<server IP>:/mnt/fgr_data/fw`
 
-- This will build and deploy to `/mnt/ssd/fw` on the server machine only the development version image necessary for the node with IP address 10.10.3.2:
+- This will build and deploy to `/mnt/fgr_data/fw` on the server machine only the development version image necessary for the node with IP address 10.10.3.2:
 
-  `python nodes_esp32_deploy.py --staging ~/fw --ip 10.10.3.2 --remote-target <your username>@<server IP>:/mnt/ssd/fw`
+  `python nodes_esp32_deploy.py --staging ~/fw --ip 10.10.3.2 --remote-target <your username>@<server IP>:/mnt/fgr_data/fw`
 

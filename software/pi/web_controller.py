@@ -7111,12 +7111,10 @@ class WebController(Controller):
             console.log(`[DEBUG] fetchAndScrollToTimestamp START:`, {
                 timestamp: timestamp,
                 targetLogId: targetLogId,
-                direction: direction,
-                isSearching: isSearching
+                direction: direction
             });
             console.time('fetchAndScrollToTimestamp');
 
-            // If there's a background fetch running, abort it
             if (activeFetchController) {
                 console.log('[DEBUG] fetchAndScrollToTimestamp: aborting activeFetchController');
                 activeFetchController.abort();
@@ -7125,23 +7123,26 @@ class WebController(Controller):
 
             return new Promise(async (resolve, reject) => {
                 try {
-                    // -------- Step 1: Initial query (500/500) --------
-                    console.log('[DEBUG] fetchAndScrollToTimestamp: Step 1 - initial query (500/500)');
+                    // -------- Step 1: Initial query with a generous window --------
+                    // Journal timestamp is ALWAYS later than database timestamp,
+                    // but we want context before AND after the target.
+                    // Use a large window: 1000 before, 2000 after (extra after accounts for latency)
+                    console.log('[DEBUG] fetchAndScrollToTimestamp: Step 1 - fetching with generous window');
                     console.time('fetchAndScrollToTimestamp: step1_journal_query');
+
                     const response1 = await fetch('/api/journal/query', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
                             timestamp: timestamp,
-                            before: 500,
-                            after: 500
+                            before: 1000,   // 1000 before for context
+                            after: 2000     // 2000 after to account for journal latency
                         })
                     });
                     const data1 = await response1.json();
                     console.timeEnd('fetchAndScrollToTimestamp: step1_journal_query');
                     console.log(`[DEBUG] fetchAndScrollToTimestamp: Step 1 returned ${data1.logs?.length} logs`);
 
-                    // Check if we have any logs
                     if (data1.status !== 'ok' || !data1.logs || data1.logs.length === 0) {
                         console.log('[DEBUG] fetchAndScrollToTimestamp: no logs returned from journal');
                         console.timeEnd('fetchAndScrollToTimestamp');
@@ -7149,75 +7150,195 @@ class WebController(Controller):
                         return;
                     }
 
-                    // -------- Step 2: Check if target is in the results --------
-                    const logIds1 = data1.logs.map(log => log.log_id);
-                    const targetFound = logIds1.includes(targetLogId);
-
-                    let allLogs = data1.logs;
+                    // -------- Step 2: Try to find the target log_id in the results --------
+                    let targetFound = data1.logs.some(log => log.log_id === targetLogId);
 
                     if (targetFound) {
                         console.log(`[DEBUG] fetchAndScrollToTimestamp: target log_id ${targetLogId} found in initial query`);
-                    } else {
-                        console.log(`[DEBUG] fetchAndScrollToTimestamp: target log_id ${targetLogId} NOT found, scanning forward`);
+                        // Process the logs we have - this includes both before and after for context
+                        const filteredNewLogs = data1.logs.filter(log => shouldDisplayLog(log.message));
+                        const uniqueNewLogs = filterUniqueLogs(filteredNewLogs);
 
-                        // -------- Step 3: Determine the last timestamp from the response --------
-                        const lastLog = data1.logs[data1.logs.length - 1];
-                        const lastTimestamp = lastLog.timestamp;
-                        const lastLogId = lastLog.log_id;
+                        if (uniqueNewLogs.length > 0) {
+                            await queueDebugViewOperation(DebugViewOperation.ADD_HISTORICAL_BATCH, {
+                                logs: uniqueNewLogs,
+                                targetLogId: targetLogId,
+                                direction: direction
+                            });
+                        }
+                        console.timeEnd('fetchAndScrollToTimestamp');
+                        resolve();
+                        return;
+                    }
 
-                        console.log(`[DEBUG] fetchAndScrollToTimestamp: last log in response: log_id=${lastLogId}, timestamp=${lastTimestamp}`);
+                    // -------- Step 3: Target not found - determine direction to expand --------
+                    console.log(`[DEBUG] fetchAndScrollToTimestamp: target ${targetLogId} NOT found in initial window`);
 
-                        // If the target has a higher log_id than the last one, scan forward
-                        if (targetLogId > lastLogId) {
-                            console.log('[DEBUG] fetchAndScrollToTimestamp: target is after the last log, fetching more');
+                    // Check if target is before or after the fetched range using log_id comparison
+                    const firstLogId = data1.logs[0]?.log_id || -Infinity;
+                    const lastLogId = data1.logs[data1.logs.length - 1]?.log_id || Infinity;
 
-                            // -------- Step 4: Fetch the next batch (starting from last timestamp) --------
-                            console.time('fetchAndScrollToTimestamp: step2_journal_query');
-                            const response2 = await fetch('/api/journal/query', {
+                    console.log(`[DEBUG] fetchAndScrollToTimestamp: first_log_id=${firstLogId}, last_log_id=${lastLogId}`);
+
+                    let allLogs = [...data1.logs];
+                    let fetchCount = 0;
+                    const MAX_FETCHES = 10; // Max 10 fetches (30,000 entries total)
+                    let targetFoundInExtra = false;
+
+                    // If target is before the first log, fetch backwards
+                    if (targetLogId < firstLogId) {
+                        console.log('[DEBUG] fetchAndScrollToTimestamp: target is BEFORE the fetched range, fetching backwards');
+                        let firstTimestamp = data1.logs[0].timestamp;
+
+                        while (fetchCount < MAX_FETCHES && !targetFoundInExtra) {
+                            fetchCount++;
+                            console.log(`[DEBUG] fetchAndScrollToTimestamp: backward fetch ${fetchCount}, first_timestamp=${firstTimestamp}`);
+
+                            console.time(`fetchAndScrollToTimestamp: step_backward_${fetchCount}`);
+                            const response = await fetch('/api/journal/query', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({
+                                    timestamp: firstTimestamp,
+                                    before: 2000,  // Fetch 2000 older entries
+                                    after: 0
+                                })
+                            });
+                            const data = await response.json();
+                            console.timeEnd(`fetchAndScrollToTimestamp: step_backward_${fetchCount}`);
+                            console.log(`[DEBUG] fetchAndScrollToTimestamp: backward fetch ${fetchCount} returned ${data.logs?.length} logs`);
+
+                            if (data.status !== 'ok' || !data.logs || data.logs.length === 0) {
+                                console.log('[DEBUG] fetchAndScrollToTimestamp: no more older logs available');
+                                break;
+                            }
+
+                            // Check if target is in this batch
+                            targetFoundInExtra = data.logs.some(log => log.log_id === targetLogId);
+
+                            // Add these logs to our collection (prepend for correct order)
+                            allLogs = [...data.logs, ...allLogs];
+
+                            if (targetFoundInExtra) {
+                                console.log(`[DEBUG] fetchAndScrollToTimestamp: target found in backward fetch ${fetchCount}`);
+                                break;
+                            }
+
+                            // Update first timestamp for next fetch
+                            firstTimestamp = data.logs[0].timestamp;
+                        }
+                    }
+                    // If target is after the last log, fetch forward
+                    else if (targetLogId > lastLogId) {
+                        console.log('[DEBUG] fetchAndScrollToTimestamp: target is AFTER the fetched range, fetching forward');
+                        let lastTimestamp = data1.logs[data1.logs.length - 1].timestamp;
+
+                        while (fetchCount < MAX_FETCHES && !targetFoundInExtra) {
+                            fetchCount++;
+                            console.log(`[DEBUG] fetchAndScrollToTimestamp: forward fetch ${fetchCount}, last_timestamp=${lastTimestamp}`);
+
+                            console.time(`fetchAndScrollToTimestamp: step_forward_${fetchCount}`);
+                            const response = await fetch('/api/journal/query', {
                                 method: 'POST',
                                 headers: { 'Content-Type': 'application/json' },
                                 body: JSON.stringify({
                                     timestamp: lastTimestamp,
                                     before: 0,
-                                    after: 1000  // Fetch more to cover the gap
+                                    after: 2000  // Fetch 2000 newer entries
                                 })
                             });
-                            const data2 = await response2.json();
-                            console.timeEnd('fetchAndScrollToTimestamp: step2_journal_query');
-                            console.log(`[DEBUG] fetchAndScrollToTimestamp: Step 2 returned ${data2.logs?.length} logs`);
+                            const data = await response.json();
+                            console.timeEnd(`fetchAndScrollToTimestamp: step_forward_${fetchCount}`);
+                            console.log(`[DEBUG] fetchAndScrollToTimestamp: forward fetch ${fetchCount} returned ${data.logs?.length} logs`);
 
-                            if (data2.status === 'ok' && data2.logs && data2.logs.length > 0) {
-                                // Combine the results (skip the first log to avoid duplication, it's the same as lastLog)
-                                const additionalLogs = data2.logs.slice(1);
-                                allLogs = [...data1.logs, ...additionalLogs];
-                                console.log(`[DEBUG] fetchAndScrollToTimestamp: combined ${allLogs.length} logs`);
-                            } else {
-                                console.log('[DEBUG] fetchAndScrollToTimestamp: no additional logs returned');
+                            if (data.status !== 'ok' || !data.logs || data.logs.length === 0) {
+                                console.log('[DEBUG] fetchAndScrollToTimestamp: no more newer logs available');
+                                break;
                             }
-                        } else {
-                            console.log('[DEBUG] fetchAndScrollToTimestamp: target is before the first log, not handled');
-                            // This case shouldn't happen based on our understanding (journal timestamp is always later)
+
+                            // Check if target is in this batch
+                            targetFoundInExtra = data.logs.some(log => log.log_id === targetLogId);
+
+                            // Add these logs to our collection
+                            allLogs = [...allLogs, ...data.logs];
+
+                            if (targetFoundInExtra) {
+                                console.log(`[DEBUG] fetchAndScrollToTimestamp: target found in forward fetch ${fetchCount}`);
+                                break;
+                            }
+
+                            // Update last timestamp for next fetch
+                            lastTimestamp = data.logs[data.logs.length - 1].timestamp;
                         }
+                    } else {
+                        // Target is within the fetched range but not found (maybe filtered out?)
+                        console.log('[DEBUG] fetchAndScrollToTimestamp: target log_id in range but not found (maybe filtered out)');
+                        console.timeEnd('fetchAndScrollToTimestamp');
+                        resolve();
+                        return;
                     }
 
-                    // -------- Step 5: Process the combined logs --------
-                    console.log(`[DEBUG] fetchAndScrollToTimestamp: processing ${allLogs.length} logs`);
-                    const filteredNewLogs = allLogs.filter(log => shouldDisplayLog(log.message));
-                    console.log(`[DEBUG] fetchAndScrollToTimestamp: after filter: ${filteredNewLogs.length} logs`);
+                    // -------- Step 4: Process all collected logs --------
+                    console.log(`[DEBUG] fetchAndScrollToTimestamp: processing ${allLogs.length} total logs`);
+
+                    // Deduplicate by log_id (keep latest occurrence if duplicates exist)
+                    const seen = new Map();
+                    for (const log of allLogs) {
+                        seen.set(log.log_id, log);
+                    }
+                    const uniqueLogs = Array.from(seen.values());
+                    console.log(`[DEBUG] fetchAndScrollToTimestamp: after dedup: ${uniqueLogs.length} logs`);
+
+                    // Sort by log_id for consistent ordering
+                    uniqueLogs.sort((a, b) => a.log_id - b.log_id);
+
+                    const filteredNewLogs = uniqueLogs.filter(log => shouldDisplayLog(log.message));
                     const uniqueNewLogs = filterUniqueLogs(filteredNewLogs);
-                    console.log(`[DEBUG] fetchAndScrollToTimestamp: after dedup: ${uniqueNewLogs.length} logs`);
+                    console.log(`[DEBUG] fetchAndScrollToTimestamp: after filters: ${uniqueNewLogs.length} logs`);
 
                     if (uniqueNewLogs.length > 0) {
                         console.log('[DEBUG] fetchAndScrollToTimestamp: queueing ADD_HISTORICAL_BATCH');
-                        console.time('fetchAndScrollToTimestamp: queue_operation');
                         await queueDebugViewOperation(DebugViewOperation.ADD_HISTORICAL_BATCH, {
                             logs: uniqueNewLogs,
                             targetLogId: targetLogId,
                             direction: direction
                         });
-                        console.timeEnd('fetchAndScrollToTimestamp: queue_operation');
                     } else {
-                        console.log('[DEBUG] fetchAndScrollToTimestamp: uniqueNewLogs is empty, skipping queue');
+                        console.log('[DEBUG] fetchAndScrollToTimestamp: no new logs to add');
+                        // If we didn't find the target, try one more time with a very wide window
+                        if (!targetFoundInExtra) {
+                            console.log('[DEBUG] fetchAndScrollToTimestamp: target still not found, trying very wide window');
+                            // Use a 60-second window centered on the timestamp (30s before, 30s after)
+                            // This accounts for any significant latency
+                            const wideBefore = Math.max(0, timestamp - 30);
+                            const wideAfter = timestamp + 30;
+
+                            console.time('fetchAndScrollToTimestamp: step_wide_window');
+                            const response = await fetch('/api/journal/query', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({
+                                    since: wideBefore,
+                                    until: wideAfter
+                                })
+                            });
+                            const data = await response.json();
+                            console.timeEnd('fetchAndScrollToTimestamp: step_wide_window');
+                            console.log(`[DEBUG] fetchAndScrollToTimestamp: wide window returned ${data.logs?.length} logs`);
+
+                            if (data.status === 'ok' && data.logs && data.logs.length > 0) {
+                                const wideFiltered = data.logs.filter(log => shouldDisplayLog(log.message));
+                                const wideUnique = filterUniqueLogs(wideFiltered);
+                                if (wideUnique.length > 0) {
+                                    console.log('[DEBUG] fetchAndScrollToTimestamp: queueing wide window logs');
+                                    await queueDebugViewOperation(DebugViewOperation.ADD_HISTORICAL_BATCH, {
+                                        logs: wideUnique,
+                                        targetLogId: targetLogId,
+                                        direction: direction
+                                    });
+                                }
+                            }
+                        }
                     }
 
                     console.timeEnd('fetchAndScrollToTimestamp');
@@ -10806,7 +10927,7 @@ def main():
     parser.add_argument("--log-server-host", type=str, default="127.0.0.1",
                         help="Host of the log server to forward logs to (default: 127.0.0.1)")
     parser.add_argument("--db-path", type=Path, default=None,
-                        help="Path to SQLite database for metrics graphs (e.g., /mnt/ssd/logs.db)."
+                        help="Path to SQLite database for metrics graphs (e.g., /mnt/fgr_data/logs.db)."
                         " If not provided, graph features will be disabled.")
     args = parser.parse_args()
 

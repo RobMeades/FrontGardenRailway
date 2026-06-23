@@ -28,7 +28,7 @@ import csv
 import io
 from datetime import datetime
 
-DATABASE_PATH = "/mnt/ssd/logs.db"
+DATABASE_PATH = "/mnt/fgr_data/logs.db"
 
 # Global flag for signal handling
 exiting = False

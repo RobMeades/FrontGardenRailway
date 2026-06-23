@@ -1110,7 +1110,7 @@ class LibLogger:
 
         original_priority = self._set_low_priority()
 
-        temp_dir = '/mnt/ssd/tmp'
+        temp_dir = '/mnt/fgr_data/tmp'
         if not os.path.exists(temp_dir):
             try:
                 os.makedirs(temp_dir, mode=0o1777, exist_ok=True)

@@ -61,6 +61,11 @@
 #  define FGR_SOCKET_MAINTAIN_WAIT_MS  1000
 #endif
 
+#ifndef FGR_SOCKET_RX_RECONNECTION_WAIT_MS
+// How long the Rx task should wait for a reconnection
+#  define FGR_SOCKET_RX_RECONNECTION_WAIT_MS  2000
+#endif
+
 #ifndef FGR_SOCKET_TASK_RX_STACK_SIZE
 #  define FGR_SOCKET_TASK_RX_STACK_SIZE (1024 * 6)
 #endif
@@ -235,6 +240,8 @@ static void task_maintain_cb(void *handle, void *param)
                 xSemaphoreGive(context_channel->lock);
             }
 
+            fgr_monitor_task_wdt_feed(handle);
+
             if (context_channel->connected) {
                 if (context_channel->cfg_cb) {
                     // If we have reconnected and there is a user configuration
@@ -255,6 +262,8 @@ static void task_maintain_cb(void *handle, void *param)
     } else {
         ESP_LOGW(TAG, "Could not take lock, skipping channel maintenance this time.");
     }
+
+    fgr_monitor_task_wdt_feed(handle);
 }
 
 // Callback task to receive data from a server.
@@ -330,7 +339,7 @@ static void task_rx_cb(void *handle, void *param)
 
         if (!connected) {
             // Wait for a reconnection
-            vTaskDelay(pdMS_TO_TICKS(2000));
+            vTaskDelay(pdMS_TO_TICKS(FGR_SOCKET_RX_RECONNECTION_WAIT_MS));
         } else {
             // Just a short delay
             vTaskDelay(pdMS_TO_TICKS(FGR_UTIL_WATCHDOG_FEED_TIME_MS));
@@ -339,7 +348,12 @@ static void task_rx_cb(void *handle, void *param)
             ESP_LOGI(TAG, "Waiting for a command.");
             nothing_received_count = 0;
         }
+    } else {
+        // Waiting for a reconnection
+        vTaskDelay(pdMS_TO_TICKS(FGR_SOCKET_RX_RECONNECTION_WAIT_MS));
     }
+
+    fgr_monitor_task_wdt_feed(handle);
 
     CONTEXT_UNLOCK(context->lock, "task_rx_cb()");
 }

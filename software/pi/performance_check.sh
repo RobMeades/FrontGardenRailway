@@ -35,7 +35,7 @@
 # ...to save a plot every minute
 
 # Output directory (survives reboot)
-OUTPUT_DIR="/mnt/ssd/monitoring"
+OUTPUT_DIR="/mnt/fgr_data/monitoring"
 mkdir -p "$OUTPUT_DIR"
 
 CSV_FILE="$OUTPUT_DIR/lag_stats.csv"
@@ -87,15 +87,15 @@ get_metrics() {
     fi
 
     RATE=$(journalctl --since "1 minute ago" 2>/dev/null | wc -l)
-    FREELIST=$(sqlite3 /mnt/ssd/logs.db "PRAGMA freelist_count;" 2>/dev/null)
+    FREELIST=$(sqlite3 /mnt/fgr_data/logs.db "PRAGMA freelist_count;" 2>/dev/null)
     if [ -z "$FREELIST" ]; then
         FREELIST="-1"
     fi
-    UTIL=$(iostat -x 1 2 2>/dev/null | grep sda | tail -1 | awk '{print $NF}')
+    UTIL=$(iostat -x 1 2 2>/dev/null | grep nvme0n1 | tail -1 | awk '{print $NF}')
     LOAD=$(uptime | awk -F'load average:' '{print $2}' | sed 's/^ //')
     MEM=$(free -m | grep Mem | awk '{print $3 "/" $2}')
     JOURNAL_SIZE=$(du -sh /var/log/journal/ 2>/dev/null | awk '{print $1}')
-    DB_SIZE=$(du -h /mnt/ssd/logs.db 2>/dev/null | awk '{print $1}')
+    DB_SIZE=$(du -h /mnt/fgr_data/logs.db 2>/dev/null | awk '{print $1}')
 
     # Extract load values
     LOAD_1=$(echo "$LOAD" | awk -F', ' '{print $1}')
@@ -195,7 +195,7 @@ echo "USB util: ${UTIL}%"
 echo "Load: ${LOAD_1}, ${LOAD_5}, ${LOAD_15}"
 echo "Memory: ${MEM_USED}/${MEM_TOTAL} MB used"
 echo "Journal: $(du -sh /var/log/journal/ 2>/dev/null | awk '{print $1}')"
-echo "DB: $(du -h /mnt/ssd/logs.db 2>/dev/null | awk '{print $1}')"
+echo "DB: $(du -h /mnt/fgr_data/logs.db 2>/dev/null | awk '{print $1}')"
 
 # --- CSV Logging ---
 if [ $LOG_CSV -eq 1 ]; then
@@ -273,7 +273,7 @@ fi
 if [ -n "$FREELIST" ] && [ "$FREELIST" -gt 50000 ] 2>/dev/null; then
     echo ""
     echo "⚠️  WARNING: Freelist is $FREELIST - VACUUM recommended!"
-    echo "   Schedule maintenance: sudo systemctl stop log_server; sudo sqlite3 /mnt/ssd/logs.db 'VACUUM;'; sudo systemctl start log_server"
+    echo "   Schedule maintenance: sudo systemctl stop log_server; sudo sqlite3 /mnt/fgr_data/logs.db 'VACUUM;'; sudo systemctl start log_server"
 fi
 
 # --- DIAGNOSTICS (low impact, written every run) ---
@@ -301,11 +301,11 @@ for pid in $(pgrep -f "web_controller.py" 2>/dev/null); do
     ps -p "$pid" -o pid,state,wchan,cmd --no-headers 2>&1
 done
 
-echo "--- KERNEL (USB/IO/ERRORS) ---"
-dmesg 2>/dev/null | grep -i "usb\|sd[a-z]\|i/o\|error\|reset" | tail -5 || echo "None"
+echo "--- KERNEL (USB/NVME/IO/ERRORS) ---"
+dmesg 2>/dev/null | grep -i "usb\|sd[a-z]\|nvme\|i/o\|error\|reset" | tail -5 || echo "None"
 
 echo "--- MOUNT STATUS ---"
-mount | grep /mnt/ssd 2>&1
+mount | grep /mnt/fgr_data 2>&1
 
 echo "--- SOCKETS (port 5001) ---"
 ss -tpn 2>/dev/null | grep 5001 || echo "None"

@@ -4,7 +4,7 @@ These instructions describe how to set up the various services that form the Fro
 # HTTPS Server Setup
 All of the ESP32 nodes will want to make an HTTPS connection to the access point to download updates to their programs; this is what the Python script `https_server.py` does.  To get it running with the ESP32s, connect a serial terminal to the Pi Zero, or Ethernet to a bigger Pi, and do the following:
 
-- Create a directory off `/mnt/ssd` named `fw`.
+- Create a directory off `/mnt/fgr_data` named `fw`.
 
 - `cd` to that directory and run SSL to create a key pair with:
 
@@ -14,7 +14,7 @@ All of the ESP32 nodes will want to make an HTTPS connection to the access point
 
 - On a PC which has the ESP-IDF software environment installed on it, and has a clone of this repository, replace the file `FrontGardenRailway/software/server_certs/ca_cert.pem` with the `ca_cert.pem` you just generated.
 
-- Go take a look at the [`README.md`](../esp32) in the ESP32 directory: it will explain to you how to build the code for the ESP32 nodes using the script [`nodes_esp32_deploy.py`](../esp32/nodes_esp32_deploy.py).  Do what it says to populate the `/mnt/ssd/fw` directory with images.
+- Go take a look at the [`README.md`](../esp32) in the ESP32 directory: it will explain to you how to build the code for the ESP32 nodes using the script [`nodes_esp32_deploy.py`](../esp32/nodes_esp32_deploy.py).  Do what it says to populate the `/mnt/fgr_data/fw` directory with images.
 
 - Create `sudo nano /lib/systemd/system/https_server.service` with the following contents:
 
@@ -25,7 +25,7 @@ All of the ESP32 nodes will want to make an HTTPS connection to the access point
 
   [Service]
   Type=simple
-  WorkingDirectory=/mnt/ssd/fw
+  WorkingDirectory=/mnt/fgr_data/fw
   ExecStart=python /home/<your home directory name>/FrontGardenRailway/software/pi/https_server.py  . --node-cfg /home/<your home directory name>/FrontGardenRailway/software/esp32/nodes_esp32_deploy.json
   KillSignal=SIGINT
   Restart=on-failure
@@ -63,7 +63,7 @@ The `log_server.py` script listens for log messages from all nodes and stuffs th
   [Service]
   Type=simple
   WorkingDirectory=/home/<your home directory name>/FrontGardenRailway/software/pi
-  ExecStart=python -u log_server.py --web-port 8060 --web-bind 10.10.2.10 --port 5001 --db-path /mnt/ssd/logs.db --node-cfg ../esp32/nodes_esp32_deploy.json
+  ExecStart=python -u log_server.py --web-port 8060 --web-bind 10.10.2.10 --port 5001 --db-path /mnt/fgr_data/logs.db --node-cfg ../esp32/nodes_esp32_deploy.json
   KillSignal=SIGINT
   Restart=on-failure
 
@@ -114,7 +114,7 @@ The `log_server.py` script listens for log messages from all nodes and stuffs th
 - Still on the local PC, `sudo systemctl start fgr_crash_decoder` and `sudo systemctl enable fgr_crash_decoder` to make it run at boot.  Should you not get the nice URL thingy from `log_server.py` for some reason, you can query the database directly from the Pi with something like:
 
   ```
-  sudo sqlite3 /mnt/ssd/logs.db "SELECT * FROM crash_dumps ORDER BY timestamp_utc DESC LIMIT 50;"
+  sudo sqlite3 /mnt/fgr_data/logs.db "SELECT * FROM crash_dumps ORDER BY timestamp_utc DESC LIMIT 50;"
   ```
 
   ...then take the left-most field, form it into a URL something like:
@@ -140,7 +140,7 @@ Get `web_controller.py` to run at boot, using port 5000 for the connections to t
   [Service]
   Type=simple
   WorkingDirectory=/home/<your home directory name>/FrontGardenRailway/software/pi
-  ExecStart=python /home/<your home directory name>/FrontGardenRailway/software/pi/web_controller.py --db-path /mnt/ssd/logs.db
+  ExecStart=python /home/<your home directory name>/FrontGardenRailway/software/pi/web_controller.py --db-path /mnt/fgr_data/logs.db
   KillSignal=SIGINT
   Restart=on-failure
 

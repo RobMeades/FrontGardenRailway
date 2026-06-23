@@ -41,10 +41,10 @@ For isolation, the Raspberry Pi should be installed on a VLAN of the home networ
 - Verify that the change is working by running `ntpq -p`: you should see the configured NTP server IP address in the list, and it should eventually show a `*` next to it, indicating it is the source that NTP on the Pi is syncing to, but this might take many many minutes.
 
 # Monitoring
-To monitor how the system is performing, `crontab -e` and add:
+To monitor how the system is performing, `sudo crontab -e` and add:
 
 ```
 * * * * * /home/<your user directory>/FrontGardenRailway/software/pi/performance_check.sh --csv > /dev/null 2>&1
 ```
 
-This will write performance information to `/mnt/ssd/monitoring` every minute: see inside [`performance_check.sh`](performance_check.sh) for more details.
+This will write performance information to `/mnt/fgr_data/monitoring` every minute: see inside [`performance_check.sh`](performance_check.sh) for more details.
