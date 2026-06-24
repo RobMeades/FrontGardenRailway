@@ -71,6 +71,7 @@ SLIST_HEAD(task_list_t, task_t);
 // Context.
 typedef struct {
     SemaphoreHandle_t lock;
+    bool is_shutting_down;
     task_t *min_free_stack_next_task;
     struct task_list_t task_list;
     fgr_task_state_cb_t global_task_state_cb;
@@ -200,6 +201,7 @@ int32_t fgr_task_init()
     }
 
     if (g_context.lock) {
+        g_context.is_shutting_down = false;
         err = ESP_OK;
     }
 
@@ -210,6 +212,13 @@ int32_t fgr_task_init()
 void fgr_task_deinit()
 {
     if (g_context.lock) {
+
+        // Set this flag so that task_destroy()
+        // doesn't get stuck because that task
+        // is in the middle of calling one of
+        // this API's functions (e.g. fgr_task_min_free_stack()
+        // etc.)
+        g_context.is_shutting_down= true;
 
         CONTEXT_LOCK(g_context.lock, "fgr_task_deinit()");
 
@@ -238,7 +247,7 @@ int32_t fgr_task_create(fgr_task_cb_t cb, void *cb_param, const char *name,
 
         err = -ESP_ERR_INVALID_STATE;
 
-        if (g_context.lock) {
+        if (g_context.lock && !g_context.is_shutting_down) {
 
             CONTEXT_LOCK(g_context.lock, "fgr_task_create()");
 
@@ -284,7 +293,7 @@ int32_t fgr_task_create(fgr_task_cb_t cb, void *cb_param, const char *name,
 // Destroy a task.
 void fgr_task_destroy(void *handle)
 {
-    if (g_context.lock) {
+    if (g_context.lock && !g_context.is_shutting_down) {
 
         CONTEXT_LOCK(g_context.lock, "fgr_task_destroy()");
 
@@ -308,7 +317,7 @@ bool fgr_task_is_running(void *handle)
 {
     bool task_is_running = false;
 
-    if (g_context.lock) {
+    if (g_context.lock && !g_context.is_shutting_down) {
 
         CONTEXT_LOCK(g_context.lock, "fgr_task_is_running()");
 
@@ -332,7 +341,7 @@ int32_t fgr_task_state_cb_set(fgr_task_state_cb_t cb,
 {
     int32_t err = -ESP_ERR_INVALID_STATE;
 
-    if (g_context.lock) {
+    if (g_context.lock && !g_context.is_shutting_down) {
 
         CONTEXT_LOCK(g_context.lock, "fgr_task_state_cb_set()");
 
@@ -364,7 +373,7 @@ int32_t fgr_task_min_free_stack(void *handle)
 {
     int32_t high_watermark = 0;
 
-    if (g_context.lock) {
+    if (g_context.lock && !g_context.is_shutting_down) {
 
         CONTEXT_LOCK(g_context.lock, "fgr_task_min_free_stack()");
 
@@ -392,7 +401,7 @@ int32_t fgr_task_min_free_stack_start(const char **name,
 
         err = -ESP_ERR_INVALID_STATE;
 
-        if (g_context.lock) {
+        if (g_context.lock && !g_context.is_shutting_down) {
 
             CONTEXT_LOCK(g_context.lock, "fgr_task_min_free_stack_start()");
 
@@ -433,7 +442,7 @@ int32_t fgr_task_min_free_stack_next(const char **name,
 
         err = -ESP_ERR_INVALID_STATE;
 
-        if (g_context.lock) {
+        if (g_context.lock && !g_context.is_shutting_down) {
 
             CONTEXT_LOCK(g_context.lock, "fgr_task_min_free_stack_next()");
 
@@ -474,7 +483,7 @@ int32_t fgr_task_min_free_stack_next(const char **name,
 // Stop reading task stack high watermark values.
 void fgr_task_min_free_stack_stop()
 {
-    if (g_context.lock) {
+    if (g_context.lock && !g_context.is_shutting_down) {
         CONTEXT_LOCK(g_context.lock, "fgr_task_min_free_stack_stop()");
         g_context.min_free_stack_next_task = NULL;
         CONTEXT_UNLOCK(g_context.lock, "fgr_task_min_free_stack_stop()");

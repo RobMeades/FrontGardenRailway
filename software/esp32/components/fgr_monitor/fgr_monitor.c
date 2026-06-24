@@ -77,6 +77,7 @@ SLIST_HEAD(task_list_t, task_t);
 // Context for the monitor task.
 typedef struct {
     SemaphoreHandle_t lock;
+    bool monitor_task_aborting;
     int32_t timeout_seconds;
     int64_t last_msg_receive_us;
     int64_t heap_below_min_start_us;
@@ -283,10 +284,10 @@ static void task_monitor(void *param)
 
     while (context->running) {
 
-        CONTEXT_LOCK(context_task->lock, "task_monitor()");
-
         fgr_monitor_abort_reason_t reason = FGR_MONITOR_ABORT_REASON_NONE;
         const char *task_name = NULL;
+
+        CONTEXT_LOCK(context_task->lock, "task_monitor()");
 
         // First check this task's stack
         if (uxTaskGetStackHighWaterMark(NULL) < FGR_MONITOR_TASK_STACK_SIZE_MIN) {
@@ -315,7 +316,7 @@ static void task_monitor(void *param)
         // Monitor communications with the controller
         if ((reason == FGR_MONITOR_ABORT_REASON_NONE) &&
             (context_task->last_msg_receive_us - esp_timer_get_time() >
-                 FGR_MONITOR_WDT_CONTROLLER_TIMEOUT_SECONDS * 1000000)) {
+            FGR_MONITOR_WDT_CONTROLLER_TIMEOUT_SECONDS * 1000000)) {
             reason = FGR_MONITOR_ABORT_REASON_CONTROLLER_WDT;
         }
 
@@ -332,10 +333,22 @@ static void task_monitor(void *param)
         }
 
         if (reason != FGR_MONITOR_ABORT_REASON_NONE) {
-            do_abort(reason, task_name, context);
+            // Set this flag while the context is locked
+            // so that any task waiting for the mutex
+            // lock that is inside fgr_monitor_task_wdt_feed()
+            // gets to see it once they have their lock
+            context_task->monitor_task_aborting = true;
         }
 
         CONTEXT_UNLOCK(context_task->lock, "task_monitor()");
+
+        // Do this after unlocking the mutex as do_abort()
+        // will call fgr_lib_deinit(), which destroys tasks,
+        // tasks that may have been waiting on
+        // fgr_monitor_task_wdt_feed() to complete
+        if (reason != FGR_MONITOR_ABORT_REASON_NONE) {
+            do_abort(reason, task_name, context);
+        }
 
         esp_task_wdt_reset();
         vTaskDelay(pdMS_TO_TICKS(FGR_MONITOR_CHECK_INTERVAL_MS));
@@ -392,6 +405,7 @@ int32_t fgr_monitor_init(fgr_util_cb_t cb, void *cb_param)
 
         g_context.cb = cb;
         g_context.cb_param = cb_param;
+        context_task->monitor_task_aborting = false;
         context_task->timeout_seconds = FGR_MONITOR_WDT_TASK_TIMEOUT_SECONDS;
 
         // Set up retained storage if required
@@ -446,11 +460,13 @@ void fgr_monitor_task_wdt_feed(void *handle)
 
         CONTEXT_LOCK(context_task->lock, "fgr_monitor_task_wdt_feed()");
 
-        task_t *task = NULL;
-        SLIST_FOREACH(task, &context_task->task_list, next) {
-            if (task->handle == handle) {
-                task->last_called_us = esp_timer_get_time();
-                break;
+        if (!context_task->monitor_task_aborting) {
+            task_t *task = NULL;
+            SLIST_FOREACH(task, &context_task->task_list, next) {
+                if (task->handle == handle) {
+                    task->last_called_us = esp_timer_get_time();
+                    break;
+                }
             }
         }
 
