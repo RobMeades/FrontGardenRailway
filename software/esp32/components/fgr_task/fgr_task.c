@@ -218,13 +218,19 @@ void fgr_task_deinit()
         // is in the middle of calling one of
         // this API's functions (e.g. fgr_task_min_free_stack()
         // etc.)
-        g_context.is_shutting_down= true;
+        g_context.is_shutting_down = true;
 
         CONTEXT_LOCK(g_context.lock, "fgr_task_deinit()");
 
         while (!SLIST_EMPTY(&g_context.task_list)) {
             task_t *p = SLIST_FIRST(&g_context.task_list);
-            task_destroy(p);
+            // Do not destroy the current task (the one calling this function)
+            if (p->handle != xTaskGetCurrentTaskHandle()) {
+                task_destroy(p);
+            } else {
+                // ...but remove it from the list
+                SLIST_REMOVE_HEAD(&g_context.task_list, next);
+            }
         }
 
         CONTEXT_UNLOCK(g_context.lock, "fgr_task_deinit()");

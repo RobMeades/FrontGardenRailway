@@ -117,6 +117,7 @@ typedef struct {
     void *context_sock;
     bool connected;
     SemaphoreHandle_t lock;
+    bool is_shutting_down;
     TaskHandle_t task_handle;
     QueueHandle_t queue_handle;
     buffer_t buffer;
@@ -557,7 +558,7 @@ static int tcp_log_vprintf(const char *fmt, va_list args)
     fgr_msg_header_log_t *header = &queue_msg.header;
     fgr_msg_body_t **body = &(queue_msg.body);
 
-    if (g_context.queue_handle && g_context.on_not_off) {
+    if (g_context.queue_handle && g_context.on_not_off && !g_context.is_shutting_down) {
         // Parse the log level from format string
         // ESP-IDF logs start with level character: "I (123) TAG: message"
         esp_log_level_t esp_log_level = ESP_LOG_INFO;
@@ -622,7 +623,7 @@ static void socket_heartbeat_cb(int sock, void *param)
     context_t *context = (context_t *) param;
     (void) sock;
 
-    if (context->lock) {
+    if (context->lock && !g_context.is_shutting_down) {
         ESP_LOGI(TAG, "Log heartbeat.");
         CONTEXT_LOCK(context->lock, "socket_heartbeat_cb() log");
         fgr_socket_channel_activity(&context->context_sock);
@@ -636,7 +637,7 @@ static void socket_reconnect_cb(int sock, void *param)
 {
     context_t *context = (context_t *) param;
 
-    if (context->lock) {
+    if (context->lock && !g_context.is_shutting_down) {
 
         int32_t err = fgr_socket_enable_tcp_keep_alive(sock,
                                                        LOG_SOCKET_TCP_KEEP_ALIVE_IDLE_TIME_SECONDS,
@@ -707,6 +708,7 @@ int32_t fgr_log_init(const char *server_ip, uint16_t port,
 
         if (!g_context.queue_handle) {
 
+            g_context.is_shutting_down = false;
             g_context.level_min = level_min;
 
             // Read values from non-volatile storage and,
@@ -795,6 +797,7 @@ int32_t fgr_log_init(const char *server_ip, uint16_t port,
 // Deinitialise logging
 void fgr_log_deinit(void)
 {
+    g_context.is_shutting_down = true;
     clean_up();
 }
 
@@ -803,7 +806,7 @@ int32_t fgr_log_set_level_min(fgr_log_level_t level)
 {
     int32_t err = -ESP_ERR_INVALID_STATE;
 
-    if (g_context.lock) {
+    if (g_context.lock && !g_context.is_shutting_down) {
 
         CONTEXT_LOCK(g_context.lock, "fgr_log_set_level_min()");
 
@@ -825,7 +828,7 @@ int32_t fgr_log_off()
 {
     int32_t err = -ESP_ERR_INVALID_STATE;
 
-    if (g_context.lock) {
+    if (g_context.lock && !g_context.is_shutting_down) {
 
         CONTEXT_LOCK(g_context.lock, "fgr_log_off()");
 
@@ -846,7 +849,7 @@ int32_t fgr_log_on()
 {
     int32_t err = -ESP_ERR_INVALID_STATE;
 
-    if (g_context.lock) {
+    if (g_context.lock && !g_context.is_shutting_down) {
 
         CONTEXT_LOCK(g_context.lock, "fgr_log_on()");
 
@@ -938,7 +941,7 @@ bool fgr_log_is_connected()
 {
     bool is_connected = false;
 
-    if (g_context.lock) {
+    if (g_context.lock && !g_context.is_shutting_down) {
 
         CONTEXT_LOCK(g_context.lock, "fgr_log_is_connected()");
         is_connected = g_context.connected;

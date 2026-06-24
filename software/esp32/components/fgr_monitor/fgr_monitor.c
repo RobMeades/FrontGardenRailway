@@ -131,7 +131,9 @@ static void clean_up(context_t *context)
 
         // Flag should stop task running
         context->running = false;
-        if (context->running_semaphore) {
+        // Can only clean-up the semaphore if we're not being called
+        // from within the monitor task itself
+        if (context->running_semaphore && (context->handle != xTaskGetCurrentTaskHandle())) {
             // Take the running semaphore to know its stopped
             CONTEXT_LOCK(context->running_semaphore, "clean_up() monitor task");
             CONTEXT_UNLOCK(context->running_semaphore, "clean_up() monitor task");

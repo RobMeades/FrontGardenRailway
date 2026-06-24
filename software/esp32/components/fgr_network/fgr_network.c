@@ -98,8 +98,10 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
                  event->bssid[3], event->bssid[4], event->bssid[5]);
         ESP_LOGI(TAG, "Reason: %d.", event->reason);
 
-        ESP_LOGI(TAG, "Attempting to reconnect...");
-        esp_wifi_connect();
+        if (g_initialised) {
+            ESP_LOGI(TAG, "Attempting to reconnect...");
+            esp_wifi_connect();
+        }
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_AUTHMODE_CHANGE) {
         wifi_event_sta_authmode_change_t *event = (wifi_event_sta_authmode_change_t*) event_data;
         ESP_LOGI(TAG, "Authmode changed from %d to %d.",
@@ -305,6 +307,7 @@ int32_t fgr_network_init(const char *ssid, const char *password,
 // Deinitialise networking.
 void fgr_network_deinit()
 {
+    g_initialised = false;
     if (g_sta_netif != NULL) {
         // Call disconnect first or dhcp_fine_tmr() may panic later
         esp_wifi_disconnect();

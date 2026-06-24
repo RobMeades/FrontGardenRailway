@@ -111,6 +111,7 @@ typedef struct {
     void *context_sock;
     bool connected;
     SemaphoreHandle_t lock;
+    bool is_shutting_down;
     uint8_t ind_reference;
     fgr_msg_state_cb_t state_cb;
     void *state_cb_param;
@@ -649,6 +650,7 @@ int32_t fgr_msg_init(const char *server_ip, uint16_t port,
 
             if (g_context.sock < 0) {
 
+                g_context.is_shutting_down = false;
                 g_context.state_cb = cb;
                 g_context.state_cb_param = cb_param;
 
@@ -698,6 +700,7 @@ int32_t fgr_msg_init(const char *server_ip, uint16_t port,
 // Deinitialise the messaging interface.
 void fgr_msg_deinit()
 {
+    g_context.is_shutting_down = true;
     clean_up();
 }
 
@@ -706,7 +709,7 @@ int32_t fgr_msg_rssi_cb_set(fgr_msg_rssi_cb_t cb, void *cb_param)
 {
     int32_t err = -ESP_ERR_INVALID_STATE;
 
-    if (g_context.lock) {
+    if (g_context.lock && !g_context.is_shutting_down) {
 
         CONTEXT_LOCK(g_context.lock, "fgr_msg_rssi_cb()");
         g_context.rssi_cb = cb;
@@ -723,7 +726,7 @@ bool fgr_msg_is_connected()
 {
     bool is_connected = false;
 
-    if (g_context.lock) {
+    if (g_context.lock && !g_context.is_shutting_down) {
 
         CONTEXT_LOCK(g_context.lock, "fgr_msg_is_connected()");
         is_connected = g_context.connected;
@@ -752,7 +755,7 @@ int32_t fgr_msg_send_ind(fgr_ind_rsp_t ind, const void *buffer,
 {
     int32_t err = -ESP_ERR_INVALID_STATE;
 
-    if (g_context.lock) {
+    if (g_context.lock && !g_context.is_shutting_down) {
 
         fgr_state_t state = FGR_STATE_NOT_POPULATED;
         uint8_t reference;
@@ -943,7 +946,7 @@ int32_t fgr_msg_send_cb_set(fgr_msg_send_cb_t cb, void *cb_param)
 {
     int32_t err = -ESP_ERR_INVALID_STATE;
 
-    if (g_context.lock) {
+    if (g_context.lock && !g_context.is_shutting_down) {
 
         CONTEXT_LOCK(g_context.lock, "fgr_msg_send_cb()");
         g_context.send_cb = cb;
@@ -961,7 +964,7 @@ int32_t fgr_msg_send_ping_body_cb(fgr_msg_send_ping_body_cb_t cb,
 {
     int32_t err = -ESP_ERR_INVALID_STATE;
 
-    if (g_context.lock) {
+    if (g_context.lock && !g_context.is_shutting_down) {
 
         CONTEXT_LOCK(g_context.lock, "fgr_msg_send_ping_body_cb()");
         g_context.send_ping_body_cb = cb;
@@ -982,7 +985,7 @@ int32_t fgr_msg_receive_start()
 {
     int32_t err = -ESP_ERR_INVALID_STATE;
 
-    if (g_context.lock) {
+    if (g_context.lock && !g_context.is_shutting_down) {
 
         CONTEXT_LOCK(g_context.lock, "fgr_msg_receive_start()");
         decoder_init(&g_context.context_decoder);
@@ -1003,7 +1006,7 @@ int32_t fgr_msg_receive_cb_set(fgr_msg_receive_cb_t cb, void *cb_param)
 {
     int32_t err = -ESP_ERR_INVALID_STATE;
 
-    if (g_context.lock) {
+    if (g_context.lock && !g_context.is_shutting_down) {
 
         CONTEXT_LOCK(g_context.lock, "fgr_msg_receive_cb_set()");
         g_context.receive_cb = cb;
@@ -1022,7 +1025,7 @@ int32_t fgr_msg_receive_handler_add(uint16_t msg_type,
 {
     int32_t err = -ESP_ERR_INVALID_STATE;
 
-    if (g_context.lock) {
+    if (g_context.lock && !g_context.is_shutting_down) {
         err = -ESP_ERR_INVALID_ARG;
         if (cb &&
             ((msg_type == 0) ||
@@ -1050,7 +1053,7 @@ int32_t fgr_msg_receive_handler_add(uint16_t msg_type,
 // Remove a message receive handler.
 void fgr_msg_receive_handler_remove_by_cb(fgr_msg_receive_handler_cb_t cb)
 {
-    if (g_context.lock && cb) {
+    if (g_context.lock && !g_context.is_shutting_down && cb) {
 
         CONTEXT_LOCK(g_context.lock, "fgr_msg_receive_handler_remove_by_cb()");
         msg_rx_handler_cb_t *iter;
@@ -1079,7 +1082,7 @@ void fgr_msg_receive_handler_remove_by_cb(fgr_msg_receive_handler_cb_t cb)
 // Remove a message receive handler.
 void fgr_msg_receive_handler_remove_by_type(uint16_t msg_type)
 {
-    if (g_context.lock) {
+    if (g_context.lock && !g_context.is_shutting_down) {
 
         CONTEXT_LOCK(g_context.lock, "fgr_msg_receive_handler_remove_by_type()");
         msg_rx_handler_cb_t *iter;
@@ -1108,6 +1111,7 @@ void fgr_msg_receive_handler_remove_by_type(uint16_t msg_type)
 // Stop receiving messages.
 void fgr_msg_receive_stop()
 {
+    // Don't check the is_shutting_down flag here,'cos this is part of shutting down
     if (g_context.lock) {
 
         CONTEXT_LOCK(g_context.lock, "fgr_msg_receive_stop()");

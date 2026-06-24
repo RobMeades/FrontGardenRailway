@@ -78,6 +78,10 @@ typedef void (*fgr_task_state_cb_t) (fgr_task_state_t state,
 int32_t fgr_task_init();
 
 /** Deinitialise tasking.  It is always safe to call this function.
+ * All tasks that were created will be destroyed except the task
+ * calling fgr_task_deinit(): if that is present in the list it
+ * will be removed from the list but will _not_ be destroyed; it
+ * is up to the calling task to clear itself up.
  */
 void fgr_task_deinit();
 
