@@ -5031,6 +5031,10 @@ class WebController(Controller):
         let currentChartData = {};
         let rawGraphData = {};
         let currentDrillDownData = null;
+        let graphAutoRefreshEnabled = true;
+        let graphAutoRefreshInterval = null;
+        const GRAPH_AUTO_REFRESH_DELAY = 30000; // 30 seconds
+
 
         // Log level names
         const logLevelNames = ['DEBUG', 'INFO', 'WARN', 'ERROR'];
@@ -7591,19 +7595,195 @@ class WebController(Controller):
             queueDebugViewOperation(DebugViewOperation.ADD_LOG, logData);
         }
 
-        // Don't call this, call trimBuffer()
-        function trimBufferInternal() {
-            let trimmed = false;
-            while (logBuffer.length > MAX_LOG_ENTRIES) {
-                logBuffer.shift();
-                trimmed = true;
+        function findCenterLogId() {
+            /**
+            * Find the log ID at the center of the viewport.
+            * Returns null if no log found.
+            */
+            if (!debugWindow) return null;
+
+            const viewportCenter = debugWindow.scrollTop + debugWindow.clientHeight / 2;
+            let closestElement = null;
+            let closestDistance = Infinity;
+
+            for (const el of logElements) {
+                if (el.style.display !== 'none' && el.style.visibility !== 'hidden') {
+                    const rect = el.getBoundingClientRect();
+                    const elCenter = rect.top + rect.height / 2;
+                    const distance = Math.abs(elCenter - viewportCenter);
+                    if (distance < closestDistance) {
+                        closestDistance = distance;
+                        closestElement = el;
+                    }
+                }
             }
-            return trimmed;
+
+            if (closestElement) {
+                const logId = closestElement.getAttribute('data-log_id');
+                if (logId && logId !== 'gap' && logId !== 'null') {
+                    const id = parseInt(logId, 10);
+                    if (!isNaN(id)) {
+                        return id;
+                    }
+                }
+            }
+
+            return null;
+        }
+
+        function trimBufferInternal() {
+            /**
+            * Trim buffer to max size while preserving the visible range.
+            * Called from the queue processor.
+            * Returns true if trimming occurred, false otherwise.
+            */
+            if (logBuffer.length <= MAX_LOG_ENTRIES) {
+                return false;
+            }
+
+            if (!debugWindow) {
+                // No window? Trim to prevent memory issues
+                if (logBuffer.length > MAX_LOG_ENTRIES * 1.5) {
+                    logBuffer.splice(0, logBuffer.length - MAX_LOG_ENTRIES);
+                    return true;
+                }
+                return false;
+            }
+
+            // Determine the visible range with generous margins
+            const viewportHeight = debugWindow.clientHeight;
+            const margin = viewportHeight * 0.5; // 50% margin above and below
+
+            const viewportTop = debugWindow.scrollTop;
+            const viewportBottom = viewportTop + viewportHeight;
+
+            const protectedTop = viewportTop - margin;
+            const protectedBottom = viewportBottom + margin;
+
+            // Find the log IDs that fall within the protected range
+            let protectedLogIds = new Set();
+            let earliestProtectedTimestamp = null;
+            let latestProtectedTimestamp = null;
+
+            for (const el of logElements) {
+                if (el.style.display !== 'none' && el.style.visibility !== 'hidden') {
+                    const rect = el.getBoundingClientRect();
+                    const elTop = rect.top;
+                    const elBottom = rect.bottom;
+
+                    // Check if this element overlaps the protected range
+                    if (elTop < protectedBottom && elBottom > protectedTop) {
+                        const logId = el.getAttribute('data-log_id');
+                        if (logId && logId !== 'gap' && logId !== 'null') {
+                            const id = parseInt(logId, 10);
+                            if (!isNaN(id)) {
+                                protectedLogIds.add(id);
+
+                                // Also track timestamps for additional safety
+                                const ts = parseFloat(el.getAttribute('data-timestamp'));
+                                if (ts && !isNaN(ts)) {
+                                    if (earliestProtectedTimestamp === null || ts < earliestProtectedTimestamp) {
+                                        earliestProtectedTimestamp = ts;
+                                    }
+                                    if (latestProtectedTimestamp === null || ts > latestProtectedTimestamp) {
+                                        latestProtectedTimestamp = ts;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // If we couldn't find any protected logs, use the center log as fallback
+            if (protectedLogIds.size === 0) {
+                const centerLogId = findCenterLogId();
+                if (centerLogId !== null) {
+                    protectedLogIds.add(centerLogId);
+                }
+            }
+
+            // Calculate how many entries to remove
+            let entriesToRemove = logBuffer.length - MAX_LOG_ENTRIES;
+
+            // If we have protected logs, make sure we don't trim them
+            if (protectedLogIds.size > 0) {
+                // Find the earliest protected log in the buffer
+                let earliestProtectedIndex = -1;
+                for (let i = 0; i < logBuffer.length; i++) {
+                    if (protectedLogIds.has(logBuffer[i].log_id)) {
+                        earliestProtectedIndex = i;
+                        break;
+                    }
+                }
+
+                if (earliestProtectedIndex !== -1) {
+                    // Keep at least 100 entries before the earliest protected log
+                    // This provides context when scrolling up
+                    const minKeep = Math.max(0, earliestProtectedIndex - 100);
+                    entriesToRemove = Math.min(entriesToRemove, minKeep);
+                }
+            }
+
+            // If we still need to remove entries (buffer is critically large),
+            // we might need to trim even protected logs, but do it conservatively
+            if (entriesToRemove > 0 && protectedLogIds.size > 0) {
+                // Try to find the index of the latest protected log
+                let latestProtectedIndex = -1;
+                for (let i = logBuffer.length - 1; i >= 0; i--) {
+                    if (protectedLogIds.has(logBuffer[i].log_id)) {
+                        latestProtectedIndex = i;
+                        break;
+                    }
+                }
+
+                // If we're still over limit and can't remove enough before the earliest protected log,
+                // we can remove some from the very beginning (oldest) even if it's in the protected range
+                // but only as a last resort
+                if (entriesToRemove > 0 && earliestProtectedIndex !== -1) {
+                    // Calculate what we can safely remove
+                    const safeRemove = Math.min(entriesToRemove, earliestProtectedIndex);
+                    entriesToRemove = safeRemove;
+
+                    // If we still can't remove enough (earliestProtectedIndex is too small),
+                    // we'll remove what we can and accept a small view shift
+                    if (entriesToRemove <= 0 && logBuffer.length > MAX_LOG_ENTRIES * 1.5) {
+                        // Critical situation - remove at least 10 entries
+                        entriesToRemove = Math.min(10, logBuffer.length - MAX_LOG_ENTRIES);
+                    }
+                }
+            }
+
+            // Actually remove entries
+            if (entriesToRemove > 0) {
+                // Store the protected range for restoration
+                window._protectedLogIds = protectedLogIds;
+                window._protectedEarliestTimestamp = earliestProtectedTimestamp;
+                window._protectedLatestTimestamp = latestProtectedTimestamp;
+
+                logBuffer.splice(0, entriesToRemove);
+                return true;
+            }
+
+            return false;
         }
 
         // Trim buffer (does NOT touch DOM)
         function trimBuffer() {
             queueDebugViewOperation(DebugViewOperation.TRIM_BUFFER);
+        }
+
+        // Debug window trimmer
+        function startIntelligentTrimmer() {
+            /**
+            * Start a trimmer that preserves the visible range.
+            */
+            setInterval(() => {
+                // Only trim if we're significantly over the limit
+                if (logBuffer.length > MAX_LOG_ENTRIES * 1.05) { // 5% over threshold
+                    trimBuffer();
+                }
+            }, 10000); // Check every 10 seconds
         }
 
         async function getDbTimestampByLogId(logId) {
@@ -7837,6 +8017,16 @@ class WebController(Controller):
         function rebuildDebugDisplayInternal() {
             if (!debugWindow) return;
 
+            // Get any pending state
+            const protectedLogIds = window._protectedLogIds;
+            const protectedEarliestTimestamp = window._protectedEarliestTimestamp;
+            const protectedLatestTimestamp = window._protectedLatestTimestamp;
+
+            // Clear pending state
+            window._protectedLogIds = null;
+            window._protectedEarliestTimestamp = null;
+            window._protectedLatestTimestamp = null;
+
             const oldScrollTop = debugWindow.scrollTop;
             const oldScrollHeight = debugWindow.scrollHeight;
 
@@ -8033,8 +8223,64 @@ class WebController(Controller):
                 }
             }
 
-            // Restore or adjust scroll position
-            if (shouldScrollToBottom) {
+            // Restore scroll position using the protected range if available
+            if (protectedLogIds && protectedLogIds.size > 0) {
+                // Find the first protected log in the new DOM
+                let targetElement = null;
+                for (const el of logElements) {
+                    const logId = el.getAttribute('data-log_id');
+                    if (logId && logId !== 'gap' && logId !== 'null') {
+                        const id = parseInt(logId, 10);
+                        if (!isNaN(id) && protectedLogIds.has(id)) {
+                            targetElement = el;
+                            break;
+                        }
+                    }
+                }
+
+                if (targetElement) {
+                    // Scroll to this element (it's the earliest protected log)
+                    targetElement.scrollIntoView({ block: 'start' });
+                    // Brief highlight to show where we landed
+                    targetElement.style.backgroundColor = '#ffff99';
+                    setTimeout(() => {
+                        if (targetElement) targetElement.style.backgroundColor = '';
+                    }, 500);
+
+                    // Restore cursor if this was a cursor
+                    if (searchLogId !== null && protectedLogIds.has(searchLogId)) {
+                        targetElement.classList.add('log-cursor');
+                    }
+                } else {
+                    // Fallback: try to find by timestamp range
+                    if (protectedEarliestTimestamp !== null) {
+                        for (const el of logElements) {
+                            const ts = parseFloat(el.getAttribute('data-timestamp'));
+                            if (ts && !isNaN(ts) && Math.abs(ts - protectedEarliestTimestamp) < 0.1) {
+                                targetElement = el;
+                                break;
+                            }
+                        }
+                        if (targetElement) {
+                            targetElement.scrollIntoView({ block: 'start' });
+                            targetElement.style.backgroundColor = '#ffff99';
+                            setTimeout(() => {
+                                if (targetElement) targetElement.style.backgroundColor = '';
+                            }, 500);
+                        }
+                    }
+
+                    // If still no target, fall back to ratio-based scroll
+                    if (!targetElement) {
+                        const ratio = 0.5;
+                        const newScrollTop = ratio * debugWindow.scrollHeight;
+                        const maxScroll = debugWindow.scrollHeight - debugWindow.clientHeight;
+                        if (maxScroll > 0) {
+                            debugWindow.scrollTop = Math.max(0, Math.min(newScrollTop, maxScroll));
+                        }
+                    }
+                }
+            } else if (shouldScrollToBottom) {
                 debugWindow.scrollTop = debugWindow.scrollHeight;
             } else if (currentScrollAnchor) {
                 for (let i = 0; i < logTimestamps.length; i++) {
@@ -9236,10 +9482,7 @@ class WebController(Controller):
             setupDebugWindow();
             initDebugWindow();
             initSearchUI();
-            // Trim buffer every 30 seconds
-            setInterval(() => {
-                trimBuffer();
-            }, 30000);
+            startIntelligentTrimmer();
         }
 
         // ============ GRAPH VIEW CODE ============
@@ -9316,16 +9559,22 @@ class WebController(Controller):
                         initializeGraphComponents();
                     }
                     loadGraphs();
+                    // Start auto-refresh when switching to graph view
+                    if (graphAutoRefreshEnabled) {
+                        graphStartAutoRefresh();
+                    }
                 }
                 updateViewSelector('graphs');
                 // Change footer text for graph view
                 if (footer) {
-                    footer.innerHTML = '📈 Graph View - Double-click any graph to expand | Select nodes with Ctrl/Cmd+Click | Use time range dropdown';
+                    footer.innerHTML = '📈 Graph View - Double-click any graph to expand | Select nodes with Ctrl/Cmd+Click | Auto-refresh updates every 30 seconds';
                 }
             } else {
                 if (gridWrapper) gridWrapper.style.display = 'block';
                 if (graphContainer) graphContainer.style.display = 'none';
                 updateViewSelector('grid');
+                // Stop auto-refresh when leaving graph view
+                graphStopAutoRefresh();
                 // Restore original footer text
                 if (footer) {
                     footer.innerHTML = 'FGR Controller - Drag ⋮⋮ to reorder nodes | Double-click card to expand | Drag blue bar above debug panel to resize | 📌 Dock returns to default size | Click header to collapse/expand';
@@ -10793,6 +11042,7 @@ class WebController(Controller):
             }, 50);
         }
 
+        // Modify the auto-refresh button creation in setupGraphEventListeners()
         function setupGraphEventListeners() {
             const refreshBtn = document.getElementById('refreshGraphsBtn');
             if (refreshBtn) {
@@ -10810,7 +11060,41 @@ class WebController(Controller):
                 };
             }
 
+            // Add auto-refresh button
             const nodeFilter = document.getElementById('graphNodeFilter');
+            if (nodeFilter) {
+                const parent = nodeFilter.parentNode;
+                if (parent) {
+                    // Check if auto-refresh button already exists
+                    let autoRefreshBtn = document.getElementById('graphAutoRefreshBtn');
+                    if (!autoRefreshBtn) {
+                        autoRefreshBtn = document.createElement('button');
+                        autoRefreshBtn.id = 'graphAutoRefreshBtn';
+                        // Fix 1: Add white-space: nowrap to prevent text wrapping
+                        // Fix 2: Add cursor: pointer to show the "pushy finger" on hover
+                        autoRefreshBtn.style.cssText = 'padding: 4px 8px; font-size: 10px; margin-left: 4px; white-space: nowrap; cursor: pointer;';
+                        autoRefreshBtn.textContent = '🔄 Auto On';
+                        autoRefreshBtn.title = 'Toggle auto-refresh (default: ON)';
+                        parent.appendChild(autoRefreshBtn);
+                    }
+
+                    autoRefreshBtn.onclick = () => {
+                        graphAutoRefreshEnabled = !graphAutoRefreshEnabled;
+                        autoRefreshBtn.textContent = graphAutoRefreshEnabled ? '🔄 Auto On' : '🔄 Auto Off';
+                        autoRefreshBtn.style.background = graphAutoRefreshEnabled ? '#28a745' : '#dc3545';
+                        if (graphAutoRefreshEnabled) {
+                            graphStartAutoRefresh();
+                        } else {
+                            graphStopAutoRefresh();
+                        }
+                    };
+
+                    // Set initial state
+                    autoRefreshBtn.style.background = '#28a745';
+                }
+            }
+
+            // Node filter change handler
             if (nodeFilter) {
                 nodeFilter.onchange = () => {
                     // Find current cache key and re-render
@@ -10823,6 +11107,39 @@ class WebController(Controller):
                         loadGraphs();
                     }
                 };
+            }
+        }
+
+        function graphStartAutoRefresh() {
+            graphStopAutoRefresh(); // Clear any existing interval
+            if (graphAutoRefreshEnabled) {
+                graphAutoRefreshInterval = setInterval(() => {
+                    // Only refresh if graph view is visible and auto-refresh is enabled
+                    const graphContainer = document.getElementById('graphViewContainer');
+                    if (graphContainer && graphContainer.style.display !== 'none' && graphAutoRefreshEnabled) {
+                        // Clear cache and reload
+                        const now = Math.floor(Date.now() / 1000);
+                        const startTime = now - (currentTimeRange.hours * 3600);
+                        const cacheKey = `${currentTimeRange.hours}_${Math.floor(startTime / 60)}`;
+                        delete simpleCache[cacheKey];
+                        loadGraphs();
+                        // Visual feedback on refresh
+                        const refreshBtn = document.getElementById('refreshGraphsBtn');
+                        if (refreshBtn) {
+                            refreshBtn.style.background = '#28a745';
+                            setTimeout(() => {
+                                refreshBtn.style.background = '';
+                            }, 200);
+                        }
+                    }
+                }, GRAPH_AUTO_REFRESH_DELAY);
+            }
+        }
+
+        function graphStopAutoRefresh() {
+            if (graphAutoRefreshInterval) {
+                clearInterval(graphAutoRefreshInterval);
+                graphAutoRefreshInterval = null;
             }
         }
 
@@ -10862,11 +11179,15 @@ class WebController(Controller):
                 script.onload = () => {
                     console.log('ECharts loaded');
                     loadGraphs();
+                    // Start auto-refresh after graphs are loaded
+                    graphStartAutoRefresh();
                 };
                 document.head.appendChild(script);
             } else {
                 console.log('ECharts already loaded');
                 loadGraphs();
+                // Start auto-refresh after graphs are loaded
+                graphStartAutoRefresh();
             }
         }
 
