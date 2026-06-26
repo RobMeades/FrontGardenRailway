@@ -693,13 +693,12 @@ int32_t fgr_heap_leak_start(size_t *total,
             err = FGR_RRAM_GET(leak_list);
             if (err == ESP_OK) {
                 g_context.leak_list_next = 0;
-                uint8_t buffer[32];
-                err = fgr_ota_current_sha256(buffer);
-                if (err == ESP_OK) {
-                    err = -ESP_ERR_INVALID_VERSION;
-                    if (memcmp(buffer, leak_list.image_sha256, sizeof(leak_list.image_sha256)) == 0) {
-                        err = leak_list.allocated_or_error;
-                        if (err >= 0) {
+                err = leak_list.allocated_or_error;
+                if (err > 0) {
+                    uint8_t buffer[32];
+                    err = fgr_ota_current_sha256(buffer);
+                    if (err == ESP_OK) {
+                        if (memcmp(buffer, leak_list.image_sha256, sizeof(leak_list.image_sha256)) == 0) {
                             *total = err;
                             err = leak_list.count;
                             if (leak_list.count > 0) {
@@ -711,6 +710,8 @@ int32_t fgr_heap_leak_start(size_t *total,
                                 err--;
                                 g_context.leak_list_next++;
                             }
+                        } else {
+                            err = -ESP_ERR_INVALID_VERSION;
                         }
                     }
                 }
