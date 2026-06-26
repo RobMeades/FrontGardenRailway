@@ -219,7 +219,7 @@ typedef fgr_state_t (*fgr_debug_state_cb_t) (void *param);
  * FUNCTIONS: INITIALISE/DEINITIALISE
  * -------------------------------------------------------------- */
 
-/** Initialise debug.  Needs a task so fgr_util_init() must
+/** Initialise debug.  Needs a task so fgr_task_init() must
  * have been called first.  It is always safe to call this at any
  * time: if already initialised it will do nothing and return success.
  *
@@ -393,7 +393,7 @@ int32_t fgr_debug_panic_str_get(char *backtrace_str, char *hash);
  * the hash of the software version when the panic occurred, the
  * second will contain the backtrace.
  *
- * @param tag    the tag to apply to the log message; may be NULL
+ * @param tag    the tag to apply to the log messages; may be NULL
  *               in which case whatever is the default tag for
  *               debug messages will be employed.
  * @param prefix a prefix to put in front of the backtrace string;

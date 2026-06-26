@@ -129,7 +129,7 @@ typedef uint32_t (*fgr_msg_send_ping_body_cb_t) (uint8_t *buffer,
  * -------------------------------------------------------------- */
 
 /** Initialise the messaging interface: connects to the controller,
- * allowing messages to be exchanged.  Needs a task so fgr_util_init()
+ * allowing messages to be exchanged.  Needs a task so fgr_task_init()
  * must have been called first.  It is always safe to call this at any
  * time; if already initialised it will do nothing and return success.
  *

@@ -28,6 +28,7 @@
 #include "esp_task_wdt.h"
 
 #include "fgr_util.h"
+#include "fgr_heap.h"
 #include "fgr_task.h"
 #include "fgr_monitor.h"
 #include "fgr_time.h"
@@ -40,6 +41,9 @@
 #include "fgr_log.h"
 
 #include "fgr_lib.h"
+
+// Must be last in the inclusions to poison calls to malloc()/free()
+#include "fgr_heap_wrapper.h"
 
 /* ----------------------------------------------------------------
  * COMPILE-TIME MACROS
@@ -89,8 +93,13 @@ int32_t fgr_lib_init(const char *ota_server_cert_pem,
         fgr_monitor_task_wdt_feed(NULL);
 #endif
 
+        // Initialise heap checking
+        err = fgr_heap_init();
+
         // Initialise tasking
-        err = fgr_task_init();
+        if (err == ESP_OK) {
+            err = fgr_task_init();
+        }
 
         // Configure monitoring: monitors tasks so has to come after
         // fgr_task_init()
@@ -137,12 +146,16 @@ int32_t fgr_lib_init(const char *ota_server_cert_pem,
                                 FGR_TIME_NTP_SYNC_INTERVAL_SECONDS);
         }
 
+#  if !defined(CONFIG_FGR_LIB_SKIP_OTA_UPDATE)
         // Check for an OTA update, which may restart the system
         if (err == ESP_OK) {
             err = fgr_ota_update(CONFIG_FGR_OTA_FIRMWARE_UPGRADE_URL,
                                  ota_server_cert_pem,
                                  CONFIG_FGR_OTA_RECEIVE_TIMEOUT_MS);
         }
+#  else
+        ESP_LOGW(TAG, "CONFIG_FGR_LIB_SKIP_OTA_UPDATE is defined, skipping OTA update");
+#  endif
 
         // Forward logging to the server
         if (err == ESP_OK) {
@@ -159,6 +172,7 @@ int32_t fgr_lib_init(const char *ota_server_cert_pem,
         // change that script also.
         if (err == ESP_OK) {
             fgr_debug_reset_reason_log();
+            fgr_heap_leak_log("LEAK", NULL, ESP_LOG_WARN);
             fgr_monitor_abort_reason_log("ABORT", NULL, ESP_LOG_WARN);
             fgr_debug_panic_log("BACKTRACE", NULL, ESP_LOG_WARN);
             fgr_debug_stack_overflow_log("STACK_OVERFLOW", NULL, ESP_LOG_WARN);
@@ -218,6 +232,7 @@ void fgr_lib_deinit(void)
         fgr_debug_deinit();
         fgr_metrics_deinit();
         fgr_task_deinit();
+        fgr_heap_deinit();
 
         esp_task_wdt_delete(NULL);
 

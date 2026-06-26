@@ -30,6 +30,7 @@
 #include "esp_task_wdt.h"
 #include "esp_log.h"
 #include "sys/queue.h"
+#include "esp_heap_trace.h"
 
 #include "fgr_util.h"
 #include "fgr_task.h"
@@ -37,6 +38,9 @@
 #include "fgr_metrics.h"
 #include "fgr_monitor.h"
 #include "fgr_lib.h"
+
+// Must be last in the inclusions to poison calls to malloc()/free()
+#include "fgr_heap_wrapper.h"
 
 /* ----------------------------------------------------------------
  * COMPILE-TIME MACROS
@@ -148,7 +152,7 @@ static void clean_up(context_t *context)
             while (!SLIST_EMPTY(&context_task->task_list)) {
                 task_t *p = SLIST_FIRST(&context_task->task_list);
                 SLIST_REMOVE_HEAD(&context_task->task_list, next);
-                free(p);
+                FREE(p);
             }
 
             CONTEXT_UNLOCK(context_task->lock, "clean_up() monitor task");
@@ -246,7 +250,7 @@ static void task_state_cb(fgr_task_state_t state, void *handle,
         if (!found) {
             if (state != FGR_TASK_STATE_STOPPED) {
                 // Add a new entry
-                task = (task_t *) malloc(sizeof(*task));
+                task = (task_t *) MALLOC(sizeof(*task));
                 if (task) {
                     task->handle = handle;
                     task->name = name;
@@ -263,6 +267,7 @@ static void task_state_cb(fgr_task_state_t state, void *handle,
                     // Removing a middle element
                     SLIST_REMOVE_AFTER(task_prev, next);
                 }
+                FREE(task);
                 task = NULL;
             }
         }
@@ -355,6 +360,9 @@ static void task_monitor(void *param)
         esp_task_wdt_reset();
         vTaskDelay(pdMS_TO_TICKS(FGR_MONITOR_CHECK_INTERVAL_MS));
     }
+
+    ESP_LOGI(TAG, "task_monitor exiting.");
+    vTaskDelay(pdMS_TO_TICKS(FGR_UTIL_WATCHDOG_FEED_TIME_MS));
 
     CONTEXT_UNLOCK(context->running_semaphore, "task_monitor() running");
 

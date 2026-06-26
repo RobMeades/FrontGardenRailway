@@ -253,7 +253,7 @@ void fgr_socket_connect_stop(void **context);
  * fgr_socket_set_non_blocking().  fgr_socket_channel_stop() MUST
  * be called when the connection is no longer required and that
  * will close the socket, no need to call fgr_socket_destroy()
- * or close() on the socket.  Needs a task so fgr_util_init() must
+ * or close() on the socket.  Needs a task so fgr_task_init() must
  * have been called first.
  *
  * The term "channel" is employed only to make the function names

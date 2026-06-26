@@ -37,7 +37,11 @@
 #include "fgr_monitor.h"
 #include "fgr_task.h"
 #include "fgr_debug.h"
+
 #include "fgr_socket.h"
+
+// Must be last in the inclusions to poison calls to malloc()/free()
+#include "fgr_heap_wrapper.h"
 
 /* ----------------------------------------------------------------
  * COMPILE-TIME MACROS
@@ -611,7 +615,7 @@ int32_t fgr_socket_connect_start(int sock, const char *server_ip,
 
     if (server_ip && context) {
         err = -ESP_ERR_NO_MEM;
-        *context = malloc(sizeof(context_connect_t));
+        *context = MALLOC(sizeof(context_connect_t));
         context_connect_t *context_connect = (context_connect_t *) *context;
         if (context_connect) {
             memset(context_connect, 0, sizeof(*context_connect));
@@ -640,7 +644,7 @@ int32_t fgr_socket_connect_start(int sock, const char *server_ip,
 
             if (err != -ESP_ERR_NOT_FINISHED) {
                 // Don't need the context if we're connected or failed immediately
-                free(*context);
+                FREE(*context);
                 *context = NULL;
             }
         }
@@ -703,7 +707,7 @@ int32_t fgr_socket_connect_is_complete(int32_t timeout_ms, void **context)
 
         if (err != -ESP_ERR_NOT_FINISHED) {
             // Don't need the context if we're connected or failed
-            free(*context);
+            FREE(*context);
             *context = NULL;
         }
     }
@@ -715,7 +719,7 @@ int32_t fgr_socket_connect_is_complete(int32_t timeout_ms, void **context)
 void fgr_socket_connect_stop(void **context)
 {
     if (fgr_util_is_valid_ptr_to_ptr(context, TAG, "socket context", __FILE__, __LINE__) && context) {
-        free(*context);
+        FREE(*context);
         *context = NULL;
     }
 }
@@ -744,7 +748,7 @@ int32_t fgr_socket_channel_start(const char *server_ip, uint16_t port,
         }
         if (err == ESP_OK) {
             err = -ESP_ERR_NO_MEM;
-            *context = malloc(sizeof(context_channel_t));
+            *context = MALLOC(sizeof(context_channel_t));
             context_channel_t *context_channel = (context_channel_t *) *context;
             if (context_channel) {
                 memset(context_channel, 0, sizeof(*context_channel));
@@ -764,7 +768,7 @@ int32_t fgr_socket_channel_start(const char *server_ip, uint16_t port,
         }
         if (err != ESP_OK) {
             // Tidy up on error
-            free(*context);
+            FREE(*context);
             *context = NULL;
             if (*sock >= 0) {
                 fgr_socket_destroy(sock);
@@ -883,7 +887,7 @@ void fgr_socket_channel_stop(void **context)
         }
 
         vSemaphoreDelete(context_channel->lock);
-        free(*context);
+        FREE(*context);
         *context = NULL;
     }
 }
@@ -917,7 +921,7 @@ int32_t fgr_socket_receive_start(int sock,
 
     if (context) {
         err = -ESP_ERR_NO_MEM;
-        *context = malloc(sizeof(context_rx_t));
+        *context = MALLOC(sizeof(context_rx_t));
         context_rx_t *context_rx = (context_rx_t *) *context;
         if (context_rx) {
             memset(context_rx, 0, sizeof(*context_rx));
@@ -942,7 +946,7 @@ int32_t fgr_socket_receive_start(int sock,
             if (context_rx->lock) {
                 vSemaphoreDelete(context_rx->lock);
             }
-            free(*context);
+            FREE(*context);
             *context = NULL;
         }
     }
@@ -1006,7 +1010,7 @@ void fgr_socket_receive_stop(void **context)
             CONTEXT_LOCK(context_rx->lock, "fgr_socket_receive_stop()");
             CONTEXT_UNLOCK(context_rx->lock, "fgr_socket_receive_stop()");
             vSemaphoreDelete(context_rx->lock);
-            free(*context);
+            FREE(*context);
             *context = NULL;
         }
     }

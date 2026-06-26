@@ -37,6 +37,12 @@ extern "C" {
 #  define FGR_METRICS_STACK_MIN_FREE_LOWEST_LENGTH 3
 #endif
 
+#ifndef FGR_METRICS_HEAP_ALLOCATION_HIGHEST_LENGTH
+// The number of heap allocation values to report in the
+// fgr_metrics_heap_allocation_highest_t structure.
+# define FGR_METRICS_HEAP_ALLOCATION_HIGHEST_LENGTH 3
+#endif
+
 /* ----------------------------------------------------------------
  * TYPES
  * -------------------------------------------------------------- */
@@ -86,6 +92,24 @@ typedef struct {
     fgr_metrics_stack_min_free_bytes_t task[FGR_METRICS_STACK_MIN_FREE_LOWEST_LENGTH];
 } fgr_metrics_stack_min_free_lowest_t;
 
+/** Structure to carry a heap allocation value (in bytes).
+ */
+typedef struct {
+    size_t size;
+    const char *file;  // File name, will be a null-terminated string
+    size_t line;
+} fgr_metrics_heap_allocation_t;
+
+/** Structure to carry a set of heap allocation values. This
+ * should be populated with the FGR_METRICS_HEAP_ALLOCATION_HIGHEST_LENGTH
+ * highest heap allocation values, sorted into descending order,
+ * i.e. the largest heap allocaion should be at index 0.
+ */
+typedef struct {
+    uint8_t count;  // The number of entries populated in heap[]
+    fgr_metrics_heap_allocation_t allocation[FGR_METRICS_HEAP_ALLOCATION_HIGHEST_LENGTH];
+} fgr_metrics_heap_allocation_highest_t;
+
 /** The metrics: if you add a new item here you should add
  * an entry for it in the union below, with the same name minus
  * the prefix and in lower case, preferably in the same position,
@@ -113,6 +137,7 @@ typedef enum {
     FGR_METRIC_EVENT_BOOL_NVS_WRITE,
     FGR_METRIC_STACK_MIN_FREE_LOWEST,
     FGR_METRIC_SIMPLE_HEAP_MIN_FREE,
+    FGR_METRIC_HEAP_ALLOCATION_HIGHEST,
     FGR_METRIC_COUNT
 } fgr_metrics_t;
 
@@ -137,6 +162,7 @@ typedef union {
     fgr_metrics_event_bool_t nvs_write;               // Event true: NVS write successful, event false: NVS write failure, amount: the number of bytes that [would have been] written
     fgr_metrics_stack_min_free_lowest_t stack_min_free_lowest;
     int32_t heap_min_free_bytes;
+    fgr_metrics_heap_allocation_highest_t heap_allocation_highest;
 } fgr_metrics_union_t;
 
 /** Generic storage for any metric.
@@ -146,6 +172,7 @@ typedef union {
     fgr_metrics_event_t event;
     fgr_metrics_event_bool_t event_bool;
     fgr_metrics_stack_min_free_lowest_t stack_min_free_lowest;
+    fgr_metrics_heap_allocation_highest_t heap_allocation_highest;
 } fgr_metrics_storage_t;
 
 /** Callback for reporting of metrics.
@@ -163,7 +190,7 @@ typedef void (*fgr_metrics_report_cb_t) (fgr_metrics_storage_t *list,
  * FUNCTIONS
  * -------------------------------------------------------------- */
 
-/** Initialise metrics.  Needs a task, so fgr_util_init() must
+/** Initialise metrics.  Needs a task, so fgr_task_init() must
  * have been called first.  It is always safe to call this at any
  * time; if already initialised it will do nothing and return success.
  *
@@ -354,6 +381,13 @@ int32_t fgr_metrics_event_bool_get(fgr_metrics_t metric,
  * @return       ESP_OK on success, else a negative value from esp_err_t.
  */
 int32_t fgr_metrics_stack_min_free_lowest_get(fgr_metrics_stack_min_free_lowest_t *value);
+
+/** Get the current highest heap allocation values.
+ *
+ * @param value  a place to put the highest heap allocation values; cannot be NULL.
+ * @return       ESP_OK on success, else a negative value from esp_err_t.
+ */
+int32_t fgr_metrics_heap_allocation_highest_get(fgr_metrics_heap_allocation_highest_t *value);
 
 /** Get the averaged RSSI value: this is intended to be used as
  * a callback function with fgr_msg_rssi_cb_set(), but may also be

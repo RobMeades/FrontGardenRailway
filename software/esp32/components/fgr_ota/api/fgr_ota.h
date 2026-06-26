@@ -131,6 +131,14 @@ int32_t fgr_ota_init(fgr_ota_lib_is_good_cb_t msg_is_good_cb,
 int32_t fgr_ota_update(const char *update_file_url, const char *server_cert_pem,
                        int32_t timeout_ms);
 
+/** Get the SHA256 of the current running image.
+ *
+ * @param buffer   pointer to 32 bytes of storage for the SHA256 value;
+ *                 cannot be NULL.
+ * @return         ESP_OK on success, else a negative value from esp_err_t.
+ */
+int32_t fgr_ota_current_sha256(uint8_t *buffer);
+
 #ifdef __cplusplus
 }
 #endif

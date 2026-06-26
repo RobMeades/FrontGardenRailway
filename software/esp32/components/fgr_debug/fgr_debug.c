@@ -46,12 +46,16 @@
 #include "fgr_nvs.h"
 #include "fgr_rram.h"
 #include "fgr_msg.h"
+
 #include "fgr_debug.h"
 
 // Forward declaration of the abstracted panic info structure from ESP-IDF
 void __real_esp_panic_handler(void *info);
 // Make sure the linker doesn't optimize-out our wrapper
 void __wrap_esp_panic_handler(void *info) __attribute__((used));
+
+// Must be last in the inclusions to poison calls to malloc()/free()
+#include "fgr_heap_wrapper.h"
 
 /* ----------------------------------------------------------------
  * COMPILE-TIME MACROS
@@ -1167,16 +1171,16 @@ int32_t fgr_debug_panic_log(const char *tag, const char *prefix,
     int32_t length = fgr_debug_panic_str_get(NULL, NULL);
     if (length > 0) {
         err = -ESP_ERR_NO_MEM;
-        char *buffer = malloc(length + 1);  // +1 for terminator
-        char *hash = malloc(FGR_DEBUG_HASH_BUFFER_LENGTH);
+        char *buffer = MALLOC(length + 1);  // +1 for terminator
+        char *hash = MALLOC(FGR_DEBUG_HASH_BUFFER_LENGTH);
         if (buffer && hash) {
             fgr_debug_panic_str_get(buffer, hash);
             debug_log(tag, prefix, hash, level);
             debug_log(tag, prefix, buffer, level);
             err = 1;
         }
-        free(buffer);
-        free(hash);
+        FREE(buffer);
+        FREE(hash);
     }
 
     return err;
@@ -1263,8 +1267,8 @@ int32_t fgr_debug_core_dump_get(const char *tag, esp_log_level_t level)
                 tag = TAG;
             }
 
-            uint8_t *buffer = (uint8_t *) malloc(CORE_DUMP_CHUNK_LENGTH);
-            char *base64 = (char *) malloc(CORE_DUMP_BASE64_CHUNK_LENGTH_MBEDTLS);
+            uint8_t *buffer = (uint8_t *) MALLOC(CORE_DUMP_CHUNK_LENGTH);
+            char *base64 = (char *) MALLOC(CORE_DUMP_BASE64_CHUNK_LENGTH_MBEDTLS);
 
             if (buffer && base64) {
                 err = 1; // Core dump successfully located and ready
@@ -1305,8 +1309,8 @@ int32_t fgr_debug_core_dump_get(const char *tag, esp_log_level_t level)
             // Always clear the flag so we do not loop panics dynamically on boot
             esp_core_dump_image_erase();
 
-            free(base64);
-            free(buffer);
+            FREE(base64);
+            FREE(buffer);
         }
     }
 

@@ -1,0 +1,10 @@
+menu "FGR Lib Configuration"
+
+    config FGR_LIB_SKIP_OTA_UPDATE
+        bool "Set this to skip OTA updates: NEVER set this on an image built with nodes_esp32_deploy.py"
+        default n
+        help
+            Skip an OTA update: be careful not to set this on anything built using
+            nodes_esp32_deploy.py as you will lock nodes out of OTA updates forever.
+
+endmenu

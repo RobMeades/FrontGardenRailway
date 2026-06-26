@@ -32,7 +32,11 @@
 
 #include "fgr_util.h"
 #include "fgr_rram.h"
+
 #include "fgr_time.h"
+
+// Must be last in the inclusions to poison calls to malloc()/free()
+#include "fgr_heap_wrapper.h"
 
 /* ----------------------------------------------------------------
  * COMPILE-TIME MACROS

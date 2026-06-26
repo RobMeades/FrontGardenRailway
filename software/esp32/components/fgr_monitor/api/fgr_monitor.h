@@ -95,6 +95,16 @@ extern "C" {
 #  define FGR_MONITOR_CHECK_INTERVAL_MS 250
 #endif
 
+#ifndef FGR_MONITOR_HEAP_CHECK_RECORDS
+// The maximum number of heap allocations to track the source of
+#  define FGR_MONITOR_HEAP_CHECK_RECORDS 100
+#endif
+
+#ifndef FGR_MONITOR_HEAP_INTERVAL_SECONDS
+// How frequently to do run the heap checking task in seconds.
+#  define FGR_MONITOR_HEAP_INTERVAL_SECONDS 1
+#endif
+
 /* ----------------------------------------------------------------
  * TYPES
  * -------------------------------------------------------------- */
@@ -242,6 +252,84 @@ int32_t fgr_monitor_abort_reason_get(char *task_name);
  */
 int32_t fgr_monitor_abort_reason_log(const char *tag, const char *prefix,
                                      esp_log_level_t level);
+
+/** The start of a sequence of calls to get the heap allocations
+ * by a particular file/line in the code.
+ *
+ * A usage pattern might be:
+ *
+ *    const char *file_line = NULL;
+ *    size_t size = 0;
+ *    size_t count  0;
+ *    buffer[32];
+ *    if (fgr_monitor_heap_start(&file_line, &size, &count) >= 0) {
+ *        do {
+ *            buffer[0] = 0;
+ *            if (count > 1) {
+ *                snprintf(buffer, sizeof(buffer), " (over %d calls)", count);
+ *            }
+ *            printf("%s allocated %d byte(s)%s.\n", name, size, buffer);
+ *        } while (fgr_monitor_heap_next(&file_line, &size, &count) >= 0);
+ *        fgr_monitor_heap_stop();
+ *    }
+ *
+ * When fgr_monitor_heap_start() has returned a non-negative value
+ * and you don't loop through all of the entries until fgr_monitor_heap_next()
+ * returns zero or less, fgr_monitor_heap_stop() MUST be called to
+ * terminate the sequence (and there is no harm in always calling
+ * it at the end of the sequence even if you do loop through the lot).
+ *
+ * This sequence of functions should only be called from
+ * a single thread at any one time; the sequence of
+ * calls is single-threaded.
+ *
+ * If a new task is added with a call to fgr_task_create()
+ * it may or may not be included; best not do that.
+ *
+ * @param name    a place to put the file: line being reported
+ *                on; may be NULL.
+ * @param size    a place to put the amount of memory allocated;
+ *                may be NULL.
+ * @param count   a place to put the number of calls over which
+ *                the amount of memory has been allocated; may
+ *                be NULL
+ * @param time_us place to put the time of the allocation, in
+ *                microseconds since boot; if there have been
+ *                multiple allocations this is the time of the
+ *                first allocation.  May be NULL.
+ * @return        on success, the number of calls to
+ *                fgr_monitor_heap_next() that are required to
+ *                read all of the heap allocations, else negative
+ *                value from esp_err_t.
+ */
+int32_t fgr_monitor_heap_start(const char **name, size_t *size,
+                               size_t *count, int64_t *time_us);
+
+/** Get the next in the set of minimum heap allocation values,
+ * see fgr_monitor_heap_start() for an explanation.
+ *
+ * @param name    a place to put the file: line being reported
+ *                on; may be NULL.
+ * @param size    a place to put the amount of memory allocated;
+ *                may be NULL.
+ * @param count   a place to put the number of calls over which
+ *                the amount of memory has been allocated; may
+ *                be NULL
+ * @param time_us place to put the time of the allocation, in
+ *                microseconds since boot; if there have been
+ *                multiple allocations this is the time of the
+ *                first allocation.  May be NULL.
+ * @return        on success, the number of subsequent calls
+ *                required to read all of the heap allocations,
+ *                else negative value from esp_err_t.
+ */
+int32_t fgr_monitor_heap_next(const char **name, size_t *size,
+                              size_t *count, int64_t *time_us);
+
+/** Stop reading heap allocation values, see fgr_monitor_heap_start()
+ * for an explanation.
+ */
+void fgr_monitor_heap_stop();
 
 #ifdef __cplusplus
 }

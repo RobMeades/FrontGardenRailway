@@ -33,6 +33,9 @@
 #include "fgr_util.h"
 #include "fgr_task.h"
 
+// Must be last in the inclusions to poison calls to malloc()/free()
+#include "fgr_heap_wrapper.h"
+
 /* ----------------------------------------------------------------
  * COMPILE-TIME MACROS
  * -------------------------------------------------------------- */
@@ -103,7 +106,7 @@ static void task_base(void *param)
     while (task->running) {
 
         // On ESP-IDF uxTaskGetStackHighWaterMark() returns the
-        // minimum free stack available in bytes, not words.
+        // minimum FREE stack available in bytes, not words.
         task->min_free_stack_bytes = uxTaskGetStackHighWaterMark(NULL);
 
         // Do the thang
@@ -180,7 +183,7 @@ static void task_destroy(task_t *task)
             }
             prev = iter;
         }
-        free(task);
+        FREE(task);
     }
 }
 
@@ -258,7 +261,7 @@ int32_t fgr_task_create(fgr_task_cb_t cb, void *cb_param, const char *name,
             CONTEXT_LOCK(g_context.lock, "fgr_task_create()");
 
             err = -ESP_ERR_NO_MEM;
-            task_t *task = (task_t *) malloc(sizeof(*task ));
+            task_t *task = (task_t *) MALLOC(sizeof(*task ));
             if (task) {
                 memset(task, 0, sizeof(*task));
                 task_state_t *state = &task->state;
@@ -397,7 +400,7 @@ int32_t fgr_task_min_free_stack(void *handle)
     return high_watermark;
 }
 
-// The start the sequence of calls to get the minimum free stack.
+// The start the sequence of calls to get the minimum FREE stack.
 int32_t fgr_task_min_free_stack_start(const char **name,
                                       int32_t *min_free)
 {
@@ -438,7 +441,7 @@ int32_t fgr_task_min_free_stack_start(const char **name,
     return err;
 }
 
-// Get the next in the set of minimum free stack values.
+// Get the next in the set of minimum FREE stack values.
 int32_t fgr_task_min_free_stack_next(const char **name,
                                      int32_t *min_free)
 {

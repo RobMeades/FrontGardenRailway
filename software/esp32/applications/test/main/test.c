@@ -39,6 +39,9 @@
 #include "fgr_log.h"
 #include "fgr_lib.h"
 
+// Must be last in the inclusions to poison calls to malloc()/free()
+#include "fgr_heap_wrapper.h"
+
 /* ----------------------------------------------------------------
  * COMPILE-TIME MACROS
  * -------------------------------------------------------------- */
@@ -111,7 +114,7 @@ static bool msg_receive_cb(fgr_msg_t *msg, void *param)
     context_t *context = (context_t *) param;
     bool handled = false;
     uint32_t length = 0;
-    uint8_t *contents = (uint8_t *) malloc(FGR_MSG_CONTENTS_MAX_LEN);
+    uint8_t *contents = (uint8_t *) MALLOC(FGR_MSG_CONTENTS_MAX_LEN);
 
     fgr_error_t msg_error = FGR_ERROR_UNHANDLED_REQUEST;
 
@@ -171,7 +174,7 @@ static bool msg_receive_cb(fgr_msg_t *msg, void *param)
             }
         }
 
-        free(contents);
+        FREE(contents);
     }
 
     if (handled) {

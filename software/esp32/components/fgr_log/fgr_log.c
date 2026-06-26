@@ -40,7 +40,11 @@
 #include "fgr_socket.h"
 #include "fgr_msg.h"
 #include "fgr_nvs.h"
+
 #include "fgr_log.h"
+
+// Must be last in the inclusions to poison calls to malloc()/free()
+#include "fgr_heap_wrapper.h"
 
 /* ----------------------------------------------------------------
  * COMPILE-TIME MACROS
@@ -200,12 +204,13 @@ static void clean_up()
         if (g_context.queue_handle) {
             queue_msg_t msg;
             while (xQueueReceive(g_context.queue_handle, &msg, 0) == pdTRUE) {
-                free(msg.body);
+                FREE(msg.body);
                 vTaskDelay(pdMS_TO_TICKS(FGR_UTIL_WATCHDOG_FEED_TIME_MS));
             }
             vQueueDelete(g_context.queue_handle);
             g_context.queue_handle = NULL;
         }
+
 
         // Clean up the disconnect buffer
         if (g_context.buffer.headers) {
@@ -216,12 +221,12 @@ static void clean_up()
                               g_context.buffer.head - g_context.buffer.tail :
                               g_context.buffer.size - g_context.buffer.tail + g_context.buffer.head);
             for (size_t x = 0; (x < count) && (x < g_context.buffer.size); x++) {
-                free(g_context.buffer.headers[idx]);
-                free(g_context.buffer.bodies[idx]);
+                FREE(g_context.buffer.headers[idx]);
+                FREE(g_context.buffer.bodies[idx]);
                 idx = (idx + 1) % g_context.buffer.size;
             }
-            free(g_context.buffer.headers);
-            free(g_context.buffer.bodies);
+            FREE(g_context.buffer.headers);
+            FREE(g_context.buffer.bodies);
             g_context.buffer.headers = NULL;
             g_context.buffer.bodies = NULL;
         }
@@ -293,12 +298,12 @@ static int32_t log_buffer_init(buffer_t *buffer)
     int32_t err = ESP_OK;
 
     buffer->size = FGR_LOG_BUFFER_MAX_ENTRIES;
-    buffer->headers = calloc(buffer->size, sizeof(fgr_msg_header_log_t *));
-    buffer->bodies = calloc(buffer->size, sizeof(fgr_msg_body_t *));
+    buffer->headers = CALLOC(buffer->size, sizeof(fgr_msg_header_log_t *));
+    buffer->bodies = CALLOC(buffer->size, sizeof(fgr_msg_body_t *));
 
     if (!buffer->headers || !buffer->bodies) {
-        free(buffer->headers);
-        free(buffer->bodies);
+        FREE(buffer->headers);
+        FREE(buffer->bodies);
         buffer->headers = NULL;
         buffer->bodies = NULL;
         err = -ESP_ERR_NO_MEM;
@@ -327,16 +332,16 @@ static void log_buffer_add(buffer_t *buffer,
     fgr_msg_body_t *body_copy = NULL;
 
     if (buffer->headers) {
-        header_copy = malloc(sizeof(fgr_msg_header_log_t));
+        header_copy = MALLOC(sizeof(fgr_msg_header_log_t));
         if (header_copy) {
-            body_copy = malloc(body_length);
+            body_copy = MALLOC(body_length);
             if (body_copy) {
                 memcpy(header_copy, header, sizeof(fgr_msg_header_log_t));
                 memcpy(body_copy, body, body_length);
 
                 if (buffer->full) {
-                    free(buffer->headers[buffer->tail]);
-                    free(buffer->bodies[buffer->tail]);
+                    FREE(buffer->headers[buffer->tail]);
+                    FREE(buffer->bodies[buffer->tail]);
                     buffer->tail = (buffer->tail + 1) % buffer->size;
                     // main buffer full: failure
                     buffer->dropped_count++;
@@ -354,19 +359,19 @@ static void log_buffer_add(buffer_t *buffer,
                 header_copy = NULL;
                 body_copy = NULL;
             } else {
-                // malloc() failure
+                // MALLOC() failure
                 buffer->dropped_count++;
             }
         } else {
-            // malloc() failure
+            // MALLOC() failure
             buffer->dropped_count++;
         }
 
         if (header_copy) {
-            free(header_copy);
+            FREE(header_copy);
         }
         if (body_copy) {
-            free(body_copy);
+            FREE(body_copy);
         }
     }
 }
@@ -375,7 +380,7 @@ static void log_buffer_add(buffer_t *buffer,
 // IMPORTANT: context should be locked before this is called.
 static void log_replay_marker(const char *str, context_t *context)
 {
-    fgr_msg_t *marker_msg = (fgr_msg_t *) malloc(sizeof(*marker_msg));
+    fgr_msg_t *marker_msg = (fgr_msg_t *) MALLOC(sizeof(*marker_msg));
 
     if (marker_msg) {
         marker_msg->header.log.type = htons(((uint16_t) FGR_MSG_TYPE_LOG) << 12);
@@ -385,7 +390,7 @@ static void log_replay_marker(const char *str, context_t *context)
 
         fgr_socket_send_no_log(context->sock, marker_msg,
                                sizeof(marker_msg->header) + sizeof(marker_msg->body.length) + strlen(str), 0);
-        free(marker_msg);
+        FREE(marker_msg);
     }
 }
 
@@ -396,7 +401,7 @@ static void log_buffer_replay(context_t *context,
                               char *marker_buffer, // Passed in just to save stack
                               size_t marker_buffer_length)
 {
-    fgr_msg_t *replay_msg = (fgr_msg_t *) malloc(sizeof(*replay_msg));
+    fgr_msg_t *replay_msg = (fgr_msg_t *) MALLOC(sizeof(*replay_msg));
     uint16_t count = 0;
     uint16_t sent = 0;
     uint16_t idx = 0;
@@ -463,8 +468,8 @@ static void log_buffer_replay(context_t *context,
 
             cleanup_idx = buffer->tail;
             for (size_t x = 0; x < count; x++) {
-                free(buffer->headers[cleanup_idx]);
-                free(buffer->bodies[cleanup_idx]);
+                FREE(buffer->headers[cleanup_idx]);
+                FREE(buffer->bodies[cleanup_idx]);
                 cleanup_idx = (cleanup_idx + 1) % buffer->size;
             }
 
@@ -488,7 +493,7 @@ static void log_buffer_replay(context_t *context,
         buffer->replay_active = false;
     }
 
-    free(replay_msg);
+    FREE(replay_msg);
 }
 
 /* ----------------------------------------------------------------
@@ -535,7 +540,7 @@ static void task_log_cb(void *handle, void *param)
                                queue_msg.body, queue_msg.body_length);
             }
 
-            free(queue_msg.body);
+            FREE(queue_msg.body);
 
             if (context->connected && (context->queue_full_count > 0)) {
                 // Send a marker message with the count of queue full events
@@ -578,7 +583,7 @@ static int tcp_log_vprintf(const char *fmt, va_list args)
         fgr_log_level_t fgr_log_level = esp_to_fgr_log_level(esp_log_level);
 
         if (fgr_log_level >= g_context.level_min) {
-            *body = (fgr_msg_body_t *) malloc(sizeof(**body));
+            *body = (fgr_msg_body_t *) MALLOC(sizeof(**body));
             if (*body) {
                 // Format the message
                 int32_t length = vsnprintf((char *) ((*body)->contents), FGR_LOG_STRING_MAX_LEN, fmt, args);
@@ -606,7 +611,7 @@ static int tcp_log_vprintf(const char *fmt, va_list args)
                 // from under ourselves in clean_up()...?
                 if (xQueueSend(g_context.queue_handle, &queue_msg, pdMS_TO_TICKS(100)) != pdPASS) {
                     g_context.queue_full_count++;
-                    free(*body);
+                    FREE(*body);
                 }
             }
         }

@@ -41,6 +41,9 @@
 #include "fgr_socket.h"
 #include "fgr_msg.h"
 
+// Must be last in the inclusions to poison calls to malloc()/free()
+#include "fgr_heap_wrapper.h"
+
 /* ----------------------------------------------------------------
  * COMPILE-TIME MACROS
  * -------------------------------------------------------------- */
@@ -183,7 +186,7 @@ static void decoder_init(context_decoder_t *decoder)
 static void decoder_free(context_decoder_t *decoder)
 {
     if (decoder->msg) {
-        free(decoder->msg);
+        FREE(decoder->msg);
         decoder->msg = NULL;
     }
 }
@@ -191,7 +194,7 @@ static void decoder_free(context_decoder_t *decoder)
 // Decode incoming data into a complete message: *msg will
 // be non-NULL when a complete message is decoded.
 // Note: When a complete message is returned, the caller is
-// responsible for free()ing it.
+// responsible for FREE()ing it.
 // Note: this decoder written by Deep Seek, and hence has
 // multiple return statements, which is OK 'cos it's a parser.
 static int32_t decode_msg(context_decoder_t *decoder, const uint8_t *buffer,
@@ -255,7 +258,7 @@ static int32_t decode_msg(context_decoder_t *decoder, const uint8_t *buffer,
                                           sizeof(uint32_t) +  // length field
                                           decoder->expected_contents_length;
 
-                    decoder->msg = (fgr_msg_t *) malloc(message_size);
+                    decoder->msg = (fgr_msg_t *) MALLOC(message_size);
                     if (!decoder->msg) {
                         decoder_init(decoder);
                         return -1;  // Out of memory
@@ -401,10 +404,10 @@ static void task_send_queue_cb(void *handle, void *param)
         if (msg.type == FGR_MSG_TYPE_CNF) {
             fgr_msg_send_cnf(msg.msg_sub_type, msg.error, msg.reference,
                              msg.body_contents, msg.body_length);
-            free(msg.body_contents);
+            FREE(msg.body_contents);
         } else if (msg.type == FGR_MSG_TYPE_IND) {
             fgr_msg_send_ind(msg.msg_sub_type, msg.body_contents, msg.body_length);
-            free(msg.body_contents);
+            FREE(msg.body_contents);
         } else {
             ESP_LOGE(TAG, "Unknown message type on send queue (%d)!", msg.type);
         }
@@ -500,7 +503,7 @@ static void socket_down_cb(void *param)
 // IMPORTANT the context MUST be locked before this is called.
 static void receive_handler_ping_locked(context_t *context, uint8_t reference)
 {
-    uint8_t *buffer = (uint8_t *) malloc(FGR_MSG_CONTENTS_MAX_LEN);
+    uint8_t *buffer = (uint8_t *) MALLOC(FGR_MSG_CONTENTS_MAX_LEN);
     uint32_t length = 0;
 
     if (buffer) {
@@ -523,7 +526,7 @@ static void receive_handler_ping_locked(context_t *context, uint8_t reference)
         send_msg_locked(context, MSG_CNF(FGR_REQ_CNF_PING), FGR_ERROR_NONE,
                         reference, buffer, length);
 
-        free(buffer);
+        FREE(buffer);
     }
 }
 
@@ -579,7 +582,7 @@ static void receive_cb(void *buffer, size_t length, void *param)
                                           msg->body.length);
                 }
             }
-            free(msg);
+            FREE(msg);
         }
         fgr_socket_channel_activity(&context->context_sock);
         CONTEXT_UNLOCK(context->lock, "receive_cb()");
@@ -828,7 +831,7 @@ int32_t fgr_msg_send_queue_cnf(fgr_req_cnf_t cnf, fgr_error_t error,
             msg_send.reference = reference;
             msg_send.body_length = length;
             if (length > 0) {
-                msg_send.body_contents = malloc(length);
+                msg_send.body_contents = MALLOC(length);
                 if (msg_send.body_contents) {
                     memcpy(msg_send.body_contents, buffer, length);
                 }
@@ -837,7 +840,7 @@ int32_t fgr_msg_send_queue_cnf(fgr_req_cnf_t cnf, fgr_error_t error,
                 if (xQueueSend(g_context_send.queue_send, &msg_send, 0) == pdTRUE) {
                     err = ESP_OK;
                 } else {
-                    free(msg_send.body_contents);
+                    FREE(msg_send.body_contents);
                 }
             }
         }
@@ -871,7 +874,7 @@ int32_t fgr_msg_send_queue_ind(fgr_ind_rsp_t ind, const void *buffer,
             msg_send.msg_sub_type = ind;
             msg_send.body_length = length;
             if (length > 0) {
-                msg_send.body_contents = malloc(length);
+                msg_send.body_contents = MALLOC(length);
                 if (msg_send.body_contents) {
                     memcpy(msg_send.body_contents, buffer, length);
                 }
@@ -880,7 +883,7 @@ int32_t fgr_msg_send_queue_ind(fgr_ind_rsp_t ind, const void *buffer,
                 if (xQueueSend(g_context_send.queue_send, &msg_send, 0) == pdTRUE) {
                     err = ESP_OK;
                 } else {
-                    free(msg_send.body_contents);
+                    FREE(msg_send.body_contents);
                 }
             }
         }
@@ -930,7 +933,7 @@ void fgr_msg_send_queue_deinit()
         if (g_context_send.queue_send) {
             msg_send_t msg;
             while (xQueueReceive(g_context_send.queue_send, &msg, 0) == pdTRUE) {
-                free(msg.body_contents);
+                FREE(msg.body_contents);
                 vTaskDelay(pdMS_TO_TICKS(FGR_UTIL_WATCHDOG_FEED_TIME_MS));
             }
             vQueueDelete(g_context_send.queue_send);
@@ -1032,7 +1035,7 @@ int32_t fgr_msg_receive_handler_add(uint16_t msg_type,
              ((msg_type >> 12) == FGR_MSG_TYPE_REQ) ||
              ((msg_type >> 12) == FGR_MSG_TYPE_IND))) {
             err = -ESP_ERR_NO_MEM;
-            msg_rx_handler_cb_t *msg_rx_cb = (msg_rx_handler_cb_t *) malloc(sizeof(*msg_rx_cb));
+            msg_rx_handler_cb_t *msg_rx_cb = (msg_rx_handler_cb_t *) MALLOC(sizeof(*msg_rx_cb));
             if (msg_rx_cb) {
                 msg_rx_cb->msg_type = msg_type;
                 msg_rx_cb->cb = cb;
@@ -1067,7 +1070,7 @@ void fgr_msg_receive_handler_remove_by_cb(fgr_msg_receive_handler_cb_t cb)
                     // Removing a middle element
                     SLIST_REMOVE_AFTER(prev, next);
                 }
-                free(iter);
+                FREE(iter);
                 // Done; MUST break after an insertion or removal as
                 // otherwise SLIST_FOREACH will go bang as it
                 // relies on pointers still being valid.
@@ -1096,7 +1099,7 @@ void fgr_msg_receive_handler_remove_by_type(uint16_t msg_type)
                     // Removing a middle element
                     SLIST_REMOVE_AFTER(prev, next);
                 }
-                free(iter);
+                FREE(iter);
                 // Done; MUST break after an insertion or removal as
                 // otherwise SLIST_FOREACH will go bang as it
                 // relies on pointers still being valid.
@@ -1119,7 +1122,7 @@ void fgr_msg_receive_stop()
         while (!SLIST_EMPTY(&g_context.msg_rx_handler_cb_list)) {
             msg_rx_handler_cb_t *p = SLIST_FIRST(&g_context.msg_rx_handler_cb_list);
             SLIST_REMOVE_HEAD(&g_context.msg_rx_handler_cb_list, next);
-            free(p);
+            FREE(p);
         }
         CONTEXT_UNLOCK(g_context.lock, "fgr_msg_receive_stop()");
     }

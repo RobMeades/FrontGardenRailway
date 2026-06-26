@@ -21,7 +21,7 @@
  * @brief Retained RAM API for a node of the front garden railway.
  * Why is this necessary?  Well it turns out that the retained RAM
  * on an ESP32 is on the RTC peripheral bus and this does not behave
- * like normal RAM in subtlle wasy.  The RTC is a peripheral that happens
+ * like normal RAM in subtlle ways.  The RTC is a peripheral that happens
  * to have RAM on it but, most importantly, all accesses MUST be
  * 32-bit aligned, otherwise strange things may happen; empty reads,
  * mysterious bus failures, crashes, etc.  Standard library functions

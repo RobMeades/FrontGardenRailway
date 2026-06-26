@@ -45,7 +45,11 @@
 #include "fgr_monitor.h"
 #include "fgr_nvs.h"
 #include "fgr_lib.h"
+
 #include "fgr_ota.h"
+
+// Must be last in the inclusions to poison calls to malloc()/free()
+#include "fgr_heap_wrapper.h"
 
 /* ----------------------------------------------------------------
  * COMPILE-TIME MACROS
@@ -104,7 +108,7 @@ static context_t g_context = {0};
  * STATIC FUNCTIONS
  * -------------------------------------------------------------- */
 
-static void print_sha256 (const uint8_t *image_hash, const char *label)
+static void print_sha256(const uint8_t *image_hash, const char *label)
 {
     char hash_print[HASH_LEN * 2 + 1];
     hash_print[HASH_LEN * 2] = 0;
@@ -679,7 +683,7 @@ int32_t fgr_ota_update(const char *update_file_url,
                     if (err == ESP_OK) {
                         ESP_LOGI(TAG, "Prepare to restart system!");
                         fgr_metrics_event_set(FGR_METRIC_EVENT_LOCAL_REBOOT, 0);
-                        // Reset the stack min free metric as it means nothing after reprogramming
+                        // Reset the stack min FREE metric as it means nothing after reprogramming
                         fgr_metrics_reset(FGR_METRIC_SIMPLE_HEAP_MIN_FREE);
                         esp_restart();
                     }
@@ -707,6 +711,22 @@ int32_t fgr_ota_update(const char *update_file_url,
 
     // Returns ESP_OK or negative error code from esp_err_t
     return (int32_t) - err;
+}
+
+// Get the SHA256 of the current running image.
+int32_t fgr_ota_current_sha256(uint8_t *buffer)
+{
+    esp_err_t err = ESP_ERR_INVALID_ARG;
+
+    if (buffer) {
+        err = esp_partition_get_sha256(esp_ota_get_running_partition(), buffer);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Unable to retrieve SHA256 of current image (%s)!", esp_err_to_name(err));
+        }
+    }
+
+    // Returns ESP_OK or negative error code from esp_err_t
+    return (int32_t) -err;
 }
 
 // End of file

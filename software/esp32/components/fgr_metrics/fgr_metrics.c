@@ -35,13 +35,19 @@
 
 #include "fgr_util.h"
 #include "fgr_task.h"
+#include "fgr_monitor.h"
 #include "fgr_time.h"
 #include "fgr_rram.h"
 #include "fgr_network.h"
+#include "fgr_heap.h"
+
 #include "fgr_metrics.h"
 
 // Required for FGR_LOG_STRING_MAX_LEN
 #include "../../../../../protocol/fgr_protocol.h"
+
+// Must be last in the inclusions to poison calls to malloc()/free()
+#include "fgr_heap_wrapper.h"
 
 /* ----------------------------------------------------------------
  * COMPILE-TIME MACROS
@@ -75,7 +81,8 @@ typedef enum {
     METRIC_TYPE_SIMPLE,
     METRIC_TYPE_EVENT,
     METRIC_TYPE_EVENT_BOOL,
-    METRIC_TYPE_STACK_MIN_FREE
+    METRIC_TYPE_STACK_MIN_FREE,
+    METRIC_TYPE_HEAP_ALLOCATION_HIGHEST
 } metric_type_t;
 
 // Storage for metrics in retained RAM.
@@ -112,6 +119,15 @@ typedef struct fgr_metrics_stack_min_free_bytes_entry_t {
 // Linked list head definition to go with the above.
 SLIST_HEAD(fgr_metrics_stack_min_free_bytes_list_t, fgr_metrics_stack_min_free_bytes_entry_t);
 
+// Linked list used by update_heap_allocation_highest().
+typedef struct fgr_metrics_heap_allocation_highest_entry_t {
+    fgr_metrics_heap_allocation_t allocation;
+    SLIST_ENTRY(fgr_metrics_heap_allocation_highest_entry_t) next;
+} fgr_metrics_heap_allocation_highest_entry_t;
+
+// Linked list head definition to go with the above.
+SLIST_HEAD(fgr_metrics_heap_allocation_highest_list_t, fgr_metrics_heap_allocation_highest_entry_t);
+
 /* ----------------------------------------------------------------
  * VARIABLES
  * -------------------------------------------------------------- */
@@ -134,8 +150,9 @@ static const char *g_metric_name[] = {
     "EVENT_BOOL_PING_TX",
     "EVENT_PING_RX",
     "EVENT_BOOL_NVS_WRITE",
-    "EVENT_STACK_MIN_FREE_LOWEST",
-    "SIMPLE_HEAP_MIN_FREE"
+    "STACK_MIN_FREE_LOWEST",
+    "SIMPLE_HEAP_MIN_FREE",
+    "HEAP_ALLOCATION_HIGHEST"
 };
 
 // The JSON names of all the metrics: must have the same number of
@@ -157,29 +174,31 @@ static const char *g_metric_json_name[] = {
     "ping_rx",
     "nvs_w",
     "stack",
-    "heap"
+    "heap",
+    "alloc"
 };
 
 // The type of all of the metrics; must have the same number of
 // entries as fgr_metrics_t.
 static const metric_type_t g_metric_type[] = {
-    METRIC_TYPE_EVENT,          // FGR_METRIC_EVENT_LOCAL_REBOOT
-    METRIC_TYPE_EVENT,          // FGR_METRIC_EVENT_PANIC
-    METRIC_TYPE_EVENT,          // FGR_METRIC_EVENT_POWER_BAD
-    METRIC_TYPE_EVENT_BOOL,     // FGR_METRIC_EVENT_BOOL_WIFI_CONNECTION
-    METRIC_TYPE_EVENT,          // FGR_METRIC_EVENT_IP_CONNECTION
-    METRIC_TYPE_SIMPLE,         // FGR_METRIC_SIMPLE_WIFI_RSSI_DBM
-    METRIC_TYPE_EVENT_BOOL,     // FGR_METRIC_EVENT_BOOL_OTA_CONNECTION
-    METRIC_TYPE_EVENT_BOOL,     // FGR_METRIC_EVENT_BOOL_OTA_NVS_WRITE
-    METRIC_TYPE_EVENT_BOOL,     // FGR_METRIC_EVENT_BOOL_LOG_SERVER_CONNECTION
-    METRIC_TYPE_EVENT_BOOL,     // FGR_METRIC_EVENT_BOOL_CONTROLLER_CONNECTION
-    METRIC_TYPE_EVENT_BOOL,     // FGR_METRIC_EVENT_BOOL_CONTROLLER_SOCKET_TX
-    METRIC_TYPE_EVENT,          // FGR_METRIC_EVENT_CONTROLLER_SOCKET_RX
-    METRIC_TYPE_EVENT_BOOL,     // FGR_METRIC_EVENT_BOOL_PING_TX
-    METRIC_TYPE_EVENT,          // FGR_METRIC_EVENT_PING_RX
-    METRIC_TYPE_EVENT_BOOL,     // FGR_METRIC_EVENT_BOOL_NVS_WRITE
-    METRIC_TYPE_STACK_MIN_FREE, // FGR_METRIC_STACK_MIN_FREE_LOWEST
-    METRIC_TYPE_SIMPLE          // FGR_METRIC_SIMPLE_HEAP_MIN_FREE
+    METRIC_TYPE_EVENT,                   // FGR_METRIC_EVENT_LOCAL_REBOOT
+    METRIC_TYPE_EVENT,                   // FGR_METRIC_EVENT_PANIC
+    METRIC_TYPE_EVENT,                   // FGR_METRIC_EVENT_POWER_BAD
+    METRIC_TYPE_EVENT_BOOL,              // FGR_METRIC_EVENT_BOOL_WIFI_CONNECTION
+    METRIC_TYPE_EVENT,                   // FGR_METRIC_EVENT_IP_CONNECTION
+    METRIC_TYPE_SIMPLE,                  // FGR_METRIC_SIMPLE_WIFI_RSSI_DBM
+    METRIC_TYPE_EVENT_BOOL,              // FGR_METRIC_EVENT_BOOL_OTA_CONNECTION
+    METRIC_TYPE_EVENT_BOOL,              // FGR_METRIC_EVENT_BOOL_OTA_NVS_WRITE
+    METRIC_TYPE_EVENT_BOOL,              // FGR_METRIC_EVENT_BOOL_LOG_SERVER_CONNECTION
+    METRIC_TYPE_EVENT_BOOL,              // FGR_METRIC_EVENT_BOOL_CONTROLLER_CONNECTION
+    METRIC_TYPE_EVENT_BOOL,              // FGR_METRIC_EVENT_BOOL_CONTROLLER_SOCKET_TX
+    METRIC_TYPE_EVENT,                   // FGR_METRIC_EVENT_CONTROLLER_SOCKET_RX
+    METRIC_TYPE_EVENT_BOOL,              // FGR_METRIC_EVENT_BOOL_PING_TX
+    METRIC_TYPE_EVENT,                   // FGR_METRIC_EVENT_PING_RX
+    METRIC_TYPE_EVENT_BOOL,              // FGR_METRIC_EVENT_BOOL_NVS_WRITE
+    METRIC_TYPE_STACK_MIN_FREE,          // FGR_METRIC_STACK_MIN_FREE_LOWEST
+    METRIC_TYPE_SIMPLE,                  // FGR_METRIC_SIMPLE_HEAP_MIN_FREE
+    METRIC_TYPE_HEAP_ALLOCATION_HIGHEST, // FGR_METRIC_HEAP_ALLOCATION_HIGHEST
 };
 
 // A sparsly populated array indicating, for an fgr_metrics_event_t
@@ -203,7 +222,8 @@ static const bool g_metric_reset_at_boot[] = {
     true,           // FGR_METRIC_EVENT_PING_RX
     true,           // FGR_METRIC_EVENT_BOOL_NVS_WRITE
     false,          // Don't care (FGR_METRIC_STACK_MIN_FREE_LOWEST)
-    false           // Don't care (FGR_METRIC_SIMPLE_HEAP_MIN_FREE)
+    false,          // Don't care (FGR_METRIC_SIMPLE_HEAP_MIN_FREE)
+    false           // Don't care (FGR_METRIC_HEAP_ALLOCATION_HIGHEST)
 };
 
 // The reset reasons that are panic reasons.
@@ -408,6 +428,10 @@ int32_t metric_reset(fgr_metrics_storage_t *metrics_list,
         memset(&(*(metrics_list + FGR_METRIC_STACK_MIN_FREE_LOWEST)).stack_min_free_lowest, 0,
                sizeof(fgr_metrics_stack_min_free_lowest_t));
         err = retained_ram_set();
+    } else if (is_good(metric, METRIC_TYPE_HEAP_ALLOCATION_HIGHEST)) {
+        memset(&(*(metrics_list + FGR_METRIC_HEAP_ALLOCATION_HIGHEST)).heap_allocation_highest, 0,
+               sizeof(fgr_metrics_heap_allocation_highest_t));
+        err = retained_ram_set();
     }
 
     return err;
@@ -493,15 +517,14 @@ static void update_stack_min_free_lowest(fgr_metrics_storage_t *metrics_list)
         SLIST_INIT(&list);
 
         // Get all of the minimum stack extents into a temporary linked list
-        fgr_metrics_stack_min_free_bytes_entry_t *entry = (fgr_metrics_stack_min_free_bytes_entry_t *)
-                                                          malloc(sizeof(*entry));
+        fgr_metrics_stack_min_free_bytes_entry_t *entry = (fgr_metrics_stack_min_free_bytes_entry_t *) MALLOC(sizeof(*entry));
         if (entry) {
             int32_t err = fgr_task_min_free_stack_start(&entry->task.name, &entry->task.min_free_bytes);
             if (err >= 0) {
                 do {
                     update_stack_min_free_insert_sorted(&list, entry);
                     if (err > 0) {
-                        entry = (fgr_metrics_stack_min_free_bytes_entry_t *) malloc(sizeof(*entry));
+                        entry = (fgr_metrics_stack_min_free_bytes_entry_t *) MALLOC(sizeof(*entry));
                         if (!entry) {
                             fgr_task_min_free_stack_stop();
                             break;
@@ -519,8 +542,7 @@ static void update_stack_min_free_lowest(fgr_metrics_storage_t *metrics_list)
         fgr_metrics_stack_min_free_bytes_entry_t *iter;
         fgr_metrics_stack_min_free_bytes_t *task = storage->stack_min_free_lowest.task;
         SLIST_FOREACH(iter, &list, next) {
-            if (storage->stack_min_free_lowest.count < FGR_UTIL_ARRAY_LENGTH(
-                    storage->stack_min_free_lowest.task)) {
+            if (storage->stack_min_free_lowest.count < FGR_UTIL_ARRAY_LENGTH(storage->stack_min_free_lowest.task)) {
                 task->min_free_bytes = iter->task.min_free_bytes;
                 task->name = iter->task.name;
                 task++;
@@ -535,7 +557,7 @@ static void update_stack_min_free_lowest(fgr_metrics_storage_t *metrics_list)
         // Free the temporary list
         while ((entry = SLIST_FIRST(&list)) != NULL) {
             SLIST_REMOVE_HEAD(&list, next);
-            free(entry);
+            FREE(entry);
         }
     }
 }
@@ -546,6 +568,95 @@ static void update_heap_min_free(fgr_metrics_storage_t *metrics_list)
     if (metrics_list) {
         size_t value = heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT);
         metric_simple_set(metrics_list, FGR_METRIC_SIMPLE_HEAP_MIN_FREE, (int32_t) value);
+    }
+}
+
+// Insert heap allocation highest value in descending order (largest first),
+// called by update_heap_allocation_highest().
+static void update_heap_allocation_highest_insert_sorted(struct fgr_metrics_heap_allocation_highest_list_t
+                                                         *list,
+                                                         fgr_metrics_heap_allocation_highest_entry_t *new_entry)
+{
+    if (SLIST_EMPTY(list)) {
+        SLIST_INSERT_HEAD(list, new_entry, next);
+    } else {
+        fgr_metrics_heap_allocation_highest_entry_t *current = SLIST_FIRST(list);
+        fgr_metrics_heap_allocation_highest_entry_t *prev = NULL;
+
+        // Find position where new_entry should go (higher values come first)
+        while (current != NULL &&
+                current->allocation.size > new_entry->allocation.size) {
+            prev = current;
+            current = SLIST_NEXT(current, next);
+        }
+
+        if (prev == NULL) {
+            // Insert at head (new smallest)
+            SLIST_INSERT_HEAD(list, new_entry, next);
+        } else {
+            // Insert after prev
+            SLIST_INSERT_AFTER(prev, new_entry, next);
+        }
+    }
+}
+
+// Update the highest heap allocation metric.
+static void update_heap_allocation_highest(fgr_metrics_storage_t *metrics_list)
+{
+    if (metrics_list) {
+        struct fgr_metrics_heap_allocation_highest_list_t list;
+        SLIST_INIT(&list);
+
+        // Get all of the heap allocation values into a temporary linked list
+        fgr_metrics_heap_allocation_highest_entry_t *entry = (fgr_metrics_heap_allocation_highest_entry_t *) MALLOC(sizeof(*entry));
+        if (entry) {
+            int32_t err = fgr_heap_start(true,
+                                         &entry->allocation.file,
+                                         &entry->allocation.line,
+                                         &entry->allocation.size, NULL, NULL);
+            if (err >= 0) {
+                update_heap_allocation_highest_insert_sorted(&list, entry);
+                if (err > 0) {
+                    do {
+                        entry = (fgr_metrics_heap_allocation_highest_entry_t *) MALLOC(sizeof(*entry));
+                        if (entry) {
+                            err = fgr_heap_next(&entry->allocation.file,
+                                                &entry->allocation.line,
+                                                &entry->allocation.size,
+                                                NULL, NULL);
+                        }
+                        if (err >= 0) {
+                            update_heap_allocation_highest_insert_sorted(&list, entry);
+                        }
+                    } while (entry && (err > 0));
+                }
+            }
+        }
+
+        // Copy the first three entries into the metric
+        fgr_metrics_storage_t *storage = metrics_list + FGR_METRIC_HEAP_ALLOCATION_HIGHEST;
+        storage->heap_allocation_highest.count = 0;
+        fgr_metrics_heap_allocation_highest_entry_t *iter;
+        fgr_metrics_heap_allocation_t *allocation = storage->heap_allocation_highest.allocation;
+        SLIST_FOREACH(iter, &list, next) {
+            if (storage->heap_allocation_highest.count < FGR_UTIL_ARRAY_LENGTH(storage->heap_allocation_highest.allocation)) {
+                allocation->file = iter->allocation.file;
+                allocation->line = iter->allocation.line;
+                allocation->size = iter->allocation.size;
+                allocation++;
+                storage->heap_allocation_highest.count++;
+            } else {
+                break;
+            }
+        }
+        // This will likely have modified g_context.storage, so set it
+        retained_ram_set();
+
+        // Free the temporary list
+        while ((entry = SLIST_FIRST(&list)) != NULL) {
+            SLIST_REMOVE_HEAD(&list, next);
+            FREE(entry);
+        }
     }
 }
 
@@ -576,6 +687,7 @@ static void task_metrics_cb(void *handle, void *param)
         // Update the timed metrics
 
         update_stack_min_free_lowest(storage->metrics_list);
+        update_heap_allocation_highest(storage->metrics_list);
         update_heap_min_free(storage->metrics_list);
         context->last_update_us = time_us;
         if (context->cb) {
@@ -719,7 +831,7 @@ static int32_t encode_json_stack_min_free_lowest(const fgr_metrics_stack_min_fre
                 err = ESP_OK;
                 const fgr_metrics_stack_min_free_bytes_t *task = stack_min_free_lowest->task;
                 for (size_t x = 0; (x < FGR_UTIL_ARRAY_LENGTH(stack_min_free_lowest->task)) &&
-                        (x < count) && (err == ESP_OK); x++) {
+                     (x < count) && (err == ESP_OK); x++) {
                     err = -ESP_ERR_NO_MEM;
                     cJSON *json_task = cJSON_CreateObject();
                     if (json_task) {
@@ -733,6 +845,51 @@ static int32_t encode_json_stack_min_free_lowest(const fgr_metrics_stack_min_fre
                         }
                     }
                     task++;
+                }
+                if (err == ESP_OK) {
+                    if (!cJSON_AddItemToObject(json, name, json_array)) {
+                        cJSON_Delete(json_array);
+                        err = -ESP_ERR_NO_MEM;
+                    }
+                }
+            }
+        }
+    }
+
+    return err;
+}
+
+// JSON encode the heap highest allocation metric.
+static int32_t encode_json_heap_allocation_highest(const fgr_metrics_heap_allocation_highest_t *heap_allocation_highest,
+                                                   const char *name, cJSON *json)
+{
+    int32_t err = -ESP_ERR_INVALID_ARG;
+    char buffer[32];
+
+    if (heap_allocation_highest && name && json) {
+        err = ESP_OK;
+        int32_t count = heap_allocation_highest->count;
+        if (count > 0) {
+            err = -ESP_ERR_NO_MEM;
+            cJSON *json_array = cJSON_CreateArray();
+            if (json_array) {
+                err = ESP_OK;
+                const fgr_metrics_heap_allocation_t *allocation = heap_allocation_highest->allocation;
+                for (size_t x = 0; (x < FGR_UTIL_ARRAY_LENGTH(heap_allocation_highest->allocation)) &&
+                        (x < count) && (err == ESP_OK); x++) {
+                    err = -ESP_ERR_NO_MEM;
+                    cJSON *json_task = cJSON_CreateObject();
+                    if (json_task) {
+                        err = ESP_OK;
+                        snprintf(buffer, sizeof(buffer), "%s:%d", allocation->file, allocation->line);
+                        if (cJSON_AddNumberToObject(json_task, buffer, (double) allocation->size)) {
+                            cJSON_AddItemToArray(json_array, json_task);
+                        } else {
+                            cJSON_Delete(json_task);
+                            err = -ESP_ERR_NO_MEM;
+                        }
+                    }
+                    allocation++;
                 }
                 if (err == ESP_OK) {
                     if (!cJSON_AddItemToObject(json, name, json_array)) {
@@ -765,6 +922,9 @@ static int32_t encode_json(fgr_metrics_storage_t *metrics_list,
     } else if (is_good(metric, METRIC_TYPE_STACK_MIN_FREE)) {
         err = encode_json_stack_min_free_lowest(&(metrics_list + metric)->stack_min_free_lowest,
                                                 g_metric_json_name[metric], json);
+    } else if (is_good(metric, METRIC_TYPE_HEAP_ALLOCATION_HIGHEST)) {
+        err = encode_json_heap_allocation_highest(&(metrics_list + metric)->heap_allocation_highest,
+                                                  g_metric_json_name[metric], json);
     }
 
     return err;
@@ -911,7 +1071,7 @@ void fgr_metrics_log_cb(fgr_metrics_storage_t *list, size_t length,
 
     if (list && (length > 0)) {
         err = -ESP_ERR_NO_MEM;
-        buffer = (char *) malloc(FGR_LOG_STRING_MAX_LEN);
+        buffer = (char *) MALLOC(FGR_LOG_STRING_MAX_LEN);
         if (buffer) {
             cJSON *json = cJSON_CreateObject();
             if (json) {
@@ -932,7 +1092,7 @@ void fgr_metrics_log_cb(fgr_metrics_storage_t *list, size_t length,
                 }
                 cJSON_Delete(json);
             }
-            free(buffer);
+            FREE(buffer);
         }
     }
 }
@@ -1170,7 +1330,7 @@ int32_t fgr_metrics_event_bool_get(fgr_metrics_t metric,
     return err;
 }
 
-// Get the current lowest minimum free stack values.
+// Get the current lowest minimum FREE stack values.
 int32_t fgr_metrics_stack_min_free_lowest_get(fgr_metrics_stack_min_free_lowest_t *value)
 {
     int32_t err = -ESP_ERR_INVALID_STATE;
@@ -1186,6 +1346,27 @@ int32_t fgr_metrics_stack_min_free_lowest_get(fgr_metrics_stack_min_free_lowest_
             err = ESP_OK;
         }
         CONTEXT_UNLOCK(g_context.lock, "fgr_metrics_stack_min_free_lowest_get()");
+    }
+
+    return err;
+}
+
+// Get the current highest heap allocation values.
+int32_t fgr_metrics_heap_allocation_highest_get(fgr_metrics_heap_allocation_highest_t *value)
+{
+    int32_t err = -ESP_ERR_INVALID_STATE;
+
+    if (g_context.lock) {
+
+        err = -ESP_ERR_INVALID_ARG;
+
+        CONTEXT_LOCK(g_context.lock, "fgr_metrics_heap_allocation_highest_get()");
+        if (value) {
+            *value = (*(g_context.storage.metrics_list +
+                        FGR_METRIC_HEAP_ALLOCATION_HIGHEST)).heap_allocation_highest;
+            err = ESP_OK;
+        }
+        CONTEXT_UNLOCK(g_context.lock, "fgr_metrics_heap_allocation_highest_get()");
     }
 
     return err;
