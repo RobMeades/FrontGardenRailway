@@ -1,6 +1,8 @@
 # Introduction
 These instructions describe how to set up the various services that form the Front Garden Railway server, `https_server.py`, `log_server.py` and `web_controller.py`.
 
+NOTE: in all cases below, when pasting contents into a file, ensure there are no leading spaces.
+
 # HTTPS Server Setup
 All of the ESP32 nodes will want to make an HTTPS connection to the access point to download updates to their programs; this is what the Python script `https_server.py` does.  To get it running with the ESP32s, connect a serial terminal to the Pi Zero, or Ethernet to a bigger Pi, and do the following:
 

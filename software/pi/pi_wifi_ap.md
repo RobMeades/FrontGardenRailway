@@ -1,6 +1,8 @@
 # Introduction
 These instructions describe how to set up a Wi-Fi access point on a headless Pi Zero W.  Note that, on the version of Raspbian I was using (Trixie), any attempt to set an access point with security failed, so these instructions set up an open Wi-Fi access point (security is provided later through [MAC address filtering](pi_wifi_dhcp_mac.md)).
 
+NOTE: in all cases below, when pasting contents into a file, ensure there are no leading spaces.
+
 # Preparation
 
 ## Installations
@@ -22,11 +24,11 @@ Since the Pi will lose connectivity to your Wi-Fi network (you do _not_ want an 
 
   - `sudo apt install lrzsz`: this allows the `minicom` and `picocom` serial communications programs to perform file transfer,
   
-  - `sudo apt install iptables iptables-persistent`: will be needed for MAC address filtering,
+  - `sudo apt install iptables iptables-persistent`: will be needed for MAC address filtering (save the current rules if it asks),
 
   - `sudo apt install tcpdump lsof jq`: can be handy for debugging,
 
-  - `sudo apt install sqlite3`: may be needed later when you are storing metrics from nodes in a database.
+  - `sudo apt install sqlite3`: may be needed later when you are debugging the database.
 
 - If you are using a Pi Zero, with no Ethernet port, make sure you have serial access to it as follows:
 
@@ -138,7 +140,7 @@ Connect to a Pi Zero using a serial terminal, or a bigger Pi using Ethernet, and
 
 - Also set retries to zero to stop the Network Manager black-listing a device that repeatedly tries to connect:
 
-  `sudo nmcli -f connection.autoconnect-retries connection show FGR`
+  `sudo nmcli connection modify FGR connection.autoconnect-retries 0`
 
 - If there is a pre-existing Wifi station configuration, make sure it does not auto-connect ever with:
 
@@ -158,7 +160,7 @@ Connect to a Pi Zero using a serial terminal, or a bigger Pi using Ethernet, and
 ## Ghosts And Broadcomm Driver Instability
 There appears to be [a\[nother\] bug](https://github.com/raspberrypi/linux/issues/6975) in the `brcmfmac` driver, in that the driver holds onto a station that has disconnected without notice for anywhere from 27 to 90+ seconds. No matter how many times the device boots up within this time, if it sends an association frame while that stale kernel window is active, the Pi completely ignores it.  Because the Pi ignores the frames indefinitely while the old session decays, the device connection times out, resulting in a persistent Wifi 201 error.  More details here:
 
-To fix this, and it might be a good idea to do this whether you are using the on-board Wifi or not Google Gemini wrote me a bash script `clear_node_ghosts.sh` which scans the output of `iw dev wlan0 station dump` every second and deletes any inactive MAC addresses.  You will need to `sudo chmod +x clear_node_ghosts.sh` to make the script executable and then `sudo nano /etc/systemd/system/clear_node_ghosts.service`, paste the following in:
+To fix this, and it might be a good idea to do this whether you are using the on-board Wifi or not Google Gemini wrote me a bash script `clear_node_ghosts.sh` which scans the output of `iw dev wlan0 station dump` every second and deletes any inactive MAC addresses.  Make this run with `sudo nano /etc/systemd/system/clear_node_ghosts.service`, pasting in the following:
 
 ```
 [Unit]

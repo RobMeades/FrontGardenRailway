@@ -4,7 +4,9 @@ These notes taken from:
 
 https://www.dzombak.com/blog/2024/03/running-a-raspberry-pi-with-a-read-only-root-filesystem/
 
-All credit goes to Chris Dzombak and those who helped him compile the guide.  The process below worked for me on a Raspberry Pi Zero W (1.1 and 2), then a Raspberry Pi 5, all running Raspberry Pi OS 13 (Trixie), headless version over a Wifi network (hence disabling of Wifi is not included below).
+All credit goes to Chris Dzombak and those who helped him compile the guide.  The process below worked for me on a Raspberry Pi Zero W (1.1 and 2), then a Raspberry Pi 5, all running Raspberry Pi OS 13 (Trixie), headless version, initially over a Wifi network (hence disabling of Wifi is not included below).
+
+NOTE: in all cases below, when pasting contents into a file, ensure there are no leading spaces.
 
 - Run an update and reboot:
 
@@ -28,6 +30,8 @@ All credit goes to Chris Dzombak and those who helped him compile the guide.  Th
   sudo swapoff /dev/zram0
   swapon --show
   ```
+
+- Note: `sudo swapoff /dev/zram0` may return `Invalid argument`; that is OK, provided `swapon --show` returns nothing at all, the swap file has been disabled.
 
 - Reboot and verify that the swap file has gone by running:
 
@@ -281,9 +285,9 @@ All credit goes to Chris Dzombak and those who helped him compile the guide.  Th
  ...then scroll through and look for any issues.  When looking for issues, you will undoubtedly see some errors from various processes.  You will want to investigate those.  Start by checking "is this actually broken?".  Often there will be messages from e.g. `avahi-daemon` or `snapd` that are unhappy they cannot go about their business normally on a read-only filesystem.  But as long as that software is still working for your purposes, you can safely ignore their complaints.
 
 # RW SSD For Storage
-It is best have another (e.g. 32 Gbyte) SSD plugged into the Pi for long-term storage of binaries for the ESP32 devices, a database of logs, the journal, etc.  The SSD that MUST HAVE BEEN EXT4 formatted if you are to use it for `journal` storage, which is advisable.  When I moved to the Pi 5 I powered it with a PoE HAT that included an M2 socket, so could use an NVME SSD in that socket for this purpose and changed the mount point to `/mnt/fgr_data`.
+It is best have another (e.g. 32 Gbyte) SD card plugged into the Pi for long-term storage of binaries for the ESP32 devices, a database of logs, the journal, etc.  The SD card MUST HAVE BEEN EXT4 formatted if you are to use it for `journal` storage, which is advisable.  When I moved to the Pi 5 I powered it with a PoE HAT that included an M2 socket, so could use an NVME SSD in that socket for this purpose.
 
-- Plug it into the Raspberry Pi, check with `lsblk` and, if it for instance appears as `/dev/sda`, mount it and check that it as mounted with:
+- Plug your SSD into the Raspberry Pi, check with `lsblk` and, if it for instance appears as `/dev/sda`, mount it and check that it as mounted with:
 
   ```
   sudo mkdir -p /mnt/fgr_data
@@ -305,7 +309,7 @@ It is best have another (e.g. 32 Gbyte) SSD plugged into the Pi for long-term st
   UUID=<UUID> /mnt/fgr_data ext4 defaults,nofail,noatime,x-systemd.device-timeout=10 0 2
   ```
 
-  ...(obviously replacing `<UUID>` with the `UUID` for your SSD) then check that you got that write by confirming the mount with:
+  ...(obviously replacing `<UUID>` with the `UUID` for your SSD) then check that you got that right by confirming the mount with:
  
   ```
   sudo mount -a
@@ -318,7 +322,7 @@ It is best have another (e.g. 32 Gbyte) SSD plugged into the Pi for long-term st
   ```
   
 # Journal To SSD
-To move the journal back out of RAM and onto this SSD (or to an NVME SSD on an M2 PoE hat):
+To move the journal back out of RAM and onto this SD card (or to an NVME SSD on an M2 PoE hat):
 
 - Stop the journal and create the necessary storage:
 

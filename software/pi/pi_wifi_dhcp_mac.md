@@ -1,6 +1,8 @@
 # Introduction
 These instructions described how to set up MAC address filtering of Wi-Fi connected devices on a Raspberry Pi and to fix the IP addresses allocated according to MAC address.
 
+Note: see `Doing It Automatically` below!!!
+
 # MAC Address Filtering
 This is done by configuring `iptables`.
 
@@ -94,4 +96,23 @@ This is done within `dnsmasq` which is used by `nmcli` under the hood.
 - Check the new IP address allocations with:
 
   `sudo arp`
+
+# Doing It Automatically
+You can do all of the above steps automatically for a given Wifi client by using the script `add_node.py`.  You will need to know the MAC address of that client's Wifi adapter.  If you are doing this for the first time, you need to create and add one MAC address to the `iptable` first.  For instance , usually you would test connectivity with your own phone so create the table and add it with something like:
+
+```
+sudo iptables -t raw -N dhcp_clients
+sudo iptables -t raw -A PREROUTING -p udp --dport 67 -j dhcp_clients
+sudo iptables -t raw -A dhcp_clients -m mac --mac-source <your phone's MAC address> -j ACCEPT -m comment --comment "Mobile phone"
+sudo iptables -t raw -A dhcp_clients -j DROP
+sudo netfilter-persistent save
+```
+
+With that done, if, say, you wanted to add a client with MAC address `a1:81:5c:10:2e:f3`, you would type:
+
+```
+python add_node.py a1:81:5c:10:2e:f3
+```
+
+The client will be added and assigned the next available static IP address in the range `10.10.3.x` (or you can change it if you like).
 
