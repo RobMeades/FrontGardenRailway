@@ -23,7 +23,7 @@ Since the Pi will lose connectivity to your Wi-Fi network (you do _not_ want an 
   - `sudo apt install minicom`: serial communications program,
 
   - `sudo apt install lrzsz`: this allows the `minicom` and `picocom` serial communications programs to perform file transfer,
-  
+
   - `sudo apt install iptables iptables-persistent`: will be needed for MAC address filtering (save the current rules if it asks),
 
   - `sudo apt install tcpdump lsof jq`: can be handy for debugging,
@@ -42,7 +42,7 @@ To avoid having to enter a password all the time, and so that [`nodes_esp32_depl
   ```
   ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519_fgr -N ""
   ```
-  
+
 - This will create two files inside your `.ssh` directory: leave the private key `id_ed25519_fgr` where it is and never share it.
 
 - On the machine where you generated the key pair, copy the public key `id_ed25519_fgr.pub` to the Pi with:
@@ -52,7 +52,7 @@ To avoid having to enter a password all the time, and so that [`nodes_esp32_depl
   ```
 
   ...where `username` is replaced with your username on the Pi and `ip` with the IP address of the Pi.
-  
+
 - Check that this has worked by logging in manually from that machine with:
 
   ```
@@ -120,7 +120,7 @@ Connect to a Pi Zero using a serial terminal, or a bigger Pi using Ethernet, and
   [connection]
   # Switch power saving off to avoid poll time-outs
   wifi.powersave = 2
-  ``
+  ```
 
 - Restart NetworkManager with:
 
