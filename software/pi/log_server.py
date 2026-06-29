@@ -444,8 +444,14 @@ class FGRLogServer:
 
         client.stop_event.set()
 
+        # Only join if it's not our own thread
         if client.rx_thread and client.rx_thread.is_alive():
-            client.rx_thread.join(timeout=2.0)
+            if client.rx_thread is not threading.current_thread():
+                client.rx_thread.join(timeout=2.0)
+                if client.rx_thread.is_alive():
+                    self.lib_logger.log_admin(f"Receive thread for {ip}:{port} did not terminate after 2 seconds!", log_level=3)
+            else:
+                self.lib_logger.log_admin(f"Not joining own thread for {ip}:{port}", log_level=6)
 
         client.rx_thread = None
         client.sock = None
@@ -608,10 +614,8 @@ class FGRLogServer:
             with self.clients_lock:
                 current_client = self.clients.get(ip)
                 if current_client is thread_client and current_client.sock is client_sock:
-                    # Only disconnect if stop_event wasn't set (natural exit, not replacement)
                     if not thread_client.stop_event.is_set():
                         self._disconnect_client(thread_client)
-                # Otherwise, the reconnection logic already handled cleanup
 
     def start(self) -> None:
         """Start the log server."""

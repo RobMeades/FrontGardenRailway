@@ -36,7 +36,7 @@ extern "C" {
 
 #ifndef FGR_HEAP_CHECK_RECORDS
 // The maximum number of heap allocations to track the source of.
-#  define FGR_HEAP_CHECK_RECORDS 256
+#  define FGR_HEAP_CHECK_RECORDS 512
 #endif
 
 #ifndef FGR_HEAP_CHECK_LEAK_RECORDS

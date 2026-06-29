@@ -139,8 +139,10 @@ FGR_RRAM_DEFINE(heap_leak_list_t, leak_list);
 // Send a heap operation to the heap task.
 // Note: don't do any locking of anything in here, it is
 // in the malloc()/free() path.
-static void heap_task_send(const char *path, int line, void *address, size_t size)
+static int32_t heap_task_send(const char *path, int line, void *address, size_t size)
 {
+    int32_t err = ESP_OK;
+
     if (g_context.queue_handle) {
         heap_operation_t operation = {
             .path = path,
@@ -152,8 +154,11 @@ static void heap_task_send(const char *path, int line, void *address, size_t siz
 
         if (xQueueSend(g_context.queue_handle, &operation, 0) != pdPASS) {
             atomic_fetch_add(&g_context.record_lost_count, 1);
+            err = -ESP_ERR_NO_MEM;
         }
     }
+
+    return err;
 }
 
 
@@ -373,7 +378,12 @@ static void clean_up(context_t *context)
         // Tell the heap task to end in an orderly manner,
         // eating up everying on the queue and resolving
         // any remaining free()s, by sending it a NULL path
-        heap_task_send(NULL, 0, NULL, 0);
+        bool all_queue_processed = true;
+        if (heap_task_send(NULL, 0, NULL, 0) != ESP_OK) {
+            // ...and if we can't, do it the old-fashioned way
+            context->running = false;
+            all_queue_processed = false;
+        }
         // This can take a while
         esp_task_wdt_reset();
         // Take the running semaphore to know its stopped
@@ -392,7 +402,8 @@ static void clean_up(context_t *context)
             CONTEXT_LOCK(context_task->lock, "clean_up() heap task 2");
 
             // If we've been called from deinit, store the leak list
-            if (context->is_shutting_down) {
+            // if we can be sure it is going to be valid
+            if (context->is_shutting_down && all_queue_processed) {
                 store_leak_list(context);
             }
 
@@ -448,7 +459,6 @@ static void task_heap(void *param)
         while (context->running &&
                (xQueueReceive(context->queue_handle, &operation, 0) == pdTRUE)) {
             if (operation.path != NULL) {
-                // Debug: track malloc count
                 if (atomic_load(&context->record_count) < FGR_HEAP_CHECK_RECORDS) {
                     heap_record_t *record = FGR_HEAP_REAL_MALLOC(sizeof(*record));
                     if (record) {

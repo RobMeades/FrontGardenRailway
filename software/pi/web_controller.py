@@ -108,7 +108,8 @@ METRICS_CONFIG = {
     'ping_rx': {'type': 'event', 'importance_condition': 'has_fail', 'order': 14, 'display_format': 'decimal'},
     'nvs_w':   {'type': 'boolean_event', 'importance_condition': 'has_fail', 'order': 15, 'display_format': 'decimal'},
     'stack':   {'type': 'stack', 'importance_condition': 'first_value < 256', 'order': 16, 'display_format': 'decimal'},
-    'heap':    {'type': 'simple', 'importance_threshold': 10000, 'order': 17, 'display_format': 'decimal'}
+    'heap':    {'type': 'simple', 'importance_threshold': 10000, 'order': 17, 'display_format': 'decimal'},
+    'alloc':   {'type': 'alloc', 'importance_condition': 'has_large_allocation', 'order': 18, 'display_format': 'decimal'}
 }
 
 # Human-readable help text for metrics (for tooltips)
@@ -129,7 +130,8 @@ METRICS_HELP = {
     'ping_rx': 'Ping receive events - the last time (since boot) of and a count of successful (+) and failed (-) pings received from the controller',
     'nvs_w': 'NVS write events - the last time (since boot) of and a count of successful (+) and failed (-) writes to non-volatile storage',
     'stack': 'The three tasks with the lowest minimum free stack values, in bytes',
-    'heap': 'The minimum free heap memory in bytes'
+    'heap': 'The minimum free heap memory in bytes',
+    'alloc': 'The top three largest heap allocations by file/line, with bytes allocated'
 }
 
 def format_fgr_state(state):
@@ -713,18 +715,14 @@ class WebController(Controller):
 
     def _init_metrics_history(self):
         """Initialize the metrics_history table for fast queries"""
-        print("_init_metrics_history: Starting...")
-
         conn = self._get_metrics_db_connection()
         if not conn:
-            print("_init_metrics_history: No database connection")
             return
 
         try:
             cursor = conn.cursor()
 
-            # Create table
-            print("Creating metrics_history table if not exists...")
+            # Create table with alloc column if it doesn't exist
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS metrics_history (
                     epoch_time INTEGER NOT NULL,
@@ -735,71 +733,25 @@ class WebController(Controller):
                     panics INTEGER,
                     ctrl_disconnects INTEGER,
                     log_disconnects INTEGER,
+                    alloc TEXT,
                     PRIMARY KEY (epoch_time, node_ip)
                 )
             """)
 
-            # Check if metrics_history is empty (LIMIT 1 is fast)
-            cursor.execute("SELECT 1 FROM metrics_history LIMIT 1")
-            has_metrics_history = cursor.fetchone() is not None
-
-            if not has_metrics_history:
-                # Check if there are any metric rows in logs (EXISTS is fast)
-                cursor.execute("SELECT 1 FROM logs WHERE message_type = 'METRIC' LIMIT 1")
-                has_metric_logs = cursor.fetchone() is not None
-
-                if has_metric_logs:
-                    # Need the count for batch processing
-                    cursor.execute("SELECT COUNT(*) FROM logs WHERE message_type = 'METRIC'")
-                    source_count = cursor.fetchone()[0]
-                    print(f"Found {source_count} metric rows to backfill...")
-
-                    # Backfill in batches
-                    batch_size = 5000
-                    offset = 0
-
-                    while offset < source_count:
-                        cursor.execute(f"""
-                            INSERT OR REPLACE INTO metrics_history (epoch_time, node_ip, rssi, heap, wifi_failures, panics, ctrl_disconnects, log_disconnects)
-                            SELECT
-                                epoch_time,
-                                node_ip,
-                                json_extract(substr(message, instr(message, '{{')), '$.dbm'),
-                                json_extract(substr(message, instr(message, '{{')), '$.heap'),
-                                json_extract(substr(message, instr(message, '{{')), '$.w.-.n'),
-                                json_extract(substr(message, instr(message, '{{')), '$.panic.n'),
-                                json_extract(substr(message, instr(message, '{{')), '$.cnt_c.-.n'),
-                                json_extract(substr(message, instr(message, '{{')), '$.log_c.-.n')
-                            FROM logs
-                            WHERE message_type = 'METRIC'
-                            GROUP BY epoch_time, node_ip
-                            LIMIT {batch_size} OFFSET {offset}
-                        """)
-                        conn.commit()
-                        offset += batch_size
-                        print(f"Backfilled {offset}/{source_count} rows")
-
-                    print("Backfill complete")
-                else:
-                    print("No metric logs found, skipping backfill")
-            else:
-                print("metrics_history already has data, skipping backfill (trigger will maintain it)")
-
-            # Create indexes (only if they don't exist)
-            print("Creating indexes...")
+            # Create indexes
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_history_epoch ON metrics_history(epoch_time)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_history_node_ip ON metrics_history(node_ip)")
 
-            # Create trigger for new inserts
-            print("Creating trigger...")
+            # Create trigger
+            cursor.execute("DROP TRIGGER IF EXISTS update_metrics_history")
             cursor.execute("""
-                CREATE TRIGGER IF NOT EXISTS update_metrics_history
+                CREATE TRIGGER update_metrics_history
                 AFTER INSERT ON logs
                 WHEN NEW.message_type = 'METRIC'
                 BEGIN
                     INSERT OR REPLACE INTO metrics_history (
                         epoch_time, node_ip, rssi, heap,
-                        wifi_failures, panics, ctrl_disconnects, log_disconnects
+                        wifi_failures, panics, ctrl_disconnects, log_disconnects, alloc
                     ) VALUES (
                         NEW.epoch_time,
                         NEW.node_ip,
@@ -808,13 +760,13 @@ class WebController(Controller):
                         json_extract(substr(NEW.message, instr(NEW.message, '{')), '$.w.-.n'),
                         json_extract(substr(NEW.message, instr(NEW.message, '{')), '$.panic.n'),
                         json_extract(substr(NEW.message, instr(NEW.message, '{')), '$.cnt_c.-.n'),
-                        json_extract(substr(NEW.message, instr(NEW.message, '{')), '$.log_c.-.n')
+                        json_extract(substr(NEW.message, instr(NEW.message, '{')), '$.log_c.-.n'),
+                        json_extract(substr(NEW.message, instr(NEW.message, '{')), '$.alloc')
                     );
                 END
             """)
 
             conn.commit()
-            print("_init_metrics_history: Complete")
 
         except Exception as e:
             print(f"Error initializing metrics_history: {e}")
@@ -1149,6 +1101,16 @@ class WebController(Controller):
                     return first_value < 256
             return False
 
+        elif condition == 'has_large_allocation':  # NEW
+            # Alloc: highlight if any allocation > 10KB
+            if isinstance(data, list):
+                for item in data:
+                    if isinstance(item, dict):
+                        for bytes_allocated in item.values():
+                            if bytes_allocated > 10240:  # 10KB threshold
+                                return True
+            return False
+
         elif key == 'heap' and config.get('type') == 'simple':
             threshold = config.get('importance_threshold', 10000)
             return data < threshold
@@ -1287,6 +1249,35 @@ class WebController(Controller):
         else:
             return f'<span class="metric-normal" title="{help_text}">{key}: {display}</span>'
 
+    def _format_alloc_metric(self, key: str, data: list, is_important: bool) -> Optional[str]:
+        """Format alloc metric (array of file:line -> bytes objects)"""
+        if not isinstance(data, list) or len(data) == 0:
+            return None
+
+        alloc_parts = []
+        for item in data:
+            if isinstance(item, dict):
+                for location, bytes_allocated in item.items():
+                    # Format bytes with K/M suffix for readability
+                    if bytes_allocated >= 1024 * 1024:
+                        formatted_bytes = f"{bytes_allocated // (1024 * 1024)}MB"
+                    elif bytes_allocated >= 1024:
+                        formatted_bytes = f"{bytes_allocated // 1024}KB"
+                    else:
+                        formatted_bytes = f"{bytes_allocated}B"
+                    alloc_parts.append(f"{location}: {formatted_bytes}")
+
+        if not alloc_parts:
+            return None
+
+        help_text = METRICS_HELP.get(key, '')
+        display = ' '.join(alloc_parts)
+
+        if is_important:
+            return f'<span class="metric-important" title="{help_text}">{key}: {display}</span>'
+        else:
+            return f'<span class="metric-normal" title="{help_text}">{key}: {display}</span>'
+
     def _format_metrics_display(self, node_ip: str, metrics: dict) -> Tuple[str, dict]:
         """Format metrics for display, return (display_html, importance_map)"""
         formatted_parts_important = []  # Store important metrics first
@@ -1321,6 +1312,9 @@ class WebController(Controller):
             elif config['type'] == 'stack':
                 if isinstance(metric_data, list):
                     formatted = self._format_stack_metric(key, metric_data, is_important)
+            elif config['type'] == 'alloc':
+                if isinstance(metric_data, list):
+                    formatted = self._format_alloc_metric(key, metric_data, is_important)
 
             if formatted:
                 if is_important:

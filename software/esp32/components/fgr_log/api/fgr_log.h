@@ -35,11 +35,12 @@ extern "C" {
 
 #ifndef FGR_LOG_BUFFER_MAX_ENTRIES
 /** Maximum number of log entries to buffer when disconnected from the
- *  log server. Each entry consumes approximately 100-200 bytes of RAM
- *  (including header and message body). With PSRAM available on ESP32-S3,
- *  1024 entries is reasonable (~200KB). Without PSRAM, reduce to 256.
+ * log server. Each entry consumes approximately 100-200 bytes of RAM
+ * (including header and message body). With PSRAM available on ESP32-S3,
+ * 512 entries is reasonable (~100KB), which seems to leave about
+ * 25 kbytes of heap still free.
  */
-# define FGR_LOG_BUFFER_MAX_ENTRIES 1024
+# define FGR_LOG_BUFFER_MAX_ENTRIES 512
 #endif
 
 /* ----------------------------------------------------------------
