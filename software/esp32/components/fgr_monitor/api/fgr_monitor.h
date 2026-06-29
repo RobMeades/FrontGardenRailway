@@ -80,14 +80,17 @@ extern "C" {
 #  define FGR_MONITOR_HEAP_MIN (10 * 1024)
 #endif
 
-#ifndef FGR_MONITOR_HEAP_MIN_DURATION_SECONDS
-// How long the heap must have gone below FGR_MONITOR_HEAP_MIN to cause an abort.
-#  define FGR_MONITOR_HEAP_MIN_DURATION_SECONDS 10
+#ifndef FGR_MONITOR_HEAP_BLOCK_MIN
+// The minimum expected free heap block size (guarding against fragmentation),
+// see also FGR_MONITOR_HEAP_MIN_DURATION_SECONDS.
+#  define FGR_MONITOR_HEAP_BLOCK_MIN 1024
 #endif
 
-#ifndef FGR_MONITOR_HEAP_BLOCK_MIN
-// The minimum expected free heap block size (guarding against fragmentation).
-#  define FGR_MONITOR_HEAP_BLOCK_MIN 1024
+#ifndef FGR_MONITOR_HEAP_MIN_DURATION_SECONDS
+// How long the heap must have gone below FGR_MONITOR_HEAP_MIN or
+// not been able to allocate a block of size FGR_MONITOR_HEAP_BLOCK_MIN
+// to cause an abort.
+#  define FGR_MONITOR_HEAP_MIN_DURATION_SECONDS 10
 #endif
 
 #ifndef FGR_MONITOR_CHECK_INTERVAL_MS

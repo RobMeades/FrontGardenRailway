@@ -374,6 +374,8 @@ static void clean_up(context_t *context)
         // eating up everying on the queue and resolving
         // any remaining free()s, by sending it a NULL path
         heap_task_send(NULL, 0, NULL, 0);
+        // This can take a while
+        esp_task_wdt_reset();
         // Take the running semaphore to know its stopped
         CONTEXT_LOCK(context->running_semaphore, "clean_up() heap task 1");
         CONTEXT_UNLOCK(context->running_semaphore, "clean_up() heap task 1");

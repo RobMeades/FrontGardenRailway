@@ -84,6 +84,7 @@ typedef struct {
     bool monitor_task_aborting;
     int32_t timeout_seconds;
     int64_t last_msg_receive_us;
+    int64_t heap_block_size_below_min_start_us;
     int64_t heap_below_min_start_us;
     struct task_list_t task_list;
 } context_task_t;
@@ -305,24 +306,32 @@ static void task_monitor(void *param)
         // Monitor heap
         if (reason == FGR_MONITOR_ABORT_REASON_NONE) {
             if (heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) >= FGR_MONITOR_HEAP_BLOCK_MIN) {
-                context_task->heap_below_min_start_us = 0;
+                context_task->heap_block_size_below_min_start_us = 0;
             } else {
-                if (context_task->heap_below_min_start_us == 0) {
-                    context_task->heap_below_min_start_us = esp_timer_get_time();
-                } else if (context_task->heap_below_min_start_us - esp_timer_get_time() >
+                if (context_task->heap_block_size_below_min_start_us == 0) {
+                    context_task->heap_block_size_below_min_start_us = esp_timer_get_time();
+                } else if (esp_timer_get_time() - context_task->heap_block_size_below_min_start_us >
                            FGR_MONITOR_HEAP_MIN_DURATION_SECONDS * 1000000) {
                     reason = FGR_MONITOR_ABORT_REASON_FRAGMENTED_HEAP;
                 }
             }
         }
-        if ((reason == FGR_MONITOR_ABORT_REASON_NONE) &&
-            (heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT) < FGR_MONITOR_HEAP_MIN)) {
-            reason = FGR_MONITOR_ABORT_REASON_LOW_HEAP;
+        if (reason == FGR_MONITOR_ABORT_REASON_NONE) {
+            if (heap_caps_get_free_size(MALLOC_CAP_8BIT) >= FGR_MONITOR_HEAP_MIN) {
+                context_task->heap_below_min_start_us = 0;
+            } else {
+                if (context_task->heap_below_min_start_us == 0) {
+                    context_task->heap_below_min_start_us = esp_timer_get_time();
+                } else if (esp_timer_get_time() - context_task->heap_below_min_start_us >
+                           FGR_MONITOR_HEAP_MIN_DURATION_SECONDS * 1000000) {
+                    reason = FGR_MONITOR_ABORT_REASON_LOW_HEAP;
+                }
+            }
         }
 
         // Monitor communications with the controller
         if ((reason == FGR_MONITOR_ABORT_REASON_NONE) &&
-            (context_task->last_msg_receive_us - esp_timer_get_time() >
+            (esp_timer_get_time() - context_task->last_msg_receive_us >
             FGR_MONITOR_WDT_CONTROLLER_TIMEOUT_SECONDS * 1000000)) {
             reason = FGR_MONITOR_ABORT_REASON_CONTROLLER_WDT;
         }
@@ -331,7 +340,7 @@ static void task_monitor(void *param)
             // Check all of the task last_called_us times
             task_t *iter = NULL;
             SLIST_FOREACH(iter, &context_task->task_list, next) {
-                if (iter->last_called_us - esp_timer_get_time() > (((int64_t) context_task->timeout_seconds) * 1000000)) {
+                if (esp_timer_get_time() - iter->last_called_us > (((int64_t) context_task->timeout_seconds) * 1000000)) {
                     task_name = iter->name;
                     reason = FGR_MONITOR_ABORT_REASON_TASK_WDT;
                     break;
@@ -601,7 +610,7 @@ int32_t fgr_monitor_abort_reason_log(const char *tag, const char *prefix,
                              reason_name, reason, buffer);
                     break;
                 case ESP_LOG_VERBOSE:
-                    ESP_LOGD(tag, "%s%S%s (%d)%s", prefix, reason_name_prefix,
+                    ESP_LOGD(tag, "%s%s%s (%d)%s", prefix, reason_name_prefix,
                              reason_name, (int) reason, buffer);
                 default:
                     break;
