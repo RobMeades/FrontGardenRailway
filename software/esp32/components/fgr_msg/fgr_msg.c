@@ -545,7 +545,7 @@ static void receive_cb(void *buffer, size_t length, void *param)
         if (msg != NULL) {
             char buffer_str[64] = {0};
             fgr_msg_name(msg->header.req.type, buffer_str, sizeof(buffer_str));
-            ESP_LOGD(TAG, "Received %s [0x%04x], reference %d, body length %d.",
+            ESP_LOGI(TAG, "Received %s [0x%04x], reference %d, body length %d.",
                      buffer_str, msg->header.req.type, msg->header.req.reference,
                      msg->body.length);
 
