@@ -1260,11 +1260,11 @@ class WebController(Controller):
                 for location, bytes_allocated in item.items():
                     # Format bytes with K/M suffix for readability
                     if bytes_allocated >= 1024 * 1024:
-                        formatted_bytes = f"{bytes_allocated // (1024 * 1024)}MB"
+                        formatted_bytes = f"{bytes_allocated // (1024 * 1024)}M"
                     elif bytes_allocated >= 1024:
-                        formatted_bytes = f"{bytes_allocated // 1024}KB"
+                        formatted_bytes = f"{bytes_allocated // 1024}k"
                     else:
-                        formatted_bytes = f"{bytes_allocated}B"
+                        formatted_bytes = f"{bytes_allocated}"
                     alloc_parts.append(f"{location}: {formatted_bytes}")
 
         if not alloc_parts:
@@ -5040,10 +5040,10 @@ class WebController(Controller):
         let logElements = [];           // DOM elements for each log
         let logTexts = [];              // Raw text for each log
         let logTimestamps = [];         // Timestamps for each log
-        let isAtBottom = true;          // Whether we're scrolled to bottom
         let autoScrollLocked = false;   // Whether auto-scroll is locked (disabled)
         let isLoading = false;          // Whether we're currently loading more logs
         let hasMoreDown = true;         // Whether there are more logs below
+        let trimInProgress = false;
         let journalRange = { earliest: null, latest: null };  // Available journal range
         let currentScrollAnchor = null;  // Timestamp to anchor scrolling after loading
         let maxNormalGapSeconds = 5; // Track the maximum normal gap between consecutive logs
@@ -5643,9 +5643,6 @@ class WebController(Controller):
                             break;
                         case DebugViewOperation.TRIM_BUFFER:
                             const trimmed = trimBufferInternal();
-                            if (trimmed) {
-                                rebuildDebugDisplayInternal();
-                            }
                             break;
                         case DebugViewOperation.SCROLL_TO_TIMESTAMP:
                             await scrollToTimestampInternal(item.data);
@@ -6902,8 +6899,6 @@ class WebController(Controller):
 
         // Load historical logs above current view (scrolling up)
         async function loadHistoricalLogsAbove() {
-            console.log(`[DEBUG] loadHistoricalLogsAbove called, isSearching=${isSearching}`);
-
             // Skip during search fetch
             if (isSearching || isLoading) {
                 console.log('[DEBUG] loadHistoricalLogsAbove: skipping due to isSearching or isLoading');
@@ -7075,17 +7070,15 @@ class WebController(Controller):
 
         // Handle scroll events for infinite loading
         function handleDebugScroll() {
+            // Skip if trim is in progress
+            if (trimInProgress) {
+                console.log('[DEBUG] handleDebugScroll: SKIPPED - trim in progress');
+                return;
+            }
+
             if (!debugWindow) return;
 
             const distanceToBottom = debugWindow.scrollHeight - debugWindow.scrollTop - debugWindow.clientHeight;
-            const atBottom = distanceToBottom < 10;
-
-            // Update auto-scroll state
-            if (!autoScrollLocked && atBottom && !isAtBottom) {
-                isAtBottom = true;
-            } else if (!autoScrollLocked && !atBottom) {
-                isAtBottom = false;
-            }
 
             // Check if we should load more
             if (debugWindow.scrollTop < 50) {
@@ -7093,6 +7086,13 @@ class WebController(Controller):
             } else if (distanceToBottom < 100 && !autoScrollLocked) {
                 loadMoreLogsBelow();
             }
+        }
+
+        function isScrolledToBottom() {
+            if (!debugWindow) return false;
+            const distanceToBottom = debugWindow.scrollHeight - debugWindow.scrollTop - debugWindow.clientHeight;
+            const result = distanceToBottom < 10;
+            return result;
         }
 
         function updateMaxNormalGap(timestamp, prevTimestamp) {
@@ -7562,7 +7562,8 @@ class WebController(Controller):
 
             // Add to DOM if it passes filters
             if (shouldDisplayLog(message)) {
-                const shouldScroll = !autoScrollLocked && isAtBottom;
+                const shouldScroll = !autoScrollLocked && isScrolledToBottom();
+
                 const className = message.includes('[CTRL]') ? 'log-ctrl' : 'log-node';
                 const logDiv = document.createElement('div');
                 logDiv.className = className;
@@ -7626,17 +7627,11 @@ class WebController(Controller):
         }
 
         function trimBufferInternal() {
-            /**
-            * Trim buffer to max size while preserving the visible range.
-            * Called from the queue processor.
-            * Returns true if trimming occurred, false otherwise.
-            */
             if (logBuffer.length <= MAX_LOG_ENTRIES) {
                 return false;
             }
 
             if (!debugWindow) {
-                // No window? Trim to prevent memory issues
                 if (logBuffer.length > MAX_LOG_ENTRIES * 1.5) {
                     logBuffer.splice(0, logBuffer.length - MAX_LOG_ENTRIES);
                     return true;
@@ -7644,44 +7639,28 @@ class WebController(Controller):
                 return false;
             }
 
-            // Determine the visible range with generous margins
+            // Calculate protected range (viewport + margin)
             const viewportHeight = debugWindow.clientHeight;
-            const margin = viewportHeight * 0.5; // 50% margin above and below
-
+            const margin = viewportHeight * 2;
             const viewportTop = debugWindow.scrollTop;
             const viewportBottom = viewportTop + viewportHeight;
-
             const protectedTop = viewportTop - margin;
             const protectedBottom = viewportBottom + margin;
 
-            // Find the log IDs that fall within the protected range
+            // Find protected log IDs
             let protectedLogIds = new Set();
-            let earliestProtectedTimestamp = null;
-            let latestProtectedTimestamp = null;
+            let earliestProtectedIndex = -1;
 
             for (const el of logElements) {
                 if (el.style.display !== 'none' && el.style.visibility !== 'hidden') {
-                    const rect = el.getBoundingClientRect();
-                    const elTop = rect.top;
-                    const elBottom = rect.bottom;
-
-                    // Check if this element overlaps the protected range
-                    if (elTop < protectedBottom && elBottom > protectedTop) {
-                        const logId = el.getAttribute('data-log_id');
-                        if (logId && logId !== 'gap' && logId !== 'null') {
-                            const id = parseInt(logId, 10);
-                            if (!isNaN(id)) {
-                                protectedLogIds.add(id);
-
-                                // Also track timestamps for additional safety
-                                const ts = parseFloat(el.getAttribute('data-timestamp'));
-                                if (ts && !isNaN(ts)) {
-                                    if (earliestProtectedTimestamp === null || ts < earliestProtectedTimestamp) {
-                                        earliestProtectedTimestamp = ts;
-                                    }
-                                    if (latestProtectedTimestamp === null || ts > latestProtectedTimestamp) {
-                                        latestProtectedTimestamp = ts;
-                                    }
+                    if (!el.classList || !el.classList.contains('gap-marker')) {
+                        const rect = el.getBoundingClientRect();
+                        if (rect.top < protectedBottom && rect.bottom > protectedTop) {
+                            const logId = el.getAttribute('data-log_id');
+                            if (logId && logId !== 'null') {
+                                const id = parseInt(logId, 10);
+                                if (!isNaN(id)) {
+                                    protectedLogIds.add(id);
                                 }
                             }
                         }
@@ -7689,80 +7668,107 @@ class WebController(Controller):
                 }
             }
 
-            // If we couldn't find any protected logs, use the center log as fallback
-            if (protectedLogIds.size === 0) {
-                const centerLogId = findCenterLogId();
-                if (centerLogId !== null) {
-                    protectedLogIds.add(centerLogId);
-                }
-            }
-
-            // Calculate how many entries to remove
-            let entriesToRemove = logBuffer.length - MAX_LOG_ENTRIES;
-
-            // If we have protected logs, make sure we don't trim them
             if (protectedLogIds.size > 0) {
-                // Find the earliest protected log in the buffer
-                let earliestProtectedIndex = -1;
                 for (let i = 0; i < logBuffer.length; i++) {
                     if (protectedLogIds.has(logBuffer[i].log_id)) {
                         earliestProtectedIndex = i;
                         break;
                     }
                 }
+            }
 
-                if (earliestProtectedIndex !== -1) {
-                    // Keep at least 100 entries before the earliest protected log
-                    // This provides context when scrolling up
-                    const minKeep = Math.max(0, earliestProtectedIndex - 100);
-                    entriesToRemove = Math.min(entriesToRemove, minKeep);
+            // Remove only a small batch
+            let entriesToRemove = 0;
+            const MAX_REMOVE = 30;
+            if (earliestProtectedIndex !== -1) {
+                entriesToRemove = Math.min(MAX_REMOVE, Math.max(0, earliestProtectedIndex - 50));
+            } else {
+                entriesToRemove = Math.min(MAX_REMOVE, logBuffer.length - MAX_LOG_ENTRIES);
+            }
+
+            if (entriesToRemove <= 0) return false;
+
+            // Disable browser scroll anchoring
+            const originalOverflowAnchor = debugWindow.style.overflowAnchor;
+            debugWindow.style.overflowAnchor = 'none';
+
+            // Find the anchor element (the first visible element after what we're removing)
+            let anchorElement = null;
+
+            for (let i = 0; i < logElements.length; i++) {
+                const el = logElements[i];
+                if (el.style.display !== 'none' && el.style.visibility !== 'hidden') {
+                    if (!el.classList || !el.classList.contains('gap-marker')) {
+                        const rect = el.getBoundingClientRect();
+                        if (rect.top > 0) {
+                            anchorElement = el;
+                            break;
+                        }
+                    }
                 }
             }
 
-            // If we still need to remove entries (buffer is critically large),
-            // we might need to trim even protected logs, but do it conservatively
-            if (entriesToRemove > 0 && protectedLogIds.size > 0) {
-                // Try to find the index of the latest protected log
-                let latestProtectedIndex = -1;
-                for (let i = logBuffer.length - 1; i >= 0; i--) {
-                    if (protectedLogIds.has(logBuffer[i].log_id)) {
-                        latestProtectedIndex = i;
+            // If no anchor found above viewport, use the first visible element
+            if (!anchorElement) {
+                for (let i = 0; i < logElements.length; i++) {
+                    const el = logElements[i];
+                    if (el.style.display !== 'none' && el.style.visibility !== 'hidden') {
+                        if (!el.classList || !el.classList.contains('gap-marker')) {
+                            anchorElement = el;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // Save the anchor's position
+            let anchorRect = null;
+            if (anchorElement) {
+                anchorRect = anchorElement.getBoundingClientRect();
+            }
+
+            // Remove from buffer
+            logBuffer.splice(0, entriesToRemove);
+
+            // Remove DOM elements
+            for (let i = 0; i < entriesToRemove && logElements.length > 0; i++) {
+                const el = logElements[0];
+                if (el && el.parentNode) {
+                    el.parentNode.removeChild(el);
+                }
+                logElements.splice(0, 1);
+                logTexts.splice(0, 1);
+                logTimestamps.splice(0, 1);
+            }
+
+            // Restore the anchor's position
+            if (anchorElement && anchorRect) {
+                const anchorLogId = anchorElement.getAttribute('data-log_id');
+                let newAnchorElement = null;
+
+                for (let i = 0; i < logElements.length; i++) {
+                    const el = logElements[i];
+                    const logId = el.getAttribute('data-log_id');
+                    if (logId === anchorLogId && logId !== 'null') {
+                        newAnchorElement = el;
                         break;
                     }
                 }
 
-                // If we're still over limit and can't remove enough before the earliest protected log,
-                // we can remove some from the very beginning (oldest) even if it's in the protected range
-                // but only as a last resort
-                if (entriesToRemove > 0 && earliestProtectedIndex !== -1) {
-                    // Calculate what we can safely remove
-                    const safeRemove = Math.min(entriesToRemove, earliestProtectedIndex);
-                    entriesToRemove = safeRemove;
-
-                    // If we still can't remove enough (earliestProtectedIndex is too small),
-                    // we'll remove what we can and accept a small view shift
-                    if (entriesToRemove <= 0 && logBuffer.length > MAX_LOG_ENTRIES * 1.5) {
-                        // Critical situation - remove at least 10 entries
-                        entriesToRemove = Math.min(10, logBuffer.length - MAX_LOG_ENTRIES);
-                    }
+                if (newAnchorElement) {
+                    const newRect = newAnchorElement.getBoundingClientRect();
+                    const deltaY = newRect.top - anchorRect.top;
+                    debugWindow.scrollTop = debugWindow.scrollTop + deltaY;
                 }
             }
 
-            // Actually remove entries
-            if (entriesToRemove > 0) {
-                // Store the protected range for restoration
-                window._protectedLogIds = protectedLogIds;
-                window._protectedEarliestTimestamp = earliestProtectedTimestamp;
-                window._protectedLatestTimestamp = latestProtectedTimestamp;
+            // Re-enable scroll anchoring
+            debugWindow.style.overflowAnchor = originalOverflowAnchor || '';
 
-                logBuffer.splice(0, entriesToRemove);
-                return true;
-            }
-
-            return false;
+            return true;
         }
 
-        // Trim buffer (does NOT touch DOM)
+        // Trim buffer
         function trimBuffer() {
             queueDebugViewOperation(DebugViewOperation.TRIM_BUFFER);
         }
@@ -7773,8 +7779,8 @@ class WebController(Controller):
             * Start a trimmer that preserves the visible range.
             */
             setInterval(() => {
-                // Only trim if we're significantly over the limit
-                if (logBuffer.length > MAX_LOG_ENTRIES * 1.05) { // 5% over threshold
+                // Only trim if we're over the limit
+                if (logBuffer.length > MAX_LOG_ENTRIES) {
                     trimBuffer();
                 }
             }, 10000); // Check every 10 seconds
@@ -8011,25 +8017,18 @@ class WebController(Controller):
         function rebuildDebugDisplayInternal() {
             if (!debugWindow) return;
 
-            // Get any pending state
-            const protectedLogIds = window._protectedLogIds;
-            const protectedEarliestTimestamp = window._protectedEarliestTimestamp;
-            const protectedLatestTimestamp = window._protectedLatestTimestamp;
+            // SAVE scroll position BEFORE any DOM changes
+            const savedScrollTop = debugWindow.scrollTop;
 
-            // Clear pending state
-            window._protectedLogIds = null;
-            window._protectedEarliestTimestamp = null;
-            window._protectedLatestTimestamp = null;
-
+            // Store the current state for gap detection
             const oldScrollTop = debugWindow.scrollTop;
             const oldScrollHeight = debugWindow.scrollHeight;
 
-            // Sort buffer by TIMESTAMP for display (timestamps are more reliable for gap detection)
+            // Sort buffer by TIMESTAMP for display
             const sortedBuffer = [...logBuffer];
             sortedBuffer.sort((a, b) => a.timestamp - b.timestamp);
 
-            const shouldScrollToBottom = !autoScrollLocked && isAtBottom;
-
+            // Clear and rebuild the entire DOM
             debugWindow.innerHTML = '';
             logElements = [];
             logTexts = [];
@@ -8037,8 +8036,8 @@ class WebController(Controller):
 
             let visibleCount = 0;
             let lastDisplayedTimestamp = null;
-            let lastDisplayedLogId = null;  // Track log ID too
-            const currentGapKeys = new Set();  // Track gaps that exist in this rebuild
+            let lastDisplayedLogId = null;
+            const currentGapKeys = new Set();
 
             // Helper to format duration nicely
             function formatDuration(seconds) {
@@ -8057,10 +8056,9 @@ class WebController(Controller):
                 }
             }
 
+            // Build the display
             for (const log of sortedBuffer) {
-                // Skip markers for gap calculation, but they still affect display
                 if (log.isMarker) {
-                    // Render marker
                     const markerDiv = document.createElement('div');
                     markerDiv.className = 'gap-marker';
                     markerDiv.textContent = log.message;
@@ -8073,25 +8071,21 @@ class WebController(Controller):
                 }
 
                 if (shouldDisplayLog(log.message)) {
-                    // Check for gap before displaying this log - USE TIMESTAMPS
+                    // Check for gap before displaying this log
                     if (lastDisplayedTimestamp !== null) {
                         const gap = log.timestamp - lastDisplayedTimestamp;
-                        // Use a threshold based on maxNormalGapSeconds (which tracks typical spacing)
-                        const threshold = Math.max(maxNormalGapSeconds * 2, 5); // At least 5 seconds
+                        const threshold = Math.max(maxNormalGapSeconds * 2, 5);
                         if (gap > threshold) {
                             const gapKey = `${lastDisplayedTimestamp}|${log.timestamp}`;
                             currentGapKeys.add(gapKey);
 
-                            // Check if this gap is dead (no logs in journal)
                             if (!deadGaps.has(gapKey)) {
                                 const formattedGap = formatDuration(gap);
-                                // Create gap marker
                                 const markerDiv = document.createElement('div');
                                 markerDiv.className = 'gap-marker';
-                                markerDiv.style.userSelect = 'none';  // Prevent text selection cursor
+                                markerDiv.style.userSelect = 'none';
                                 markerDiv.textContent = `~~~~~~~~~~~~~~~~~~~~ [gap of ${formattedGap}] ~~~~~~~~~~~~~~~~~~~~~`;
 
-                                // Store metadata - BOTH timestamps AND log IDs
                                 markerDiv.dataset.olderTimestamp = lastDisplayedTimestamp;
                                 markerDiv.dataset.newerTimestamp = log.timestamp;
                                 markerDiv.dataset.gapKey = gapKey;
@@ -8099,7 +8093,6 @@ class WebController(Controller):
                                 markerDiv.dataset.olderLogId = lastDisplayedLogId;
                                 markerDiv.dataset.newerLogId = log.log_id;
 
-                                // Helper to measure text width
                                 function measureTextWidth(text, element) {
                                     const tempSpan = document.createElement('span');
                                     tempSpan.style.visibility = 'hidden';
@@ -8116,12 +8109,9 @@ class WebController(Controller):
                                 markerDiv.addEventListener('mousemove', (e) => {
                                     const rect = markerDiv.getBoundingClientRect();
                                     const clickX = e.clientX - rect.left;
-
-                                    // Measure actual text width
                                     const fullTextWidth = measureTextWidth(markerDiv.textContent, markerDiv);
 
                                     if (clickX <= fullTextWidth) {
-                                        // Find center text position
                                         const centerText = `[gap of ${formattedGap}]`;
                                         const centerTextWidth = measureTextWidth(centerText, markerDiv);
                                         const fullText = markerDiv.textContent;
@@ -8150,7 +8140,6 @@ class WebController(Controller):
                                 markerDiv.addEventListener('click', (e) => {
                                     const rect = markerDiv.getBoundingClientRect();
                                     const clickX = e.clientX - rect.left;
-
                                     const fullTextWidth = measureTextWidth(markerDiv.textContent, markerDiv);
 
                                     if (clickX <= fullTextWidth) {
@@ -8164,11 +8153,9 @@ class WebController(Controller):
                                         const centerEnd = centerStart + centerTextWidth;
 
                                         if (clickX < centerStart) {
-                                            // UP arrow - fill from bottom edge upward
                                             e.stopPropagation();
                                             fillGapDirectional(markerDiv.dataset.newerTimestamp, 'older', markerDiv);
                                         } else if (clickX > centerEnd) {
-                                            // DOWN arrow - fill from top edge downward
                                             e.stopPropagation();
                                             fillGapDirectional(markerDiv.dataset.olderTimestamp, 'newer', markerDiv);
                                         }
@@ -8185,7 +8172,6 @@ class WebController(Controller):
                                 logTimestamps.push(lastDisplayedTimestamp + (gap / 2));
                                 visibleCount++;
                             }
-                            // If deadGaps.has(gapKey), skip marker entirely (logs will be adjacent)
                         }
                     }
 
@@ -8206,94 +8192,28 @@ class WebController(Controller):
                     visibleCount++;
 
                     lastDisplayedTimestamp = log.timestamp;
-                    lastDisplayedLogId = log.log_id;  // Update log ID too
+                    lastDisplayedLogId = log.log_id;
                 }
             }
 
-            // Prune deadGaps - remove keys that no longer exist in current display
+            // Prune deadGaps
             for (const deadKey of deadGaps) {
                 if (!currentGapKeys.has(deadKey)) {
                     deadGaps.delete(deadKey);
                 }
             }
 
-            // Restore scroll position using the protected range if available
-            if (protectedLogIds && protectedLogIds.size > 0) {
-                // Find the first protected log in the new DOM
-                let targetElement = null;
-                for (const el of logElements) {
-                    const logId = el.getAttribute('data-log_id');
-                    if (logId && logId !== 'gap' && logId !== 'null') {
-                        const id = parseInt(logId, 10);
-                        if (!isNaN(id) && protectedLogIds.has(id)) {
-                            targetElement = el;
-                            break;
-                        }
-                    }
-                }
-
-                if (targetElement) {
-                    // Scroll to this element (it's the earliest protected log)
-                    targetElement.scrollIntoView({ block: 'start' });
-                    // Brief highlight to show where we landed
-                    targetElement.style.backgroundColor = '#ffff99';
-                    setTimeout(() => {
-                        if (targetElement) targetElement.style.backgroundColor = '';
-                    }, 500);
-
-                    // Restore cursor if this was a cursor
-                    if (searchLogId !== null && protectedLogIds.has(searchLogId)) {
-                        targetElement.classList.add('log-cursor');
-                    }
-                } else {
-                    // Fallback: try to find by timestamp range
-                    if (protectedEarliestTimestamp !== null) {
-                        for (const el of logElements) {
-                            const ts = parseFloat(el.getAttribute('data-timestamp'));
-                            if (ts && !isNaN(ts) && Math.abs(ts - protectedEarliestTimestamp) < 0.1) {
-                                targetElement = el;
-                                break;
-                            }
-                        }
-                        if (targetElement) {
-                            targetElement.scrollIntoView({ block: 'start' });
-                            targetElement.style.backgroundColor = '#ffff99';
-                            setTimeout(() => {
-                                if (targetElement) targetElement.style.backgroundColor = '';
-                            }, 500);
-                        }
-                    }
-
-                    // If still no target, fall back to ratio-based scroll
-                    if (!targetElement) {
-                        const ratio = 0.5;
-                        const newScrollTop = ratio * debugWindow.scrollHeight;
-                        const maxScroll = debugWindow.scrollHeight - debugWindow.clientHeight;
-                        if (maxScroll > 0) {
-                            debugWindow.scrollTop = Math.max(0, Math.min(newScrollTop, maxScroll));
-                        }
-                    }
-                }
-            } else if (shouldScrollToBottom) {
+            // The trimmer has already ensured that all visible logs are still in the buffer,
+            // so the scroll position should be valid. Just restore it directly.
+            if (isScrolledToBottom()) {
                 debugWindow.scrollTop = debugWindow.scrollHeight;
-            } else if (currentScrollAnchor) {
-                for (let i = 0; i < logTimestamps.length; i++) {
-                    if (Math.abs(logTimestamps[i] - currentScrollAnchor) < 0.1) {
-                        const targetElement = logElements[i];
-                        if (targetElement) {
-                            targetElement.scrollIntoView({ block: 'center' });
-                            targetElement.style.backgroundColor = '#ffff99';
-                            setTimeout(() => {
-                                targetElement.style.backgroundColor = '';
-                            }, 2000);
-                            break;
-                        }
-                    }
+            } else {
+                const maxScroll = debugWindow.scrollHeight - debugWindow.clientHeight;
+                if (maxScroll > 0) {
+                    debugWindow.scrollTop = Math.min(savedScrollTop, maxScroll);
+                } else {
+                    debugWindow.scrollTop = 0;
                 }
-                currentScrollAnchor = null;
-            } else if (oldScrollTop > 0 && oldScrollHeight > 0) {
-                const ratio = oldScrollTop / oldScrollHeight;
-                debugWindow.scrollTop = ratio * debugWindow.scrollHeight;
             }
 
             // Show empty message if needed
@@ -8302,6 +8222,15 @@ class WebController(Controller):
                 emptyMsg.className = 'log-ctrl';
                 emptyMsg.textContent = 'No logs match current filters...';
                 debugWindow.appendChild(emptyMsg);
+            }
+
+            // At the end, log what we're doing:
+            const maxScroll = debugWindow.scrollHeight - debugWindow.clientHeight;
+            if (maxScroll > 0) {
+                const newScrollTop = Math.min(savedScrollTop, maxScroll);
+                debugWindow.scrollTop = newScrollTop;
+            } else {
+                debugWindow.scrollTop = 0;
             }
         }
 
@@ -9470,6 +9399,7 @@ class WebController(Controller):
                 gotoInput.value = localNow.toISOString().slice(0, 16);
             }
         }
+
 
         // Initialize everything
         function initDebugWindowSystem() {
