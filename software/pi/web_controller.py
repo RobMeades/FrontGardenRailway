@@ -4369,6 +4369,10 @@ class WebController(Controller):
             cursor: text;
         }
 
+        #scrollLockBtn {
+            cursor: pointer;
+        }
+
         .debug-toggle-btn:hover {
             background: #0056b3;
         }
