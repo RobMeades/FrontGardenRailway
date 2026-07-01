@@ -329,8 +329,8 @@ static int32_t parse_firmware_header(const char *buffer, size_t buffer_len,
     if (last_invalid_app != NULL) {
         if (strcmp(invalid_app_info.version, new_app_info.version) == 0) {
             ESP_LOGW(TAG, "The firmware with version %s previously failed to boot.", invalid_app_info.version);
-            ESP_LOGW(TAG, "To prevent boot loop, we will not install this version.");
-            return -1;  // This is still an error - don't install known bad version
+            ESP_LOGW(TAG, "Skipping this version, continuing with current firmware.");
+            return 0;  // No update needed (not an error)
         }
     }
 
@@ -710,7 +710,7 @@ int32_t fgr_ota_update(const char *update_file_url,
     }
 
     // Returns ESP_OK or negative error code from esp_err_t
-    return (int32_t) - err;
+    return (int32_t) -err;
 }
 
 // Get the SHA256 of the current running image.

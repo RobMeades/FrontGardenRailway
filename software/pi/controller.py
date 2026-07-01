@@ -515,6 +515,8 @@ class Controller:
     Listens for incoming connections, manages nodes, dispatches messages.
     """
 
+    HEARTBEAT_SLACK_SECONDS = 15
+
     def __init__(self, listen_ip: str = "10.10.3.1", port: int = 5000,
                  nodes_dir: str = None, cfg_file: str = None,
                  log_server_port: int = 0, log_server_host: str = "127.0.0.1"):
@@ -1164,20 +1166,25 @@ class Controller:
     def _heartbeat_loop(self) -> None:
         """Monitor node heartbeats"""
         while self.running:
-            time.sleep(15)
+            time.sleep(self.HEARTBEAT_SLACK_SECONDS)
             now = time.time()
             for node in self.nodes.values():
                 if node.sock and node.state != ConnectionState.DISCONNECTED:
                     time_since = now - node.last_heartbeat
 
-                    if time_since > node.heartbeat_timeout:
+                    if time_since > node.heartbeat_timeout + self.HEARTBEAT_SLACK_SECONDS:
                         self.logger.warning(
                             f"Node {node.identifier()} heartbeat timeout "
                             f"(last: {time_since:.1f}s ago, timeout: {node.heartbeat_timeout}s, "
                             f"msgs={node.message_count}, hb={node.heartbeat_count})"
                         )
                         self._disconnect_node(node)
-                    elif time_since > node.heartbeat_timeout - 15 and self.logger.isEnabledFor(logging.DEBUG):
+                    elif time_since > node.heartbeat_timeout and self.logger.isEnabledFor(logging.DEBUG):
+                        self.logger.debug(
+                            f"Node {node.identifier()} heartbeat overdue "
+                            f"(last: {time_since:.1f}s ago, timeout: {node.heartbeat_timeout}s)"
+                        )
+                    elif time_since > node.heartbeat_timeout - self.HEARTBEAT_SLACK_SECONDS and self.logger.isEnabledFor(logging.DEBUG):
                         self.logger.debug(
                             f"Node {node.identifier()} heartbeat due soon "
                             f"(last: {time_since:.1f}s ago, timeout: {node.heartbeat_timeout}s)"

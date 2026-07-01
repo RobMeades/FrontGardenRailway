@@ -132,10 +132,12 @@ static void task_maintain_cb(void *handle, void *param)
 {
     context_channel_t *context_channel = (context_channel_t *) param;
     void *context_connect = NULL;
+    int64_t connection_lost_time_us = 0;
 
     // Try to take lock with timeout
     if (xSemaphoreTake(context_channel->lock, pdMS_TO_TICKS(1000)) == pdTRUE) {
         if (context_channel->connected) {
+            connection_lost_time_us = 0;
             // Connected: send heartbeat if necessary
             if ((context_channel->heartbeat_seconds > 0) &&
                 (context_channel->heartbeat_cb != NULL) &&
@@ -156,6 +158,9 @@ static void task_maintain_cb(void *handle, void *param)
                     // Call down_cb() so that the application knows we're having trouble
                     context_channel->down_cb(context_channel->cb_param);
                 }
+            }
+            if (connection_lost_time_us == 0) {
+                connection_lost_time_us = esp_timer_get_time();
             }
 
             // Close old socket if it exists
@@ -185,7 +190,10 @@ static void task_maintain_cb(void *handle, void *param)
                         context_channel->last_activity_time_us = esp_timer_get_time();
                         CONTEXT_UNLOCK(context_channel->lock, "task_maintain_cb() 1");
 
-                        ESP_LOGI(TAG, "Reconnected immediately, new socket %d.", context_channel->sock);
+                        ESP_LOGI(TAG, "This reconnection attempt reconnected immediately,"
+                                 " connection was down for %lld second(s), new socket %d.",
+                                 (esp_timer_get_time() - connection_lost_time_us) / 1000000,
+                                 context_channel->sock);
                     } else if (err == -ESP_ERR_NOT_FINISHED) {
                         // Connection in progress
                         int32_t elapsed_ms = 0;
@@ -203,8 +211,11 @@ static void task_maintain_cb(void *handle, void *param)
                             context_channel->sock = local_sock; // Safely publish to context
                             context_channel->connected = true;
                             context_channel->last_activity_time_us = esp_timer_get_time();
-                            ESP_LOGI(TAG, "Reconnected after %d ms, new socket %d.",
-                                     (int) elapsed_ms, context_channel->sock);
+                            ESP_LOGI(TAG, "This reconnection attempt took %d ms, connection"
+                                     " was down for %lld second(s), new socket %d.",
+                                     (int) elapsed_ms,
+                                     (esp_timer_get_time() - connection_lost_time_us) / 1000000,
+                                     context_channel->sock);
                         } else {
                             if (context_connect != NULL) {
                                 fgr_socket_connect_stop(&context_connect);
@@ -220,7 +231,10 @@ static void task_maintain_cb(void *handle, void *param)
                     } else {
                         // Connect failed immediately
 
-                        ESP_LOGE(TAG, "Connect failed immediately: %d (%s)", errno, strerror(errno));
+                        ESP_LOGE(TAG, "This reconnection attempt failed immediately (connection"
+                                 " has been down for %lld second(s)): %d (%s)",
+                                 (esp_timer_get_time() - connection_lost_time_us) / 1000000,
+                                 errno, strerror(errno));
                         CONTEXT_LOCK(context_channel->lock, "task_maintain_cb() 3");
                         if (context_connect != NULL) {
                             fgr_socket_connect_stop(&context_connect);
