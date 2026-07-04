@@ -71,7 +71,7 @@ extern "C" {
 #endif
 
 #ifndef FGR_MONITOR_TASK_STACK_SIZE_MIN
-// How little task stack there can be for a before aborting.
+// How little task stack there can be for a task before aborting.
 #  define FGR_MONITOR_TASK_STACK_SIZE_MIN 128
 #endif
 
@@ -81,7 +81,7 @@ extern "C" {
 #endif
 
 #ifndef FGR_MONITOR_HEAP_BLOCK_MIN
-// The minimum expected free heap block size (guarding against fragmentation),
+// The smallest allocatable heap block size (guarding against fragmentation),
 // see also FGR_MONITOR_HEAP_MIN_DURATION_SECONDS.
 #  define FGR_MONITOR_HEAP_BLOCK_MIN 1024
 #endif
@@ -96,16 +96,6 @@ extern "C" {
 #ifndef FGR_MONITOR_CHECK_INTERVAL_MS
 // How frequently to do a check on stuff.
 #  define FGR_MONITOR_CHECK_INTERVAL_MS 250
-#endif
-
-#ifndef FGR_MONITOR_HEAP_CHECK_RECORDS
-// The maximum number of heap allocations to track the source of
-#  define FGR_MONITOR_HEAP_CHECK_RECORDS 100
-#endif
-
-#ifndef FGR_MONITOR_HEAP_INTERVAL_SECONDS
-// How frequently to do run the heap checking task in seconds.
-#  define FGR_MONITOR_HEAP_INTERVAL_SECONDS 1
 #endif
 
 /* ----------------------------------------------------------------

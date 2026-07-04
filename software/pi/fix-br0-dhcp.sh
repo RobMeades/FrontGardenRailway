@@ -1,5 +1,5 @@
 #!/bin/bash
-# Fix br0 MAC and ensure dhcpcd is running
+# Fix br0 MAC and block wireless DHCP
 
 # Wait for br0 and eth0
 for i in {1..50}; do
@@ -10,27 +10,31 @@ for i in {1..50}; do
 
         # Fix MAC if needed
         if [ "$NEW_MAC" != "$CURRENT_MAC" ]; then
-            # Take bridge down briefly
             ip link set br0 down 2>/dev/null
             ip link set dev br0 address $NEW_MAC
             ip link set br0 up 2>/dev/null
             logger -t fix-br0-dhcp "Fixed br0 MAC to $NEW_MAC"
             MAC_WAS_FIXED=1
-            # Give the interface a moment to settle
             sleep 0.5
+        fi
+
+        # Block DHCP from wireless clients
+        # Check if rules already exist to avoid duplicates
+        if ! ebtables -L FORWARD | grep -q "wlan0.*dhcp"; then
+            ebtables -A FORWARD -i wlan0 -p IPv4 --ip-proto udp --ip-dport 67 -j DROP
+            ebtables -A FORWARD -i wlan0 -p IPv4 --ip-proto udp --ip-dport 68 -j DROP
+            logger -t fix-br0-dhcp "Added ebtables rules to block wireless DHCP"
         fi
 
         # Check if dhcpcd is already running on br0
         if pgrep -f "dhcpcd.*br0" > /dev/null; then
             if [ $MAC_WAS_FIXED -eq 1 ]; then
-                # MAC was fixed, tell dhcpcd to renew
                 dhcpcd -n br0
                 logger -t fix-br0-dhcp "Sent renew signal to dhcpcd on br0"
             else
                 logger -t fix-br0-dhcp "dhcpcd already running on br0, no changes needed"
             fi
         else
-            # dhcpcd not running, start it
             dhcpcd -b br0
             logger -t fix-br0-dhcp "Started dhcpcd on br0"
         fi
