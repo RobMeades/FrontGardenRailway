@@ -1,5 +1,4 @@
 # Read-Only Main micoSDHC Card
-
 These notes taken from:
 
 https://www.dzombak.com/blog/2024/03/running-a-raspberry-pi-with-a-read-only-root-filesystem/

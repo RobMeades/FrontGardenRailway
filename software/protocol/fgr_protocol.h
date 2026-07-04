@@ -88,8 +88,7 @@ typedef enum {
     FGR_REQ_CNF_DEBUG_LED_STATUS       = 0x000c, // Request the debug LED status; the CNF message contents shall contain two uint8_t, the first a bool for LED on/off, the second a bool for breathe on/off
     FGR_REQ_CNF_REBOOT                 = 0x000d, // The node should reboot
     FGR_REQ_CNF_PING                   = 0x000e, // Ping the node; the CNF message contents shall contain the node's fgr_state_t, encoded as a uint8_t
-    FGR_REQ_CNF_LAST                   = 0x0100
-                                         // Request/confirmation messages beyond FGR_REQ_CNF_LAST are node specific
+    FGR_REQ_CNF_LAST                   = 0x0100  // Request/confirmation messages beyond FGR_REQ_CNF_LAST are node specific
 } fgr_req_cnf_t;
 
 // Indication/response messages; note that the top four bits must
@@ -98,12 +97,11 @@ typedef enum {
 typedef enum {
     FGR_IND_RSP_NULL                   = 0x0000,  // Never to be transmitted intentionally, always to be ignored when received; may be used internally
     FGR_IND_RSP_NEEDS_CFG              = 0x0001,  // The node has begun but has not yet been configured and so has not started
-    // (matches FGR_REQ_CNF_CFG)
+                                                  // (matches FGR_REQ_CNF_CFG)
     FGR_IND_RSP_START                  = 0x0002,  // The node has started by itself (matches FGR_REQ_CNF_START)
     FGR_IND_RSP_STOP                   = 0x0003,  // The node has stopped by itself (matches FGR_REQ_CNF_STOP)
     FGR_IND_RSP_HEARTBEAT              = 0x0004,  // Periodic heartbeat: the body shall contain a single uint8_t that is the RSSI of the WiFi link
-    FGR_IND_RSP_LAST                   = 0x0100
-                                         // Indication/response messages beyond FGR_IND_RSP_LAST are node specific
+    FGR_IND_RSP_LAST                   = 0x0100   // Indication/response messages beyond FGR_IND_RSP_LAST are node specific
 } fgr_ind_rsp_t;
 
 // Log levels.
@@ -144,8 +142,7 @@ typedef enum {
     FGR_STATE_BUSY             = 4,
     FGR_STATE_GENERIC_FAILED   = 5,
     FGR_STATE_HARDWARE_FAILURE = 6,
-    FGR_STATE_LAST             = 0x7f
-                                 // States beyond FGR_STATE_LAST are node specific
+    FGR_STATE_LAST             = 0x7f // States beyond FGR_STATE_LAST are node specific
 } fgr_state_t;
 
 // Request message header.
@@ -205,9 +202,9 @@ typedef struct __attribute__((packed))
 {
     uint32_t length;                            // The number of bytes to follow, big-endian
     uint8_t contents[FGR_MSG_CONTENTS_MAX_LEN]; // The message contents; when used in
-    // fgr_log_msg_t the string shall be
-    // null-terminated and the length
-    // shall _not_ include the null terminator
+                                                // fgr_log_msg_t the string shall be
+                                                // null-terminated and the length
+                                                // shall _not_ include the null terminator
 }
 fgr_msg_body_t;
 

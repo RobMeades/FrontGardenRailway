@@ -34,7 +34,7 @@ For isolation, the Raspberry Pi should be installed on a VLAN of the home networ
 # Pi Configuration
 - Make the NTP service on the Pi use the single IP address for NTP access by editing `sudo nano /etc/ntpsec/ntp.conf`, commenting out all of the entries beginning with `pool` and adding an entry `server 178.62.68.79 iburst` (or whatever IP address you allowed through the firewall for NTP service),
 
-- Restart the NTP service  with `sudo systemctl restart ntpsec`.
+- Restart the NTP service with `sudo systemctl restart ntpsec`.
 
 - Verify that the change is working by running `ntpq -p`: you should see the configured NTP server IP address in the list, and it should eventually show a `*` next to it, indicating it is the source that NTP on the Pi is syncing to, but this might take many many minutes.
 

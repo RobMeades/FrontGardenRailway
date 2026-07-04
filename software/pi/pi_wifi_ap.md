@@ -1,5 +1,5 @@
 # Introduction
-These instructions describe how to set up a Wi-Fi access point on a headless Pi Zero W.  Note that, on the version of Raspbian I was using (Trixie), any attempt to set an access point with security failed, so these instructions set up an open Wi-Fi access point (security is provided later through [MAC address filtering](pi_wifi_dhcp_mac.md)).
+These instructions describe how to set up a Wi-Fi access point on a headless Pi.  Note that, on the version of Raspbian I was using (Trixie), any attempt to set an access point with security failed, so these instructions set up an open Wi-Fi access point (security is provided later through [MAC address filtering](pi_wifi_dhcp_mac.md)).
 
 NOTE: in all cases below, when pasting contents into a file, ensure there are no leading spaces.
 
@@ -7,8 +7,6 @@ NOTE: in all cases below, when pasting contents into a file, ensure there are no
 
 ## Installations
 Since the Pi will lose connectivity to your Wi-Fi network (you do _not_ want an open access point on your Wi-Fi network) you must have a serial connection to a headless Pi Zero (e.g. using a 3V3 FTDI cable, black to GND, yellow (RXD) to GPIO14 (TXD), orange (TXD) to GPIO15 (RXD)), or an Ethernet connection to a bigger Pi.
-
-- If you have hardened the Pi, enter `rw` to make the Pi writeable.
 
 - The Pi will also lose connectivity to the internet, so install a few useful things first:
 
