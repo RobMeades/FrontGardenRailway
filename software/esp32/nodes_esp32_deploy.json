@@ -4,7 +4,7 @@
   "global_variants": [
     "esp32s3-rgb-4mbyte",
     "esp32s3-grb-4mbyte",
-    "esp32s3-rgb-8mbyte"
+    "esp32s3-8mbyte"
   ],
 
 "variants_matrix": {
