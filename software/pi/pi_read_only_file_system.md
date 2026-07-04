@@ -1,4 +1,4 @@
-# RO Main SSD
+# Read-Only Main micoSDHC Card
 
 These notes taken from:
 
@@ -35,7 +35,9 @@ NOTE: in all cases below, when pasting contents into a file, ensure there are no
 
 - Reboot and verify that the swap file has gone by running:
 
-  `free -m`
+  ```
+  free -m
+  ```
 
   ...to get something like:
 
@@ -49,15 +51,21 @@ NOTE: in all cases below, when pasting contents into a file, ensure there are no
 
 - Similarly:
 
-  `sudo nano /boot/firmware/cmdline.txt`
+  ```
+  sudo nano /boot/firmware/cmdline.txt
+  ```
 
   ...and append `fsck.mode=skip` to the line, so it will look something like:
 
-  `console=serial0,115200 console=tty1 root=PARTUUID=76b4450a-02 rootfstype=ext4 elevator=deadline fsck.repair=yes rootwait fsck.mode=skip`
+  ```
+  console=serial0,115200 console=tty1 root=PARTUUID=76b4450a-02 rootfstype=ext4 elevator=deadline fsck.repair=yes rootwait fsck.mode=skip
+  ```
 
 - Disable automatic periodic re-building of the `manpages` cache with:
 
-  `sudo rm /var/lib/man-db/auto-update`
+  ```
+  sudo rm /var/lib/man-db/auto-update
+  ```
 
 - Disable daily software updates with:
 
@@ -85,7 +93,9 @@ NOTE: in all cases below, when pasting contents into a file, ensure there are no
 
 - Similarly:
 
-  `sudo nano /boot/firmware/config.txt`
+  ```
+  sudo nano /boot/firmware/config.txt
+  ```
 
   ...and add, near the top:
 
@@ -123,7 +133,9 @@ NOTE: in all cases below, when pasting contents into a file, ensure there are no
 
 - Enable `ntp` with:
 
-  `sudo systemctl enable ntpsec`
+  ```
+  sudo systemctl enable ntpsec
+  ```
 
 - `sudo systemctl edit ntp` and paste in the following lines:
 
@@ -160,7 +172,7 @@ NOTE: in all cases below, when pasting contents into a file, ensure there are no
   [main]
   plugins=ifupdown,keyfile
   rc-manager=file
-  
+
   [ifupdown]
   managed=false
   ```
@@ -175,11 +187,15 @@ NOTE: in all cases below, when pasting contents into a file, ensure there are no
 
 - Move the existing `systemd` random-seed file to a path that we will put on a `tmpfs` and link to it from the original location:
 
-  `sudo mv /var/lib/systemd/random-seed /tmp/systemd-random-seed && sudo ln -s /tmp/systemd-random-seed /var/lib/systemd/random-seed`
+  ```
+  sudo mv /var/lib/systemd/random-seed /tmp/systemd-random-seed && sudo ln -s /tmp/systemd-random-seed /var/lib/systemd/random-seed
+  ```
 
 - To create this file in the `/tmp` folder at boot before starting the random-seed service, edit the file service file to add an `ExecStartPre` command by running:
 
-  `sudo systemctl edit systemd-random-seed.service`
+  ```
+  sudo systemctl edit systemd-random-seed.service
+  ```
 
   ...and pasting these lines in:
 
@@ -219,7 +235,9 @@ NOTE: in all cases below, when pasting contents into a file, ensure there are no
 
 - Add another `tmpfs` to `/etc/fstab` for the `/var/log` folder [note: later I added an SSD to grab detailed long term metrics and moved the logs there ]:
 
- `tmpfs  /var/log  tmpfs  defaults,noatime,nosuid,nodev,noexec,size=50m  0  0`
+  ```
+  tmpfs  /var/log  tmpfs  defaults,noatime,nosuid,nodev,noexec,size=50m  0  0
+  ```
 
 - When storing `/var/log` in RAM, unless you have disabled `journald`, you need to limit the amount of space `journald` is allowed to use. To do that, `sudo nano /etc/systemd/journald.conf` and uncomment the `SystemMaxUse=...` line (if necessary) then set it to half of your `/var/log` `tmpfs` size, or maybe a little less:
 
@@ -232,17 +250,23 @@ NOTE: in all cases below, when pasting contents into a file, ensure there are no
 
 - `logrotate` stores some state in `/var/lib/logrotate` and may not work if it cannot update that folder; move `logrotate` state to `tmpfs` by adding this line to `/etc/fstab`:
 
-  `tmpfs  /var/lib/logrotate  tmpfs  defaults,noatime,nosuid,nodev,noexec,size=1m,mode=0755  0  0`
+  ```
+  tmpfs  /var/lib/logrotate  tmpfs  defaults,noatime,nosuid,nodev,noexec,size=1m,mode=0755  0  0
+  ```
 
 - `sudo` stores some state in `/var/lib/sudo` which should be writable. Move `sudo` state to `tmpfs` by adding this line to `/etc/fstab`:
 
-  `tmpfs  /var/lib/sudo  tmpfs  defaults,noatime,nosuid,nodev,noexec,size=1m,mode=0700  0  0`
+  ```
+  tmpfs  /var/lib/sudo  tmpfs  defaults,noatime,nosuid,nodev,noexec,size=1m,mode=0700  0  0
+  ```
 
 - Reboot and check that all comes up OK, we are about to do the read-only thing; you'll be able to switch back to read/write easily enough though, don't worry.
 
 - `sudo nano /boot/firmware/cmdline.txt` and append `ro` to the line, e.g.:
 
-  `console=serial0,115200 console=tty1 root=PARTUUID=76b4450a-02 rootfstype=ext4 elevator=deadline fsck.repair=yes rootwait fsck.mode=skip ro`
+  ```
+  console=serial0,115200 console=tty1 root=PARTUUID=76b4450a-02 rootfstype=ext4 elevator=deadline fsck.repair=yes rootwait fsck.mode=skip ro
+  ```
 
 - `sudo nano /etc/fstab` and change the lines that refer to your SD card. In column 4, after the word defaults (without adding any whitespace), add the `,ro` flag to both SD card mounts and, if it is not there already, add the `,noatime` option to the `/` mount, e.g.:
 
@@ -268,24 +292,32 @@ NOTE: in all cases below, when pasting contents into a file, ensure there are no
 
 - To use `bash_logout` to switch to read-only mode when you log out, `sudo nano /etc/bash.bash_logout` (creating the file if necessary) and make sure the file includes the line:
 
-  `sudo mount -o remount,ro / ; sudo mount -o remount,ro /boot/firmware`
+  ```
+  sudo mount -o remount,ro / ; sudo mount -o remount,ro /boot/firmware
+  ```
 
 - Reboot, verify with mount and check `journalctl` for issues:
 
-  `sudo reboot now`
+  ```
+  sudo reboot now
+  ```
 
   ...SSH back in when the system comes back up and:
 
-  `mount`
+  ```
+  mount
+  ```
 
   ...then verify that the SD card partitions (e.g. `/dev/mmc*`) are mounted `ro`, and:
 
-  `sudo journalctl -b 0`
+  ```
+  sudo journalctl -b 0
+  ```
 
  ...then scroll through and look for any issues.  When looking for issues, you will undoubtedly see some errors from various processes.  You will want to investigate those.  Start by checking "is this actually broken?".  Often there will be messages from e.g. `avahi-daemon` or `snapd` that are unhappy they cannot go about their business normally on a read-only filesystem.  But as long as that software is still working for your purposes, you can safely ignore their complaints.
 
-# RW SSD For Storage
-It is best have another (e.g. 32 Gbyte) SD card plugged into the Pi for long-term storage of binaries for the ESP32 devices, a database of logs, the journal, etc.  The SD card MUST HAVE BEEN EXT4 formatted if you are to use it for `journal` storage, which is advisable.  When I moved to the Pi 5 I powered it with a PoE HAT that included an M2 socket, so could use an NVME SSD in that socket for this purpose.
+# Read-Write SSD For Storage
+It is best have another (e.g. 32 Gbyte microSDHC) SSD card plugged into the Pi for long-term storage of binaries for the ESP32 devices, a database of logs, the journal, etc.  The SSD MUST HAVE BEEN EXT4 formatted if you are to use it for `journal` storage, which is advisable.  When I moved to the Pi 5 I powered it with a PoE HAT that included an M2 socket, so could use an NVME SSD in that socket for this purpose.
 
 - Plug your SSD into the Raspberry Pi, check with `lsblk` and, if it for instance appears as `/dev/sda`, mount it and check that it as mounted with:
 
@@ -304,25 +336,25 @@ It is best have another (e.g. 32 Gbyte) SD card plugged into the Pi for long-ter
   ```
 
   ...then make the mount persistent by getting the `UUID` of the partition with `sudo blkid /dev/nvme0n1p1` and then `sudo nano /etc/fstab` and add a line as follows, adding no spurious spaces at the start:
-  
+
   ```
   UUID=<UUID> /mnt/fgr_data ext4 defaults,nofail,noatime,x-systemd.device-timeout=10 0 2
   ```
 
   ...(obviously replacing `<UUID>` with the `UUID` for your SSD) then check that you got that right by confirming the mount with:
- 
+
   ```
   sudo mount -a
   lsblk
   ```
   ...and, while you're at it, create a `tmp` directory on the SSD (you will need it later) with:
-  
+
   ```
   mkdir /mnt/fgr_data/tmp
   ```
-  
-# Journal To SSD
-To move the journal back out of RAM and onto this SD card (or to an NVME SSD on an M2 PoE hat):
+
+# Journal To Read-Write SSD
+To move the journal back out of RAM and onto this read-write microSDHC card (or to an NVME SSD on an M2 PoE hat):
 
 - Stop the journal and create the necessary storage:
 
@@ -339,11 +371,13 @@ To move the journal back out of RAM and onto this SD card (or to an NVME SSD on 
   Note: ignore the message about triggering units when you stop `system-journald`, it is harmless.
 
 - `sudo nano /etc/fstab`, remove the line referring to `/var/log` (leave `/var/lib/logrotate` where it is) then add:
-  
-  `/mnt/fgr_data/journal /var/log/journal none bind 0 0`
+
+  ```
+  /mnt/fgr_data/journal /var/log/journal none bind 0 0
+  ```
 
 - `sudo nano /etc/systemd/journald.conf` and make it something like:
-  
+
   ```
   [Journal]
   Storage=persistent
@@ -353,20 +387,20 @@ To move the journal back out of RAM and onto this SD card (or to an NVME SSD on 
   ```
 
 - Workaround the Trixie (in more ways than one) `40-rpi-volatile-storage.conf` `journald` configuration file by creating your own higher priority one with `sudo nano /usr/lib/systemd/journald.conf.d/90-rpi-persistent-storage.conf` and give it contents:
-  
+
   ```
   [Journal]
   Storage=persistent
   ```
 
 - Make sure that `systemd-journald` does not try to start logging until the SSD has been mounted by creating a drop-in directory with:
-  
+
   ```
   sudo mkdir -p /etc/systemd/system/systemd-journald.service.d
   ```
-  
+
   ...then `sudo nano /etc/systemd/system/systemd-journald.service.d/00-wait-for-ssd.conf` and paste into it:
-  
+
   ```
   [Unit]
   After=var-log-journal.mount
@@ -382,7 +416,7 @@ To move the journal back out of RAM and onto this SD card (or to an NVME SSD on 
   ```
 
 - Finally check with:
-  
+
   ```
   mount | grep journal
   df -h /var/log/journal

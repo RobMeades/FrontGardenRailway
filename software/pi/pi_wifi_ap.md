@@ -175,7 +175,7 @@ Connect to a Pi Zero using a serial terminal, or a bigger Pi using Ethernet, and
 - Reboot and hopefully all will be good.
 
 ## Networking Software
-In SW terms, [nrmorrow](https://github.com/morrownr/USB-WiFi) uses `systemd-resolved` and `systemd-networkd`, which seems more sensible for a server anyway, so the software AP setup here follows [that pattern](https://github.com/morrownr/USB-WiFi/blob/main/home/AP_Mode/Bridged_Wireless_Access_Point.md).
+In SW terms, [nrmorrow](https://github.com/morrownr/USB-WiFi) uses `hostapd` directly and `systemd-networkd`, which seems more sensible for a server anyway, so the software AP setup here follows [that pattern](https://github.com/morrownr/USB-WiFi/blob/main/home/AP_Mode/Bridged_Wireless_Access_Point.md).
 
 - To stop `nmcli` trying to fight for control of the W-Fi hardware, `sudo nano /etc/NetworkManager/NetworkManager.conf` and add:
 
@@ -185,7 +185,7 @@ In SW terms, [nrmorrow](https://github.com/morrownr/USB-WiFi) uses `systemd-reso
   ```
 
   ...then `sudo systemctl restart NetworkManager` for the change to take effect.
-  
+
 - Start and enable `systemd-resolved` with:
 
   ```
@@ -200,16 +200,16 @@ In SW terms, [nrmorrow](https://github.com/morrownr/USB-WiFi) uses `systemd-reso
   sudo ln -s /run/systemd/resolve/resolv.conf /etc/resolv.conf
   ```
 
-- `systemd-networkd` expects to be able to write lease durations to disk; put the location it uses for that in a RAM disk with `sudo nano /etc/fstab` and adding at the end:
+- `systemd-networkd` expects to be able to write lease durations to disk; since our microSDHC card will be read only, put the location it uses for that in a RAM disk with `sudo nano /etc/fstab` and adding at the end:
 
   ```
   tmpfs   /var/lib/systemd/network   tmpfs   defaults,size=1M,mode=0755,uid=systemd-network,gid=systemd-network   0   0
   ```
 
   ...making sure there is no white space at the start of the line, then `sudo reboot`.
-  
- - `dhcpcd`, which we need for the  next step, does the same thing, and though it only bleats without causing a real problem, it is cleaner to fix it by `symlink`ing the directory to `/run`:
-    
+
+ - `dhcpcd`, which we need for the  next step, does the same thing, and though it only bleats without causing a real problem, it is cleaner to fix it by `symlink`ing the relevant directory to `/run`:
+
     ```
     sudo ln -s /run/dhcpcd /var/lib/dhcpcd
     sudo mkdir -p /run/dhcpcd
@@ -254,6 +254,7 @@ In SW terms, [nrmorrow](https://github.com/morrownr/USB-WiFi) uses `systemd-reso
   ```
 
   ...and finally:
+
 
   ```
   sudo systemctl start fix-br0-dhcp.service
@@ -316,9 +317,9 @@ In SW terms, [nrmorrow](https://github.com/morrownr/USB-WiFi) uses `systemd-reso
   sudo cp /usr/lib/systemd/system/hostapd.service /etc/systemd/system/hostapd.service
   sudo nano /etc/systemd/system/hostapd.service
   ```
-  
+
   ...and in it:
- 
+
     - change `RestartSec` to 3,
     - if there is an `EnvironmentFile=` line, comment it out,
     - add the line `Environment="DAEMON_OPTS=-d -K -f /mnt/fgr_data/hostapd.log"`,
@@ -331,7 +332,7 @@ In SW terms, [nrmorrow](https://github.com/morrownr/USB-WiFi) uses `systemd-reso
 # Ghosts And Broadcomm Driver Instability
 There appears to be [a\[nother\] bug](https://github.com/raspberrypi/linux/issues/6975) in the `brcmfmac` driver, in that the driver holds onto a station that has disconnected without notice for anywhere from 27 to 90+ seconds. No matter how many times the device boots up within this time, if it sends an association frame while that stale kernel window is active, the Pi completely ignores it.  Because the Pi ignores the frames indefinitely while the old session decays, the device connection times out, resulting in a persistent Wifi 201 error.  More details here:
 
-To fix this, and it might be a good idea to do this whether you are using the on-board Wifi or not, Google Gemini wrote me a bash script `clear_node_ghosts.sh` which scans the output of `iw dev wlan0 station dump` every second and deletes any inactive MAC addresses.  Make this run with `sudo nano /etc/systemd/system/clear_node_ghosts.service`, pasting in the following:
+To fix this, and it might be a good idea to do this whether you are using the on-board Pi Wifi or not, Google Gemini wrote me a bash script `clear_node_ghosts.sh` which scans the output of `iw dev wlan0 station dump` every second and deletes any inactive MAC addresses.  Make this run with `sudo nano /etc/systemd/system/clear_node_ghosts.service`, pasting in the following:
 
 ```
 [Unit]
@@ -347,7 +348,7 @@ Restart=always
 WantedBy=multi-user.target
 ```
 
-...then:
+...replacing `<your home directory name>` with your user name, then:
 
 ```
 sudo systemctl start clear_node_ghosts

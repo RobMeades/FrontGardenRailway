@@ -14,7 +14,7 @@ This is done by configuring `hostapd`.
   ```
   # Enable MAC address filtering
   macaddr_acl=1
-  
+
   # Use an accept list (only these MACs can connect)
   accept_mac_file=/etc/hostapd/accept_mac.txt
   ```
@@ -47,11 +47,15 @@ This is done by modifying the configuration of `br0` in `systemd-networkd`.
 
 - Restart the `systemd-networkd` service to apply the changes with:
 
-  `sudo systemctl restart systemd-networkd`
-  
+  ```
+  sudo systemctl restart systemd-networkd
+  ```
+
 - Check the new IP address allocations with:
 
-  `sudo arp`
+  ```
+  sudo arp
+  ```
 
 # `nmcli` Scenario: Historical Interest Only
 ## MAC Address Filtering, `nmcli` Scenario: Historical Interest Only
@@ -59,11 +63,15 @@ Since `nmcli` does not have MAC filtering, instead we use `iptables` to deny DHC
 
 - Create a new chain in the `raw` table with:
 
-  `sudo iptables -t raw -N dhcp_clients`
+  ```
+  sudo iptables -t raw -N dhcp_clients
+  ```
 
 - Send all incoming DHCP requests to this table with:
 
-  `sudo iptables -t raw -A PREROUTING -p udp --dport 67 -j dhcp_clients`
+  ```
+  sudo iptables -t raw -A PREROUTING -p udp --dport 67 -j dhcp_clients
+  ```
 
 - Add `ACCEPT` rules for each MAC address you wish to allow:
 
@@ -76,15 +84,21 @@ Since `nmcli` does not have MAC filtering, instead we use `iptables` to deny DHC
 
 - Add a `DROP` rule to the end of the list for all other MAC addresses:
 
-  `sudo iptables -t raw -A dhcp_clients -j DROP`
+  ```
+  sudo iptables -t raw -A dhcp_clients -j DROP
+  ```
 
 - Check that the list is as you like with:
 
-  `sudo iptables -t raw -L dhcp_clients`
+  ```
+  sudo iptables -t raw -L dhcp_clients
+  ```
 
 - Make the new rule persistent with:
 
-  `sudo netfilter-persistent save`
+  ```
+  sudo netfilter-persistent save
+  ```
 
 - Try connecting to the Wi-Fi access point with a device whose MAC address is not in the list and it should not be allocated an IP address.
 
@@ -92,35 +106,49 @@ Since `nmcli` does not have MAC filtering, instead we use `iptables` to deny DHC
 
 - If, later, you need to temporarily remove MAC address filtering, do it with:
 
-  `sudo iptables -t raw -D PREROUTING -p udp --dport 67 -j dhcp_clients`
+  ```
+  sudo iptables -t raw -D PREROUTING -p udp --dport 67 -j dhcp_clients
+  ```
 
   ...then later add it again with:
-  
-  `sudo iptables -t raw -A PREROUTING -p udp --dport 67 -j dhcp_clients`
-  
+
+  ```
+  sudo iptables -t raw -A PREROUTING -p udp --dport 67 -j dhcp_clients
+  ```
+
   ...or simply reboot as we have not made the deletion persistent.
 
 - If, later, you want to remove a MAC address from the list, find its entry number with:
 
-  `sudo iptables -t raw -L dhcp_clients --line-numbers`
+  ```
+  sudo iptables -t raw -L dhcp_clients --line-numbers
+  ```
 
   ...then delete that line with:
-  
-  `sudo iptables -t raw -D dhcp_clients <line_number>`
+
+  ```
+  sudo iptables -t raw -D dhcp_clients <line_number>
+  ```
 
   ...noting that the line number of subsequent entries in the table will change when one is deleted so you will need to re-issue the list command if deleting more than one line.  Don't forget to:
 
-  `sudo netfilter-persistent save`
+  ```
+  sudo netfilter-persistent save
+  ```
 
   ...afterwards to make the change persistent.
 
 - If, later, you want to add a new MAC address to the list, add it at the start to make sure it is above the `DROP` rule with:
 
-  `sudo iptables -t raw -I dhcp_clients 1 -m mac --mac-source e3:b1:5d:31:66:c5 -j ACCEPT -m comment --comment "A comment that identifies the thing"`
+  ```
+  sudo iptables -t raw -I dhcp_clients 1 -m mac --mac-source e3:b1:5d:31:66:c5 -j ACCEPT -m comment --comment "A comment that identifies the thing"
+  ```
 
   ...then:
 
-  `sudo netfilter-persistent save`
+  ```
+  sudo netfilter-persistent save
+  ```
 
   ...to make the change persistent. Of course, you could always delete the `DROP` rule, append the new entry, then append the `DROP` rule once more.
 
@@ -129,7 +157,9 @@ Since `nmcli` does not have MAC filtering, instead we use `iptables` to deny DHC
 
 - Create a `dnsmasq` configuration file for static IP address allocation with:
 
-  `sudo nano /etc/NetworkManager/dnsmasq-shared.d/static-addresses`
+  ```
+  sudo nano /etc/NetworkManager/dnsmasq-shared.d/static-addresses
+  ```
 
   ...and populate it with entries of the form:
 
@@ -142,11 +172,15 @@ Since `nmcli` does not have MAC filtering, instead we use `iptables` to deny DHC
 
 - Restart the `NetworkManager` service to apply the changes with:
 
-  `sudo systemctl restart NetworkManager`
-  
+  ```
+  sudo systemctl restart NetworkManager
+  ```
+
 - Check the new IP address allocations with:
 
-  `sudo arp`
+  ```
+  sudo arp
+  ```
 
 # Doing It Automatically
 You can do all of the above steps automatically using the script `add_node.py`.  If you are doing this or the first time, make sure that `/etc/hostapd/hostapd.conf` has the lines:
@@ -154,7 +188,7 @@ You can do all of the above steps automatically using the script `add_node.py`. 
   ```
   # Enable MAC address filtering
   macaddr_acl=1
-  
+
   # Use an accept list (only these MACs can connect)
   accept_mac_file=/etc/hostapd/accept_mac.txt
   ```
@@ -167,7 +201,7 @@ python add_node.py a1:81:5c:10:2e:f3
 
 The node will be added and assigned the next available static IP address in the range `10.10.3.x` (or you can change it if you like).
 
-Note: the script also supports the old Network Manager mechanism with the command-line parameter `--nmcli` but, if you are doing that for the first time, you need to create and add one MAC address to `iptables` first.  For instance, usually you would test connectivity with your own phone so you would create the table and add it with something like:
+Note: the script also supports the old `NetworkManager` mechanism with the command-line parameter `--nmcli` but, if you are doing that for the first time, you need to create and add one MAC address to `iptables` first.  For instance, usually you would test connectivity with your own phone so you would create the table and add it with something like:
 
 ```
 sudo iptables -t raw -N dhcp_clients

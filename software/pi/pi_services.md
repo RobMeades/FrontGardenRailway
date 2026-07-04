@@ -10,13 +10,15 @@ All of the ESP32 nodes will want to make an HTTPS connection to the access point
 
 - `cd` to that directory and run SSL to create a key pair with:
 
-  `openssl req -newkey rsa:2048 -x509 -days 36500 -nodes -out ca_cert.pem -keyout ca_key.pem`
+  ```
+  openssl req -newkey rsa:2048 -x509 -days 36500 -nodes -out ca_cert.pem -keyout ca_key.pem
+  ```
 
   ...leaving all entries blank by entering `.` _except_ the Common Name entry, which *must* be set `10.10.3.1` (the IP address of the Pi as an access point).
 
 - On a PC which has the ESP-IDF software environment installed on it, and has a clone of this repository, replace the file `FrontGardenRailway/software/server_certs/ca_cert.pem` with the `ca_cert.pem` you just generated.
 
-- Go take a look at the [`README.md`](../esp32) in the ESP32 directory: it will explain to you how to build the code for the ESP32 nodes using the script [`nodes_esp32_deploy.py`](../esp32/nodes_esp32_deploy.py).  Do what it says to populate the `/mnt/fgr_data/fw` directory with images.
+- Go take a look at the [`README.md`](../esp32) in the ESP32 directory: it will explain how to build the code for the ESP32 nodes using the script [`nodes_esp32_deploy.py`](../esp32/nodes_esp32_deploy.py).  Do what it says to populate the `/mnt/fgr_data/fw` directory with binary images.
 
 - Create `sudo nano /lib/systemd/system/https_server.service` with the following contents:
 
@@ -36,9 +38,13 @@ All of the ESP32 nodes will want to make an HTTPS connection to the access point
   WantedBy=multi-user.target
   ```
 
+  ...replacing `<your home directory name>` with your user name.
+
 - Test that the service starts with:
 
-  `sudo systemctl start https_server`
+  ```
+  sudo systemctl start https_server
+  ```
 
 - In order to stop your browser objecting that it is using a self-signed certificate when talking to the `https_server.py` web interface:
   - on Windows copy `ca_cert.pem` to your PC, rename it to `ca_cert.crt`, double-click on it and `Install Certificate...` -> `Local Machine`, browse to `Trusted Root Certification Authorities` and place the certificate there, or...
@@ -48,7 +54,9 @@ All of the ESP32 nodes will want to make an HTTPS connection to the access point
 
 - To make the service run at boot:
 
-  `sudo systemctl enable https_server`
+  ```
+  sudo systemctl enable https_server
+  ```
 
   ...then take the power down and up again and repeat the check.
 
@@ -73,25 +81,36 @@ The `log_server.py` script listens for log messages from all nodes and stuffs th
   WantedBy=multi-user.target
   ```
 
+  ...replacing `<your home directory name>` with your user name.
+
+
 - Test that the service starts with:
 
-  `sudo systemctl start log_server`
+  ```
+  sudo systemctl start log_server
+  ```
 
   ...and make sure the ESP32's connect to the Wi-Fi AP, the HTTPS server and then the log server.
 
 - To view the log messages:
-  
-  `journalctl -t fgr-log-server`
+
+  ```
+  journalctl -t fgr-log-server
+  ```
 
   ...or to view the log messages from a particular IP address, updated in real time:
 
-  `journalctl -f -t fgr-log-server SOURCE_IP=10.10.3.24`
-  
+  ```
+  journalctl -f -t fgr-log-server SOURCE_IP=10.10.3.24
+  ```
+
   ... or use `log_viewer.py` to query the database.
-  
+
 - To make the service run at boot:
 
-  `sudo systemctl enable log_server`
+  ```
+  sudo systemctl enable log_server
+  ```
 
 - Decoding CORE DUMP messages sent by ESP32 nodes requires you to run [`crash_decoder.py`](crash_decoder.py) on the /[Linux/] PC on which you build the ESP-IDF code: see the top of that file for what they are.
 
@@ -150,12 +169,18 @@ Get `web_controller.py` to run at boot, using port 5000 for the connections to t
   WantedBy=multi-user.target
   ```
 
+  ...replacing `<your home directory name>` with your user name.
+
 - Test that the service starts with:
 
-  `sudo systemctl start web_controller`
+  ```
+  sudo systemctl start web_controller
+  ```
 
   ...and make sure that the ESP32 test nodes running the test application, with a MAC address that gives them IP addresses, can connect to the controller script on the Raspberry Pi Wifi AP on port 5000 and (b) a PC that is able to connect to the Raspberry Pi Wifi AP can bring up the web controller interface on port 8080.
-  
+
 - When all is good, make the service run at boot with:
 
-  `sudo systemctl enable web_controller`
+  ```
+  sudo systemctl enable web_controller
+  ```
