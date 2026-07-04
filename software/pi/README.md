@@ -1,5 +1,5 @@
 # Introduction
-This folder contains the Python scripts that run on the Raspberry Pi server of the front garden railway (plus one that runs on the build PC), plus explanatory `README.md`'s describing how to set it up.
+This folder contains the Python and bash scripts that run on the Raspberry Pi server of the front garden railway (plus one that runs on the build PC), plus explanatory `README.md`'s describing how to set it up.
 
 - [`pi_read_only_file_system.md`](pi_read_only_file_system.md): how to set up the Raspberry Pi to have a read only SD card, for robustness to power just going away; DO THIS FIRST,
 - [`pi_wifi_ap.md`](pi_wifi_ap.md): how to set up the Pi as a Wi-Fi access point; DO THIS SECOND,
@@ -17,7 +17,10 @@ This folder contains the Python scripts that run on the Raspberry Pi server of t
 - `nodes.json`: configuration file for `controller.py`,
 - `add_node.py`: script to automate adding a new node to the system,
 - `clear_node_ghosts.sh`: script to try to make Wifi on the Pi clean-up better.
-
+- `fix-br0-dhcp.sh`: script to set the Ethernet address used by `br0` to that of the Ethernet HW,
+- `performance_check.sh`: script to monitor how hard writing logs to the journal and database is pushing the system,
+- `reset_logging.sh`: script to delete and restart logging, to be used if the database or journal is corrupted by a power failure,
+- `hostapd.conf`: configuration file for `hostapd`, originally [hostapd-WiFi4.conf](https://github.com/morrownr/USB-WiFi/blob/main/home/AP_Mode/hostapd-WiFi4.conf) from [nrmorrow's USB-Wifi](https://github.com/morrownr/USB-WiFi),
 - `crash_decoder.py`: script to be run locally on the build PC that bridges to `log_server.py` and can decode crash dumps with one click.
 
 The `nodes` sub-directory contains the node-specific code that forms part of `controller.py`.
