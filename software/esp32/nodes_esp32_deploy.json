@@ -3,7 +3,8 @@
 
   "global_variants": [
     "esp32s3-rgb-4mbyte",
-    "esp32s3-grb-4mbyte"
+    "esp32s3-grb-4mbyte",
+    "esp32s3-rgb-8mbyte"
   ],
 
 "variants_matrix": {
@@ -22,6 +23,14 @@
         "sdkconfig_fragments/flash_4mbyte",
         "sdkconfig_fragments/led_multicolour",
         "sdkconfig_fragments/led_multicolour_grb"
+      ]
+    },
+    "esp32s3-8mbyte": {
+      "partition_table": "flash_8mbyte_partitions.csv",
+      "traits": [
+        "sdkconfig_fragments/chip_esp32s3",
+        "sdkconfig_fragments/flash_8mbyte",
+        "sdkconfig_fragments/led_single_colour"
       ]
     }
   },
@@ -45,7 +54,8 @@
       "10.10.3.5": { "app": "test",        "variant": "esp32s3-grb-4mbyte" },
       "10.10.3.6": { "app": "test",        "variant": "esp32s3-grb-4mbyte" },
       "10.10.3.7": { "app": "test",        "variant": "esp32s3-grb-4mbyte" },
-      "10.10.3.8": { "app": "test",        "variant": "esp32s3-grb-4mbyte" }
+      "10.10.3.8": { "app": "test",        "variant": "esp32s3-grb-4mbyte" },
+      "10.10.3.9": { "app": "test",        "variant": "esp32s3-8mbyte" }
     }
 }
 

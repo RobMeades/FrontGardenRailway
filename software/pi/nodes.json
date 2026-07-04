@@ -39,5 +39,11 @@
         "type": "test",
         "essential": false,
         "heartbeat_timeout": 60
+    },
+    "test_7": {
+        "ip": "10.10.3.9",
+        "type": "test",
+        "essential": false,
+        "heartbeat_timeout": 60
     }
 }
