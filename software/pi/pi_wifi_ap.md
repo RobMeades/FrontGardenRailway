@@ -97,23 +97,33 @@ Connect to a Pi Zero using a serial terminal, or a bigger Pi using Ethernet, and
 
 - Restart NetworkManager with:
 
-  `sudo systemctl restart NetworkManager`
+  ```
+  sudo systemctl restart NetworkManager
+  ```
 
 - NOTE: originally, when using the Pi Zero W's own Wifi, I suffered occasional crashes of the Broadcomm Wi-Fi driver, apparently due to SDIO communication hanging, for which the suggested workaround was to create and populate a driver modification file with:
 
-  `echo "options brcmfmac roamoff=1 feature_disable=0x82000" | sudo tee /etc/modprobe.d/brcmfmac.conf`
+  ```
+  echo "options brcmfmac roamoff=1 feature_disable=0x82000" | sudo tee /etc/modprobe.d/brcmfmac.conf
+  ```
 
 - Now you can create the access point with:
 
-  `sudo nmcli connection add type wifi ifname wlan0 con-name FGR autoconnect yes connection.autoconnect-priority 1 ssid FGR`
+  ```
+  sudo nmcli connection add type wifi ifname wlan0 con-name FGR autoconnect yes connection.autoconnect-priority 1 ssid FGR
+  ```
 
 - Set some properties for the access point with:
 
-  `sudo nmcli connection modify FGR 802-11-wireless.mode ap 802-11-wireless.band bg ipv4.method shared ipv4.addresses 10.10.3.1/24`
+  ```
+  sudo nmcli connection modify FGR 802-11-wireless.mode ap 802-11-wireless.band bg ipv4.method shared ipv4.addresses 10.10.3.1/24
+  ```
 
 - Also set retries to zero to stop the Network Manager black-listing a device that repeatedly tries to connect:
 
-  `sudo nmcli connection modify FGR connection.autoconnect-retries 0`
+  ```
+  sudo nmcli connection modify FGR connection.autoconnect-retries 0
+  ```
 
 - If there is a pre-existing Wifi station configuration, make sure it does not auto-connect ever with:
 
@@ -124,7 +134,9 @@ Connect to a Pi Zero using a serial terminal, or a bigger Pi using Ethernet, and
 
 - Finally, bring up the AP with:
 
-  `sudo nmcli connection up FGR`
+  ```
+  sudo nmcli connection up FGR
+  ```
 
 - You should now be able to connect to this open Wifi `FGR` access point from any device.
 
