@@ -1,0 +1,4 @@
+# sdkconfig parameters for an ESP32 device with PSRAM that can be detected automatically
+
+CONFIG_SPIRAM_TYPE_AUTO=y
+CONFIG_SPIRAM_SPEED_80M=y

@@ -1,0 +1,7 @@
+# sdkconfig parameters for an ESP32 device with 8 Mbytes of octal PSRAM (cannot be detected automatically)
+
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_TYPE_ESPPSRAM64=y
+
+# A lower speed is suggested
+CONFIG_SPIRAM_SPEED_40M=y

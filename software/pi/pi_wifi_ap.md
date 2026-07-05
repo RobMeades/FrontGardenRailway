@@ -65,7 +65,7 @@ To avoid having to enter a password all the time, and so that [`nodes_esp32_depl
 I spent quite a while stabilizing the AP behaviour of the Pi, please refer to the section `AP Setup: The Way` below for how it should be done; these notes kept for historical interest only.
 
 ## Wi-Fi Hardware History
-I found the Pi Zero W on-board Wifi to be far too unstable in AP mode, see these posts for details:
+I found the Pi Zero W on-board Wi-Fi to be far too unstable in AP mode, see these posts for details:
 
 [https://forums.raspberrypi.com/viewtopic.php?p=2374992](https://forums.raspberrypi.com/viewtopic.php?p=2374992)
 [https://github.com/raspberrypi/firmware/issues/1768#issuecomment-4084988745](https://forums.raspberrypi.com/viewtopic.php?p=2374992)
@@ -76,7 +76,7 @@ So I switched to an Atheros AR9271 USB Wi-Fi adapter, which is huge but is known
 
 And then I discovered that the Atheros AR9271 has a limit of just seven clients in AP mode.  Double ugh.
 
-Finally, I was pointed at [nrmorrow on Github](https://github.com/morrownr/USB-WiFi) as the authority on Wifi on Linux and followed their lead.
+Finally, I was pointed at [nrmorrow on Github](https://github.com/morrownr/USB-WiFi) as the authority on Wi-Fi on Linux and followed their lead.
 
 ## Networking Software History
 I originally ran networking using `nmcli`, since that is the default on a Pi, however since being introduced to [nrmorrow on Github](https://github.com/morrownr/USB-WiFi) I moved to using `systemd-resolved` and `systed-networkd`.  The `nmcli` method is kept here in case if it is of interest.
@@ -99,7 +99,7 @@ Connect to a Pi Zero using a serial terminal, or a bigger Pi using Ethernet, and
   sudo systemctl restart NetworkManager
   ```
 
-- NOTE: originally, when using the Pi Zero W's own Wifi, I suffered occasional crashes of the Broadcomm Wi-Fi driver, apparently due to SDIO communication hanging, for which the suggested workaround was to create and populate a driver modification file with:
+- NOTE: originally, when using the Pi Zero W's own Wi-Fi, I suffered occasional crashes of the Broadcomm Wi-Fi driver, apparently due to SDIO communication hanging, for which the suggested workaround was to create and populate a driver modification file with:
 
   ```
   echo "options brcmfmac roamoff=1 feature_disable=0x82000" | sudo tee /etc/modprobe.d/brcmfmac.conf
@@ -123,7 +123,7 @@ Connect to a Pi Zero using a serial terminal, or a bigger Pi using Ethernet, and
   sudo nmcli connection modify FGR connection.autoconnect-retries 0
   ```
 
-- If there is a pre-existing Wifi station configuration, make sure it does not auto-connect ever with:
+- If there is a pre-existing Wi-Fi station configuration, make sure it does not auto-connect ever with:
 
   ```
   sudo nmcli connection modify <connection name> connection.autoconnect no
@@ -136,7 +136,7 @@ Connect to a Pi Zero using a serial terminal, or a bigger Pi using Ethernet, and
   sudo nmcli connection up FGR
   ```
 
-- You should now be able to connect to this open Wifi `FGR` access point from any device.
+- You should now be able to connect to this open Wi-Fi `FGR` access point from any device.
 
 - If you want to bring the AP down, `sudo nmcli connection down FGR` and the Pi will return to having a connection to your Wi-Fi network.
 
@@ -152,7 +152,7 @@ Connect to a Pi Zero using a serial terminal, or a bigger Pi using Ethernet, and
 - Assuming you do _not_ need the on-board Wi-Fi on the Pi Zero W (or a bigger Pi) operating in client mode, `sudo nano /boot/firmware/config.txt` and add, near the top:
 
   ```
-  # Disable on-board Wifi
+  # Disable on-board Wi-Fi
   dtoverlay=disable-wifi
   ```
 
@@ -340,9 +340,9 @@ In SW terms, [nrmorrow](https://github.com/morrownr/USB-WiFi) uses `hostapd` dir
 - `sudo reboot` and Bob might be your mother's brother.
 
 # Ghosts And Broadcomm Driver Instability
-There appears to be [a\[nother\] bug](https://github.com/raspberrypi/linux/issues/6975) in the `brcmfmac` driver, in that the driver holds onto a station that has disconnected without notice for anywhere from 27 to 90+ seconds. No matter how many times the device boots up within this time, if it sends an association frame while that stale kernel window is active, the Pi completely ignores it.  Because the Pi ignores the frames indefinitely while the old session decays, the device connection times out, resulting in a persistent Wifi 201 error.  More details here:
+There appears to be [a\[nother\] bug](https://github.com/raspberrypi/linux/issues/6975) in the `brcmfmac` driver, in that the driver holds onto a station that has disconnected without notice for anywhere from 27 to 90+ seconds. No matter how many times the device boots up within this time, if it sends an association frame while that stale kernel window is active, the Pi completely ignores it.  Because the Pi ignores the frames indefinitely while the old session decays, the device connection times out, resulting in a persistent Wi-Fi 201 error.
 
-To fix this, and it might be a good idea to do this whether you are using the on-board Pi Wifi or not, Google Gemini wrote me a bash script `clear_node_ghosts.sh` which scans the output of `iw dev wlan0 station dump` every second and deletes any inactive MAC addresses.  Make this run with `sudo nano /etc/systemd/system/clear_node_ghosts.service`, pasting in the following:
+To fix this, and it might be a good idea to do this whether you are using the on-board Pi Wi-Fi or not, Google Gemini wrote me a bash script `clear_node_ghosts.sh` which scans the output of `iw dev wlan0 station dump` every second and deletes any inactive MAC addresses.  Make this run with `sudo nano /etc/systemd/system/clear_node_ghosts.service`, pasting in the following:
 
 ```
 [Unit]

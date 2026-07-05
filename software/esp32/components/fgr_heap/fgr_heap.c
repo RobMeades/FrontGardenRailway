@@ -580,6 +580,8 @@ int32_t fgr_heap_init()
                 g_context.running = true;
                 if (xTaskCreate(task_heap, TAG, FGR_HEAP_TASK_STACK_SIZE,
                                 &g_context, 2, &g_context.handle) == pdPASS) {
+                    ESP_LOGI(TAG, "Heap tracking initialised, %ld kbyte(s) heap in total.",
+                             heap_caps_get_total_size(MALLOC_CAP_8BIT) / 1024);
                     err = ESP_OK;
                 } else {
                     g_context.running = false;
