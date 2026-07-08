@@ -29,6 +29,7 @@ extern "C" {
 #include "stdbool.h"
 #include "esp_log.h"
 #include "esp_debug_helpers.h"
+#include "sdkconfig.h"
 
 /* ----------------------------------------------------------------
  * COMPILE-TIME MACROS
@@ -104,6 +105,7 @@ typedef void (*fgr_util_cb_t)(void *param);
  * FUNCTIONS: STATIC
  * -------------------------------------------------------------- */
 
+
 /** Check if a double-indirect is correct: use this wherever
  * a function receives a ** parameter, e.g.:
  *
@@ -114,39 +116,87 @@ typedef void (*fgr_util_cb_t)(void *param);
  * Note: defined as static in a header file so that it will be
  * inlined properly.
  *
+ * IMPORTANT: This function is specifically optimized for ESP32-S3.
+ * It will cause a compile-time error if compiled for a different chip.
+ *
  * @param pptr   the ** parameter to check.
  * @param tag    the TAG that would have been passed to ESP_LOGX().
  * @param name   a null-terminated string to identify the pointer
  *               being checked.
+ * @param file   the source file name (use __FILE__).
+ * @param line   the line number (use __LINE__).
  * @return       true if the parameter passes the check, else false.
  */
 static inline bool fgr_util_is_valid_ptr_to_ptr(void **pptr, const char *tag,
                                                 const char *name,
                                                 const char *file, int32_t line)
 {
+    // Compile-time check: this function is specifically for ESP32-S3
+#  ifndef CONFIG_IDF_TARGET_ESP32S3
+     #error "This version of fgr_util_is_valid_ptr_to_ptr() is specifically designed for ESP32-S3 only!"
+#  endif
+
+    bool valid = false;
+
     if (pptr == NULL) {
         ESP_LOGE(tag, "Invalid %s: context is NULL", name);
-        return false;
+        valid = false;
     }
+    else {
+        // Fast ESP32-S3 memory range check using bitmask
+        uint32_t addr = (uint32_t) pptr;
 
-    uint32_t addr = (uint32_t) pptr;
-    if ((addr < 0x3f000000) || (addr > 0x3fffffff)) {
-        ESP_LOGE(tag, "Invalid %s: context=%p (not in heap range)", name, pptr);
-        return false;
-    }
+        // ESP32-S3 valid memory ranges:
+        // - Internal RAM: 0x3F000000 - 0x3FFFFFFF (high byte 0x3F)
+        // - PSRAM:        0x3D000000 - 0x3EFFFFFF (high byte 0x3D, if enabled)
+        uint8_t high_byte = (addr >> 24) & 0xFF;
 
-    if (*pptr != NULL) {
-        uint32_t val = (uint32_t) (*pptr);
-        if ((val < 0x3f000000) || (val > 0x3fffffff)) {
-            ESP_LOGE(tag, "%s:%d: ATTENTION ATTENTION Invalid %s: *context=%p (not a valid pointer) ATTENTION ATTENTION",
-                     file, line, name, *pptr);
-            // Print backtrace to see who called this
-            esp_backtrace_print(100);
-            return false;
+        // Check if address is in internal RAM
+        if (high_byte == 0x3F) {
+            // Valid internal RAM address
+            // (No need to check lower bytes - all 0x3Fxxxxxx are valid)
+            valid = true;
+        }
+#  if CONFIG_SPIRAM
+        // Check if address is in PSRAM (ESP32-S3 specific)
+        else if (high_byte == 0x3D) {
+            // Valid PSRAM address
+            // (No need to check lower bytes - all 0x3Dxxxxxx are valid)
+            valid = true;
+        }
+#  endif
+        else {
+            ESP_LOGE(tag, "Invalid %s: context=%p (not in ESP32-S3 valid memory range)", name, pptr);
+            valid = false;
+        }
+
+        // Check the dereferenced pointer if not NULL
+        if (valid && (*pptr != NULL)) {
+            uint32_t val = (uint32_t) (*pptr);
+            high_byte = (val >> 24) & 0xFF;
+
+            // Same checks for the dereferenced pointer
+            if (high_byte == 0x3F) {
+                // Valid internal RAM address
+                valid = true;
+            }
+#  if CONFIG_SPIRAM
+            else if (high_byte == 0x3D) {
+                // Valid PSRAM address
+                valid = true;
+            }
+#  endif
+            else {
+                ESP_LOGE(tag, "%s:%d: ATTENTION ATTENTION Invalid %s: *context=%p (not a valid pointer) ATTENTION ATTENTION",
+                         file, line, name, *pptr);
+                // Print backtrace to see who called this
+                esp_backtrace_print(100);
+                valid = false;
+            }
         }
     }
 
-    return true;
+    return valid;
 }
 
 /* ----------------------------------------------------------------

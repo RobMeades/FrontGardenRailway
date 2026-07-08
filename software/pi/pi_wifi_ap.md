@@ -22,7 +22,7 @@ Since the Pi will lose connectivity to your Wi-Fi network (you do _not_ want an 
 
   - `sudo apt install lrzsz`: this allows the `minicom` and `picocom` serial communications programs to perform file transfer,
 
-  - `sudo apt install hostapd systemd-resolved ebtables`: needed for networking with the [nrmorrow](https://github.com/morrownr/USB-WiFi) approach, which is The Way,
+  - `sudo apt install hostapd systemd-resolved`: needed for networking with the [nrmorrow](https://github.com/morrownr/USB-WiFi) approach, which is The Way,
 
   - `sudo apt install tcpdump lsof jq`: can be handy for debugging,
 
@@ -185,7 +185,7 @@ Connect to a Pi Zero using a serial terminal, or a bigger Pi using Ethernet, and
 - Reboot and hopefully all will be good.
 
 ## Networking Software
-In SW terms, [nrmorrow](https://github.com/morrownr/USB-WiFi) uses `hostapd` directly and `systemd-networkd`, which seems more sensible for a server anyway, so the software AP setup here follows [that pattern](https://github.com/morrownr/USB-WiFi/blob/main/home/AP_Mode/Bridged_Wireless_Access_Point.md).
+In SW terms, [nrmorrow](https://github.com/morrownr/USB-WiFi) uses `hostapd` directly and `systemd-networkd`, which seems more sensible for a server anyway, so the software AP setup here follows [that pattern](https://github.com/morrownr/USB-WiFi/blob/main/home/AP_Mode/Bridged_Wireless_Access_Point.md) with one difference: rather than setting up a bridge, we set up a router.  The reason for this is that we need to run a DHCP server for the devices on the Wi-Fi access point and, with a bridge, that DHCP server would see the Ethernet port as well as the Wireless LAN: the local DHCP server will end up serving 10.10.3.x addresses to things that happen to broadcast DHCP requests on the wired network looking for the DHCP server on the main router.
 
 - To stop `nmcli` trying to fight for control of the W-Fi hardware, `sudo nano /etc/NetworkManager/NetworkManager.conf` and add:
 
@@ -210,7 +210,7 @@ In SW terms, [nrmorrow](https://github.com/morrownr/USB-WiFi) uses `hostapd` dir
   sudo ln -s /run/systemd/resolve/resolv.conf /etc/resolv.conf
   ```
 
-- `systemd-networkd` expects to be able to write lease durations to disk; since our microSDHC card will be read only, put the location it uses for that in a RAM disk with `sudo nano /etc/fstab` and adding at the end:
+- `systemd-networkd` expects to be able to write lease durations to disk; since our microSDHC card will be read only, put the location it uses for that on a RAM disk with `sudo nano /etc/fstab` and adding at the end:
 
   ```
   tmpfs   /var/lib/systemd/network   tmpfs   defaults,size=1M,mode=0755,uid=systemd-network,gid=systemd-network   0   0
@@ -218,98 +218,111 @@ In SW terms, [nrmorrow](https://github.com/morrownr/USB-WiFi) uses `hostapd` dir
 
   ...making sure there is no white space at the start of the line, then `sudo reboot`.
 
- - `dhcpcd`, which we need for the  next step, does the same thing, and though it only bleats without causing a real problem, it is cleaner to fix it by `symlink`ing the relevant directory to `/run`:
-
-    ```
-    sudo ln -s /run/dhcpcd /var/lib/dhcpcd
-    sudo mkdir -p /run/dhcpcd
-    ```
-
-- Before doing anything else, the creation of the `br0` interface below will replace your `eth0` interface with `br0`.  For some wacky reason, `systemd-networkd` does not have a way to adopt the MAC address of the Ethernet adapter for the `br0` interface, so the MAC address the Ethernet interface appears as back on the router will change and any static IP address assignment the router does for the Raspberry Pi will stop working.  To fix this we don't let `systemd-networkd` use DHCP to get an IP address by itself, instead we have a service that runs and updates the MAC address using a script the moment `systemd-networkd` creates `br0` and then we make sure that `dhcpcd` is running and _that_ gets the IP address for `br0`.  To do this, `sudo nano /etc/systemd/system/fix-br0-dhcp.service` and paste in the following:
-
-  ```
-  [Unit]
-  Description=Fix br0 MAC and ensure dhcpcd is running
-  After=systemd-networkd.service
-  Wants=systemd-networkd.service
-  PartOf=systemd-networkd.service
-
-  [Service]
-  Type=oneshot
-  ExecStart=/home/<your home directory name>/FrontGardenRailway/software/pi/fix-br0-dhcp.sh
-  RemainAfterExit=yes
-
-  [Install]
-  WantedBy=multi-user.target
-  ```
-
-  ...replacing `<your home directory name>` with your user name, then `sudo nano /etc/dhcpcd-br0.conf` and give the file contents:
-
-  ```
-  # DHCP client configuration for br0
-  # Only manage br0
-  interface br0
-
-  # Set hostname from DHCP
-  hostname
-
-  # Wait for interface to be ready
-  waitip 4
-
-  # Client identifier
-  clientid
-
-  # Lease time options
-  option dhcp_lease_time
-  ```
-
-  ...and finally:
-
-
-  ```
-  sudo systemctl start fix-br0-dhcp.service
-  sudo systemctl enable fix-br0-dhcp.service
-  ```
-
 - Enable `systemd-networkd` with:
 
   ```
   sudo systemctl enable systemd-networkd
   ```
 
-- Create the wireless bridge interface with `sudo nano /etc/systemd/network/10-create-bridge-br0.netdev`, pasting in the contents:
-
-  ```
-  [NetDev]
-  Name=br0
-  Kind=bridge
-  ```
-
-- Bind the bridge to the Ethernet interface with `sudo nano /etc/systemd/network/20-bind-ethernet-with-bridge-br0.network`, pasting in the contents:
+- Create the `eth0` side with `sudo nano /etc/systemd/network/10-eth0.network`, pasting in the contents:
 
   ```
   [Match]
   Name=eth0
 
   [Network]
-  Bridge=br0
+  # DHCP client will obtain IP and gateway from router
+  DHCP=yes
+  # Enable IPv4 forwarding
+  IPv4Forwarding=yes
+  IPv6Forwarding=no
+
+  [DHCPv4]
+  UseDNS=true
+  UseNTP=true
+  # Send hostname to DHCP server
+  SendHostname=true
+  Hostname=FGR
+  # Use DHCP client identifier (MAC address)
+  ClientIdentifier=mac
+  # Anonymize=false means we send full hostname
+  Anonymize=false
   ```
 
-- Configure the bridge interface with `sudo nano /etc/systemd/network/30-config-bridge-br0.network`, pasting in the contents:
+- Create the `wlan0` side with `sudo nano /etc/systemd/network/20-wlan0.network`, pasting in the contents:
 
   ```
   [Match]
-  Name=br0
+  Name=wlan0
 
   [Network]
+  # Static IP for the wireless network
   Address=10.10.3.1/24
-  Gateway=10.10.2.1
+  # Enable DHCP server for wireless clients
   DHCPServer=yes
 
   [DHCPServer]
-  # Start from 10.10.3.2
-  PoolOffset=2
+  # Pool starts at 10.10.3.2 (offset 1 means start at .2)
+  PoolOffset=1
   PoolSize=253
+  # DNS servers for clients - use the router's DNS
+  DNS=10.10.2.1
+  ```
+
+- Switch IP forwarding on globally by doing `sudo nano /etc/systemd/networkd.conf` and adding to the `[Network]` section:
+
+  ```
+  # Enable IPv4 forwarding globally
+  IPv4Forwarding=yes
+  IPv6Forwarding=no
+  ```
+
+- Configure `nftables` firewall/NAT with `sudo nano /etc/nftables.conf`,  pasting in the contents:
+
+  ```
+  #!/usr/sbin/nft -f
+
+  flush ruleset
+
+  table ip nat {
+      chain prerouting {
+          type nat hook prerouting priority dstnat; policy accept;
+      }
+
+      chain postrouting {
+          type nat hook postrouting priority srcnat; policy accept;
+          oifname "eth0" masquerade
+      }
+  }
+
+  table ip filter {
+      chain input {
+          type filter hook input priority filter; policy drop;
+          ct state { established, related } accept
+          iifname "lo" accept
+          tcp dport 22 accept
+          ip protocol icmp accept
+          iifname "wlan0" udp dport 67 accept
+          iifname "wlan0" udp dport 53 accept
+      }
+
+      chain forward {
+          type filter hook forward priority filter; policy drop;
+          ct state { established, related } accept
+          iifname "wlan0" oifname "eth0" accept
+          iifname "eth0" oifname "wlan0" ct state { established, related } accept
+      }
+
+      chain output {
+          type filter hook output priority filter; policy accept;
+      }
+  }
+  ```
+
+- Enable `nftables` with:
+
+  ```
+  sudo systemctl enable nftables
   ```
 
 - Enable the Wi-Fi access point to start at boot with:

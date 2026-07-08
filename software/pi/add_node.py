@@ -19,6 +19,22 @@
 """
 Script to add a new node to the front garden railway.
 Supports both NetworkManager (with --nmcli) and systemd-networkd (default).
+
+The procedure for adding a new [ESP32S3] node becomes:
+
+1.  Locally build and download the test application to the board, making
+    sure to reset `sdkconfig` and do a full clean.
+2.  Run the build and look for a line near the start, just before
+    the output pauses for 5 seconds, of the form:
+
+    debug: MAC address a1:81:5c:10:2e:f3
+
+3.  SSH to the controller Raspberry Pi and run this script, supplying
+    the MAC address from the "debug: MAC address" line when you do so.
+
+4.  Add an entry to `inventory` in `nodes_esp32_deploy.json` for this
+    new node, giving it the correct image type; `https_server.py` will
+    re-read that file as it goes, it doesn't need to be restarted.
 """
 
 import argparse
@@ -39,7 +55,7 @@ NM_DNSMASQ_STATIC_FILE = "/etc/NetworkManager/dnsmasq-shared.d/static-addresses"
 NM_IPTABLES_CHAIN = "dhcp_clients"
 
 # systemd-networkd backend file paths
-SYSTEMD_NETWORK_FILE = "/etc/systemd/network/30-config-bridge-br0.network"
+SYSTEMD_NETWORK_FILE = "/etc/systemd/network/20-wlan0.network"
 HOSTAPD_ACCEPT_FILE = "/etc/hostapd/accept_mac.txt"
 
 # Service names

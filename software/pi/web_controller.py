@@ -6827,9 +6827,10 @@ class WebController(Controller):
             const highlightInput = document.getElementById('filterHighlightNodes');
             const logLevelSelect = document.getElementById('filterMinLogLevel');
 
-            // Restrict input: only 2-9, comma, period, space, dash allowed
+            // Restrict input: only 0-9, comma, period, space, dash allowed
             function restrictFilterInput(e) {
-                this.value = this.value.replace(/[^2-9,.\\s-]/g, '');
+                // Allow: digits 0-9, comma, period, space, dash
+                this.value = this.value.replace(/[^0-9,.\\s-]/g, '');
             }
 
             if (excludeCheckbox) {

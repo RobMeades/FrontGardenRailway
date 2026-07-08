@@ -99,12 +99,36 @@ class RobustFileSender:
 
 
 class HandleFirmware:
-    def __init__(self, base_path, node_cfg_data=None):
+    def __init__(self, base_path, node_cfg_data=None, cfg_path=None):
         self.base_path = base_path
         self.node_cfg = node_cfg_data if node_cfg_data else {"inventory": {}}
-
-        # Volatile runtime state tracking (Kept strictly in RAM)
+        self.cfg_path = cfg_path
         self.telemetry = {}  # Format: { "10.10.2.XX": {"version": "v1.0", "last_seen": timestamp} }
+        self.cfg_mtime = 0
+
+        # Initialize the modification time
+        if cfg_path and os.path.exists(cfg_path):
+            self.cfg_mtime = os.path.getmtime(cfg_path)
+
+    def ensure_cfg_fresh(self):
+        """Check if the configuration file has changed and reload if needed"""
+        if not self.cfg_path:
+            return
+
+        try:
+            current_mtime = os.path.getmtime(self.cfg_path)
+            if current_mtime > self.cfg_mtime:
+                self.cfg_mtime = current_mtime
+                logger.info(f"Configuration file changed, reloading...")
+                new_data = load_master_node_cfg(self.cfg_path)
+                if new_data and "inventory" in new_data:
+                    # Preserve existing telemetry data
+                    self.node_cfg = new_data
+                    logger.info(f"Configuration reloaded from {self.cfg_path}")
+                else:
+                    logger.warning(f"Failed to reload configuration from {self.cfg_path}")
+        except Exception as e:
+            logger.error(f"Error checking configuration freshness: {e}")
 
     def resolve_node_binary(self, client_ip, requested_filename):
         """Resolves identity paths dynamically based on a node's inventory mode classification."""
@@ -136,6 +160,7 @@ class HandleFirmware:
 
     async def handle_update(self, request):
         """Dedicated route checking firmware state. Parses '?version=vX.Y' for runtime telemetry."""
+        self.ensure_cfg_fresh()
         client_ip = request.remote
         if client_ip in ('::1', 'localhost'):
             client_ip = '127.0.0.1'
@@ -164,6 +189,7 @@ class HandleFirmware:
 
     async def handle_direct_file(self, request):
         """Standard routing endpoint allowing direct file matching or local fallback calls."""
+        self.ensure_cfg_fresh()
         filename = request.match_info.get('filename', '')
         if not filename:
             return web.Response(status=400, text="Bad Request: Missing targeting asset filename target.")
@@ -216,13 +242,22 @@ class HandleFirmware:
 
     async def handle_dashboard(self, request):
         """Serves the control dashboard UI shell with client-side live rendering."""
+        self.ensure_cfg_fresh()
         inventory = self.node_cfg.get("inventory", {})
 
         # Inject the inventory as a JavaScript object so the browser knows our master node list
         inventory_json = json.dumps(inventory)
 
+        def ip_sort_key(ip):
+            """Convert IP address string to tuple of integers for proper sorting."""
+            try:
+                return tuple(map(int, ip.split('.')))
+            except (ValueError, AttributeError):
+                # If IP doesn't parse correctly, fall back to string sorting
+                return (0, 0, 0, 0)
+
         table_rows = ""
-        for ip, meta in sorted(inventory.items()):
+        for ip, meta in sorted(inventory.items(), key=lambda item: ip_sort_key(item[0])):
             table_rows += f"""
             <tr id="row-{ip.replace('.', '-')}">
                 <td><strong>{ip}</strong></td>
@@ -362,6 +397,7 @@ class HandleFirmware:
 
     async def handle_toggle_mode(self, request):
         """Processes form postings from the dashboard to modify node tracks strictly in memory."""
+        self.ensure_cfg_fresh()
         data = await request.post()
         target_ip = data.get('ip')
         target_mode = data.get('mode')
@@ -400,18 +436,18 @@ class HandleFirmware:
             await asyncio.sleep(wait_time)
 
 
-def load_master_node_cfg(config_path):
+def load_master_node_cfg(cfg_path):
     try:
-        with open(config_path, 'r') as f:
+        with open(cfg_path, 'r') as f:
             data = json.load(f)
         if "inventory" not in data:
-            logger.warning(f"Configuration loaded from '{config_path}' does not contain an 'inventory' dictionary mapping profile block.")
+            logger.warning(f"Configuration loaded from '{cfg_path}' does not contain an 'inventory' dictionary mapping profile block.")
         else:
             # Set default execution tracks inside inventory entries upon starting the service
             for ip, meta in data["inventory"].items():
                 if "mode" not in meta:
                     meta["mode"] = "stable"
-            logger.info(f"[SUCCESS] Parsed master node map matrix index network footprint from: '{config_path}'")
+            logger.info(f"[SUCCESS] Parsed master node map matrix index network footprint from: '{cfg_path}'")
         return data
     except Exception as e:
         logger.error(f"Could not load master inventory deployment target mapping configuration: {e}")
@@ -430,7 +466,7 @@ async def main(base_dir, port, node_cfg_path=None):
     }
 
     node_cfg_data = load_master_node_cfg(node_cfg_path) if node_cfg_path else {"inventory": {}}
-    handler = HandleFirmware(base_dir, node_cfg_data)
+    handler = HandleFirmware(base_dir, node_cfg_data, node_cfg_path)
 
     # Core URL Routing Topology Configurations
     app.router.add_get('/dashboard', handler.handle_dashboard)

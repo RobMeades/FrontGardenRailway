@@ -31,7 +31,7 @@ This is done by configuring `hostapd`.
 ## Fixed IP Address Allocation
 This is done by modifying the configuration of `br0` in `systemd-networkd`.
 
-- Edit your bridge network configuration file with `sudo nano /etc/systemd/network/30-config-bridge-br0.network` and add to it entries of the form:
+- Edit your `wlan0` side network configuration file with `sudo nano /etc/systemd/20-wlan0.network` and add to it entries of the form:
 
   ```
   [DHCPServerStaticLease]

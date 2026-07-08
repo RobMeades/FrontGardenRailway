@@ -57,14 +57,14 @@
   },
 
   "inventory": {
-      "10.10.3.2": { "app": "test",        "variant": "esp32s3-rgb-4mbyte-psramheap" },
-      "10.10.3.3": { "app": "level_gauge", "variant": "esp32s3-rgb-4mbyte-psramheap" },
-      "10.10.3.4": { "app": "test",        "variant": "esp32s3-grb-4mbyte-psramheap" },
-      "10.10.3.5": { "app": "test",        "variant": "esp32s3-grb-4mbyte-psramheap" },
-      "10.10.3.6": { "app": "test",        "variant": "esp32s3-grb-4mbyte-psramheap" },
-      "10.10.3.7": { "app": "test",        "variant": "esp32s3-grb-4mbyte-psramheap" },
-      "10.10.3.8": { "app": "test",        "variant": "esp32s3-grb-4mbyte-psramheap" },
-      "10.10.3.9": { "app": "test",        "variant": "esp32s3-8mbyte-psramoctalheap" }
+      "10.10.3.2":   { "app": "test",        "variant": "esp32s3-rgb-4mbyte-psramheap" },
+      "10.10.3.3":   { "app": "level_gauge", "variant": "esp32s3-rgb-4mbyte-psramheap" },
+      "10.10.3.4":   { "app": "test",        "variant": "esp32s3-grb-4mbyte-psramheap" },
+      "10.10.3.5":   { "app": "test",        "variant": "esp32s3-grb-4mbyte-psramheap" },
+      "10.10.3.6":   { "app": "test",        "variant": "esp32s3-grb-4mbyte-psramheap" },
+      "10.10.3.7":   { "app": "test",        "variant": "esp32s3-grb-4mbyte-psramheap" },
+      "10.10.3.8":   { "app": "test",        "variant": "esp32s3-grb-4mbyte-psramheap" },
+      "10.10.3.9":   { "app": "test",        "variant": "esp32s3-8mbyte-psramoctalheap" }
     }
 }
 
