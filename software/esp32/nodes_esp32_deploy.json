@@ -16,8 +16,8 @@
         "sdkconfig_fragments/psram",
         "sdkconfig_fragments/psram_auto",
         "sdkconfig_fragments/psram_heap",
-        "sdkconfig_fragments/led_multicolour"
-        "sdkconfig_fragments/led_multicolour_onboard",
+        "sdkconfig_fragments/led_multicolour",
+        "sdkconfig_fragments/led_multicolour_onboard"
       ]
     },
     "esp32s3-grb-4mbyte-psramheap": {
