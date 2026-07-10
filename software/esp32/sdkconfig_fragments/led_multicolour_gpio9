@@ -1,0 +1,3 @@
+# sdkconfig parameters specific to a multi-colour LED on GPIO 9 (usually mounted externally, noting that on the Seeed Studio board, pin 10 is GPIO 9)
+
+CONFIG_FGR_DEBUG_LED_PIN=9

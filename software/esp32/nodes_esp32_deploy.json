@@ -4,7 +4,7 @@
   "global_variants": [
     "esp32s3-rgb-4mbyte-psramheap",
     "esp32s3-grb-4mbyte-psramheap",
-    "esp32s3-8mbyte-psramoctalheap"
+    "esp32s3-rgb-8mbyte-psramoctalheap"
   ],
 
 "variants_matrix": {
@@ -17,6 +17,7 @@
         "sdkconfig_fragments/psram_auto",
         "sdkconfig_fragments/psram_heap",
         "sdkconfig_fragments/led_multicolour"
+        "sdkconfig_fragments/led_multicolour_onboard",
       ]
     },
     "esp32s3-grb-4mbyte-psramheap": {
@@ -28,10 +29,11 @@
         "sdkconfig_fragments/psram_auto",
         "sdkconfig_fragments/psram_heap",
         "sdkconfig_fragments/led_multicolour",
+        "sdkconfig_fragments/led_multicolour_onboard",
         "sdkconfig_fragments/led_multicolour_grb"
       ]
     },
-    "esp32s3-8mbyte-psramoctalheap": {
+    "esp32s3-grbgpio9-8mbyte-psramoctalheap": {
       "partition_table": "flash_8mbyte_partitions.csv",
       "traits": [
         "sdkconfig_fragments/chip_esp32s3",
@@ -39,7 +41,9 @@
         "sdkconfig_fragments/psram",
         "sdkconfig_fragments/psram_octal",
         "sdkconfig_fragments/psram_heap",
-        "sdkconfig_fragments/led_single_colour"
+        "sdkconfig_fragments/led_multicolour",
+        "sdkconfig_fragments/led_multicolour_gpio9",
+        "sdkconfig_fragments/led_multicolour_grb"
       ]
     }
   },
@@ -64,7 +68,7 @@
       "10.10.3.6":   { "app": "test",        "variant": "esp32s3-grb-4mbyte-psramheap" },
       "10.10.3.7":   { "app": "test",        "variant": "esp32s3-grb-4mbyte-psramheap" },
       "10.10.3.8":   { "app": "test",        "variant": "esp32s3-grb-4mbyte-psramheap" },
-      "10.10.3.9":   { "app": "test",        "variant": "esp32s3-8mbyte-psramoctalheap" }
+      "10.10.3.9":   { "app": "test",        "variant": "esp32s3-grbgpio9-8mbyte-psramoctalheap" }
     }
 }
 

@@ -886,8 +886,9 @@ int32_t fgr_debug_init(fgr_debug_state_cb_t cb, void *cb_param)
                             if (cb) {
                                 g_context.breathe_state.use_cb = true;
                             }
-                            ESP_LOGI(TAG,
-                                     "If the LED breathes red when obviously connected, toggle CONFIG_FGR_DEBUG_LED_WS2812_GRB.");
+                            ESP_LOGI(TAG, "Using a multicolour debug LED on SPI %d, pin %d.",
+                                     CONFIG_FGR_DEBUG_LED_SPI_NUM, CONFIG_FGR_DEBUG_LED_PIN);
+                            ESP_LOGI(TAG, "If the LED breathes red when obviously connected, toggle CONFIG_FGR_DEBUG_LED_WS2812_GRB.");
                         } else {
                             vQueueDelete(g_context.queue_handle);
                             g_context.queue_handle = NULL;
@@ -910,6 +911,8 @@ int32_t fgr_debug_init(fgr_debug_state_cb_t cb, void *cb_param)
             if (err == ESP_OK) {
                 err = gpio_set_direction(CONFIG_FGR_DEBUG_LED_PIN, GPIO_MODE_OUTPUT);
                 if (err == ESP_OK) {
+                    ESP_LOGI(TAG, "Using a single colour debug LED on pin %d.",
+                             CONFIG_FGR_DEBUG_LED_PIN);
                     // Flash it so that we know it can be active
                     fgr_debug_led_flash(FGR_DEBUG_LED_LONG_MS, FGR_DEBUG_LED_COLOUR_BOOT);
                 } else {
