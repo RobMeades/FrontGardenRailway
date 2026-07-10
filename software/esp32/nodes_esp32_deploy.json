@@ -4,7 +4,7 @@
   "global_variants": [
     "esp32s3-rgb-4mbyte-psramheap",
     "esp32s3-grb-4mbyte-psramheap",
-    "esp32s3-rgb-8mbyte-psramoctalheap"
+    "esp32s3-grbgpio9-8mbyte-psramoctalheap"
   ],
 
 "variants_matrix": {
