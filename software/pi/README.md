@@ -17,7 +17,6 @@ This folder contains the Python and bash scripts that run on the Raspberry Pi se
 - `nodes.json`: configuration file for `controller.py`,
 - `add_node.py`: script to automate adding a new node to the system,
 - `clear_node_ghosts.sh`: script to try to make Wifi on the Pi clean-up better.
-- `fix-br0-dhcp.sh`: script to set the Ethernet address used by `br0` to that of the Ethernet HW,
 - `performance_check.sh`: script to monitor how hard writing logs to the journal and database is pushing the system,
 - `reset_logging.sh`: script to delete and restart logging, to be used if the database or journal is corrupted by a power failure,
 - `hostapd.conf`: configuration file for `hostapd`, originally [hostapd-WiFi4.conf](https://github.com/morrownr/USB-WiFi/blob/main/home/AP_Mode/hostapd-WiFi4.conf) from [nrmorrow's USB-Wifi](https://github.com/morrownr/USB-WiFi),
