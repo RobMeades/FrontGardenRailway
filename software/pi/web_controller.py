@@ -3138,9 +3138,14 @@ class WebController(Controller):
 
         return web.json_response(result)
 
+    def _apply_downsampling_to_points(self, data_points, start_time, end_time):
+        """
+        Apply downsampling to a list of (timestamp, value) tuples.
+        Returns the downsampled list.
+        """
+        if not data_points:
+            return []
 
-    def _apply_downsampling(self, rows, start_time, end_time):
-        """Apply downsampling to query results based on time range duration"""
         duration = end_time - start_time
 
         # Calculate step based on duration
@@ -3158,15 +3163,10 @@ class WebController(Controller):
             step = 1
 
         if step == 1:
-            return rows
+            return data_points
 
-        # Take every Nth row
-        downsampled = []
-        for i, row in enumerate(rows):
-            if i % step == 0:
-                downsampled.append(row)
-
-        return downsampled
+        # Take every Nth point
+        return [data_points[i] for i in range(0, len(data_points), step)]
 
     def _query_bucketed_metric(self, metric_column, start_time, end_time, node_ips, bucket_seconds=3600):
         """
@@ -3200,9 +3200,7 @@ class WebController(Controller):
                 node_filter = f"AND node_ip IN ({placeholders})"
                 params.extend(node_ips)
 
-            # CRITICAL FIX: Use COALESCE to treat NULL as 0
-            # This ensures that when a metric is absent from a message (meaning counter was zero),
-            # we explicitly use 0 instead of NULL, allowing delta calculations to work correctly
+            # Use COALESCE to treat NULL as 0
             query = f"""
                 SELECT
                     epoch_time,
@@ -3220,57 +3218,61 @@ class WebController(Controller):
             if not rows:
                 return {}
 
-            # Calculate deltas per node - ONLY count increases
-            node_last_values = {}
-            delta_points = []  # (bucket_start, node_ip, delta)
-
+            # Group by node_ip for per-node delta calculation
+            node_data = {}
             for row in rows:
                 epoch_time, node_ip, cumulative_value = row
+                if node_ip not in node_data:
+                    node_data[node_ip] = []
+                node_data[node_ip].append((epoch_time, cumulative_value))
 
-                last_value = node_last_values.get(node_ip)
-
-                if last_value is not None:
-                    # ONLY count INCREASES as new failures/events
-                    # Decreases (resets) are ignored because they don't represent new events
-                    if cumulative_value > last_value:
-                        delta = cumulative_value - last_value
-                        if delta > 0:
-                            # Calculate which bucket this belongs to
-                            bucket_start = (epoch_time // bucket_seconds) * bucket_seconds
-                            delta_points.append((bucket_start, node_ip, delta))
-                    # else: decrease or same value - no new events, ignore
-                else:
-                    # First reading for this node in the query window
-                    # No baseline, so we cannot calculate a reliable delta.
-                    # We skip it to avoid counting pre-existing failures.
-                    pass
-
-                node_last_values[node_ip] = cumulative_value
-
-            if not delta_points:
-                return {}
-
-            # Aggregate deltas by bucket and node
+            # Calculate deltas per node - ONLY count increases
             result = {}
-            for bucket_start, node_ip, delta in delta_points:
-                if node_ip not in result:
-                    result[node_ip] = []
 
-                # Check if we already have this bucket for this node
-                existing = None
-                for point in result[node_ip]:
-                    if point[0] == bucket_start * 1000:
-                        existing = point
-                        break
+            for node_ip, data_points in node_data.items():
+                if not data_points:
+                    continue
 
-                if existing:
-                    existing[1] += delta  # Sum multiple deltas in same bucket
-                else:
-                    result[node_ip].append([bucket_start * 1000, delta])
+                # Downsample the data points first (per node)
+                downsampled = self._apply_downsampling_to_points(
+                    data_points, start_time, end_time
+                )
 
-            # Sort timestamps for each node
-            for node_ip in result:
-                result[node_ip].sort(key=lambda x: x[0])
+                if not downsampled:
+                    continue
+
+                # Now calculate deltas on the downsampled data
+                node_delta_points = []
+                last_value = None
+
+                for epoch_time, cumulative_value in downsampled:
+                    if last_value is not None:
+                        # ONLY count INCREASES as new failures/events
+                        # Decreases (resets) are ignored
+                        if cumulative_value > last_value:
+                            delta = cumulative_value - last_value
+                            if delta > 0:
+                                # Calculate which bucket this belongs to
+                                bucket_start = (epoch_time // bucket_seconds) * bucket_seconds
+                                node_delta_points.append((bucket_start, delta))
+                    # else: First reading for this node in the query window - skip
+
+                    last_value = cumulative_value
+
+                if not node_delta_points:
+                    continue
+
+                # Aggregate deltas by bucket for this node
+                node_result = {}
+                for bucket_start, delta in node_delta_points:
+                    if bucket_start not in node_result:
+                        node_result[bucket_start] = 0
+                    node_result[bucket_start] += delta
+
+                # Convert to list format expected by frontend
+                if node_result:
+                    result[node_ip] = [[bucket_start * 1000, delta]
+                                    for bucket_start, delta in sorted(node_result.items())]
 
             total_points = sum(len(v) for v in result.values())
             self._log_admin(f"{metric_column} (deltas - increases only): {total_points} event points from {len(result)} nodes")
@@ -3305,28 +3307,40 @@ class WebController(Controller):
                 WHERE rssi IS NOT NULL
                 AND epoch_time BETWEEN ? AND ?
                 {node_filter}
-                ORDER BY epoch_time ASC
+                ORDER BY node_ip, epoch_time ASC
             """
 
             cursor.execute(query, params)
             rows = cursor.fetchall()
 
-            # Apply downsampling
-            rows = self._apply_downsampling(rows, start_time, end_time)
+            if not rows:
+                return {}
 
-            result = {}
+            # Group by node_ip for per-node downsampling
+            node_data = {}
             for row in rows:
                 epoch_time, node_ip, rssi = row
                 if rssi is not None and -100 <= rssi <= 0:
-                    if node_ip not in result:
-                        result[node_ip] = []
-                    result[node_ip].append([epoch_time * 1000, rssi])
+                    if node_ip not in node_data:
+                        node_data[node_ip] = []
+                    node_data[node_ip].append((epoch_time, rssi))
+
+            # Apply downsampling per node
+            result = {}
+            for node_ip, data_points in node_data.items():
+                if not data_points:
+                    continue
+                # Downsample this node's data
+                downsampled = self._apply_downsampling_to_points(data_points, start_time, end_time)
+                result[node_ip] = [[ts * 1000, rssi] for ts, rssi in downsampled]
 
             total_points = sum(len(v) for v in result.values())
+            self._log_admin(f"RSSI: {total_points} points from {len(result)} nodes")
             return result
 
         except Exception as e:
             self._log_admin(f"Error querying RSSI: {e}")
+            traceback.print_exc()
             return {}
         finally:
             conn.close()
@@ -3365,27 +3379,39 @@ class WebController(Controller):
                 WHERE heap IS NOT NULL
                 AND epoch_time BETWEEN ? AND ?
                 {node_filter}
-                ORDER BY epoch_time ASC
+                ORDER BY node_ip, epoch_time ASC
             """
 
             cursor.execute(query, params)
             rows = cursor.fetchall()
 
-            rows = self._apply_downsampling(rows, start_time, end_time)
+            if not rows:
+                return {}
 
-            result = {}
+            # Group by node_ip for per-node downsampling
+            node_data = {}
             for row in rows:
                 epoch_time, node_ip, heap = row
                 if heap is not None and heap > 0:
-                    if node_ip not in result:
-                        result[node_ip] = []
-                    result[node_ip].append([epoch_time * 1000, heap])
+                    if node_ip not in node_data:
+                        node_data[node_ip] = []
+                    node_data[node_ip].append((epoch_time, heap))
+
+            # Apply downsampling per node
+            result = {}
+            for node_ip, data_points in node_data.items():
+                if not data_points:
+                    continue
+                downsampled = self._apply_downsampling_to_points(data_points, start_time, end_time)
+                result[node_ip] = [[ts * 1000, heap] for ts, heap in downsampled]
 
             total_points = sum(len(v) for v in result.values())
+            self._log_admin(f"Heap: {total_points} points from {len(result)} nodes")
             return result
 
         except Exception as e:
             self._log_admin(f"Error querying heap: {e}")
+            traceback.print_exc()
             return {}
         finally:
             conn.close()
