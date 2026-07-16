@@ -633,12 +633,18 @@ def handle_nodes_json(ip_address_mac: str) -> bool:
     # Find highest numbered test node name (format: something_x or something_x with optional underscore)
     highest_num = -1
     highest_name = None
-    pattern = re.compile(r'.*[_-]?(\d+)$')
+
+    # Parse all test nodes and extract numbers
+    node_numbers = {}
+    pattern = re.compile(r'^(.*?)([_-]?)(\d+)$')
 
     for name in test_nodes:
         match = pattern.search(name)
         if match:
-            num = int(match.group(1))
+            base = match.group(1)  # Everything before the number
+            separator = match.group(2)  # _ or - or empty
+            num = int(match.group(3))
+            node_numbers[name] = num
             if num > highest_num:
                 highest_num = num
                 highest_name = name
@@ -649,12 +655,20 @@ def handle_nodes_json(ip_address_mac: str) -> bool:
         next_num = 1
     else:
         # Extract base name without the number
-        base_name = re.sub(r'[_-]?\d+$', '', highest_name)
-        if not base_name:
+        match = re.match(r'^(.*?)[_-]?\d+$', highest_name)
+        if match:
+            base_name = match.group(1)
+            if not base_name:
+                base_name = "test"
+        else:
             base_name = "test"
         next_num = highest_num + 1
 
-    suggested_name = f"{base_name}_{next_num}" if base_name != "test" else f"test_{next_num}"
+    suggested_name = f"{base_name}{next_num}" if base_name != "test" else f"test_{next_num}"
+
+    # Clean up suggested name - ensure consistent formatting
+    if '_' not in suggested_name and '-' not in suggested_name:
+        suggested_name = f"{base_name}_{next_num}"
 
     response = input(f"\nWould you like to add a temporary test node for IP address {ip_address_mac}? (y/n): ").lower()
     if response != 'y':
@@ -688,25 +702,65 @@ def handle_nodes_json(ip_address_mac: str) -> bool:
         print("Leaving nodes.json alone.")
         return False
 
-    # Insert the new entry after the highest numbered test node
+    # Insert the new entry in the correct sorted position based on node name
     try:
-        # Convert OrderedDict to list of items for insertion
-        items = list(nodes.items())
+        # Get all test node names and their numeric parts for sorting
+        test_node_info = []
+        for name, data in nodes.items():
+            if data.get('type') == 'test':
+                # Extract number from name
+                match = re.search(r'(\d+)$', name)
+                if match:
+                    num = int(match.group(1))
+                    test_node_info.append((name, num))
+                else:
+                    test_node_info.append((name, 0))  # No number, treat as 0
 
-        # Find position of the highest numbered test node
-        insert_pos = -1
-        for i, (name, _) in enumerate(items):
-            if name == highest_name:
-                insert_pos = i + 1  # Insert after it
-                break
+        # Sort test nodes by their numeric part
+        test_node_info.sort(key=lambda x: x[1])
+        test_node_names = [info[0] for info in test_node_info]
 
-        if insert_pos == -1:
-            # If not found, append at the end
-            nodes.update(new_entry)
-        else:
+        # Determine where to insert the new node
+        # Extract the number from the new node name
+        match = re.search(r'(\d+)$', node_name)
+        if match:
+            new_node_num = int(match.group(1))
+            # Find the position where this should be inserted
+            insert_pos = 0
+            for i, (name, num) in enumerate(test_node_info):
+                if new_node_num < num:
+                    insert_pos = i
+                    break
+                elif new_node_num == num:
+                    # Same number, insert after existing one
+                    insert_pos = i + 1
+                    break
+                else:
+                    insert_pos = i + 1
+
+            # Also need to consider that we're inserting relative to all nodes, not just test nodes
+            # Convert to list of items for insertion
+            items = list(nodes.items())
+
+            # Find the actual position in the full list
+            actual_pos = 0
+            test_node_idx = 0
+            for i, (name, _) in enumerate(items):
+                if name in test_node_names:
+                    if test_node_idx == insert_pos:
+                        actual_pos = i
+                        break
+                    test_node_idx += 1
+            else:
+                # If we didn't find the position, append at the end
+                actual_pos = len(items)
+
             # Insert at the found position
-            items.insert(insert_pos, (node_name, new_entry[node_name]))
+            items.insert(actual_pos, (node_name, new_entry[node_name]))
             nodes = dict(items)
+        else:
+            # No number found, just append at the end
+            nodes.update(new_entry)
 
         # Write back to file
         with open(nodes_json_path, 'w') as f:
@@ -768,12 +822,8 @@ def main():
         print("Expected format: XX:XX:XX:XX:XX:XX or XX-XX-XX-XX-XX-XX", file=sys.stderr)
         sys.exit(1)
 
-    if args.nmcli:
-        interface = "wlan0"
-    else:
-        interface = "br0"
     # Get IP first (needed for range checks)
-    host_ip = get_ip(interface)
+    host_ip = get_ip("wlan0")
     ip_parts = host_ip.split('.')
     ip_address_range = '.'.join(ip_parts[:3])
     host_ip_last_digit = int(ip_parts[3])
@@ -1148,29 +1198,11 @@ def main():
         restarted_hostapd = False
         restarted_networkd = False
 
-        if hostapd_modified:
-            response = input("\nRestart hostapd to apply MAC filtering changes? (y/n): ").lower()
-            if response == 'y':
-                if restart_hostapd():
-                    restarted_hostapd = True
-                    print("hostapd restarted successfully.")
-                else:
-                    print("Warning: hostapd restart may have failed.", file=sys.stderr)
-                    # Offer to rollback
-                    response = input("Rollback hostapd changes? (y/n): ").lower()
-                    if response == 'y':
-                        remove_hostapd_entry(mac)
-                        print("Rollback complete.")
-                        sys.exit(1)
-            else:
-                print("hostapd not restarted. You will need to restart it manually or reboot.")
-
         if systemd_modified:
             response = input("\nRestart systemd-networkd to apply static IP changes? (y/n): ").lower()
             if response == 'y':
                 if restart_systemd_networkd():
                     restarted_networkd = True
-                    print("systemd-networkd restarted successfully.")
                     # Wait for the bridge to get the new MAC if needed
                     time.sleep(2)
                 else:
@@ -1183,6 +1215,22 @@ def main():
                         sys.exit(1)
             else:
                 print("systemd-networkd not restarted. You will need to restart it manually or reboot.")
+
+        if hostapd_modified:
+            response = input("\nRestart hostapd to apply MAC filtering changes? (y/n): ").lower()
+            if response == 'y':
+                if restart_hostapd():
+                    restarted_hostapd = True
+                else:
+                    print("Warning: hostapd restart may have failed.", file=sys.stderr)
+                    # Offer to rollback
+                    response = input("Rollback hostapd changes? (y/n): ").lower()
+                    if response == 'y':
+                        remove_hostapd_entry(mac)
+                        print("Rollback complete.")
+                        sys.exit(1)
+            else:
+                print("hostapd not restarted. You will need to restart it manually or reboot.")
 
         # Handle nodes.json
         nodes_modified = handle_nodes_json(ip_address_mac)

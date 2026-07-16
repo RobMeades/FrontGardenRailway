@@ -28,9 +28,7 @@ if(NOT DEFINED SDKCONFIG_DEFAULTS)
     set(SDKCONFIG_DEFAULTS
         "${CMAKE_CURRENT_SOURCE_DIR}/../../sdkconfig_fragments/defaults"
         "${CMAKE_CURRENT_SOURCE_DIR}/../../sdkconfig_fragments/chip_esp32s3"
-        "${CMAKE_CURRENT_SOURCE_DIR}/../../sdkconfig_fragments/flash_4mbyte"
-        "${CMAKE_CURRENT_SOURCE_DIR}/../../sdkconfig_fragments/led_multicolour"
-        "${CMAKE_CURRENT_SOURCE_DIR}/../../sdkconfig_fragments/led_multicolour_onboard"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../sdkconfig_fragments/flash_8mbyte"
     )
 
     # The location of the partitions file for 4 Mbyte flash:
@@ -38,8 +36,8 @@ if(NOT DEFINED SDKCONFIG_DEFAULTS)
     # paths, they have to come in through CMake via a back door
     set(GENERATED_OVERRIDES "${CMAKE_BINARY_DIR}/sdkconfig.auto_paths.defaults")
     file(WRITE "${GENERATED_OVERRIDES}"
-        "CONFIG_PARTITION_TABLE_CUSTOM_FILENAME=\"${CMAKE_CURRENT_SOURCE_DIR}/../../sdkconfig_fragments/flash_4mbyte_partitions.csv\"\n"
-        "CONFIG_PARTITION_TABLE_FILENAME=\"${CMAKE_CURRENT_SOURCE_DIR}/../../sdkconfig_fragments/flash_4mbyte_partitions.csv\"\n"
+        "CONFIG_PARTITION_TABLE_CUSTOM_FILENAME=\"${CMAKE_CURRENT_SOURCE_DIR}/../../sdkconfig_fragments/flash_8mbyte_partitions.csv\"\n"
+        "CONFIG_PARTITION_TABLE_FILENAME=\"${CMAKE_CURRENT_SOURCE_DIR}/../../sdkconfig_fragments/flash_8mbyte_partitions.csv\"\n"
     )
     list(APPEND SDKCONFIG_DEFAULTS "${GENERATED_OVERRIDES}")
 endif()

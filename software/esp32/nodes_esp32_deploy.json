@@ -68,7 +68,17 @@
       "10.10.3.6":   { "app": "test",        "variant": "esp32s3-grb-4mbyte-psramheap" },
       "10.10.3.7":   { "app": "test",        "variant": "esp32s3-grb-4mbyte-psramheap" },
       "10.10.3.8":   { "app": "test",        "variant": "esp32s3-grb-4mbyte-psramheap" },
-      "10.10.3.9":   { "app": "test",        "variant": "esp32s3-grbgpio9-8mbyte-psramoctalheap" }
+      "10.10.3.9":   { "app": "test",        "variant": "esp32s3-grbgpio9-8mbyte-psramoctalheap" },
+      "10.10.3.10":  { "app": "test",        "variant": "esp32s3-grbgpio9-8mbyte-psramoctalheap" },
+      "10.10.3.11":  { "app": "test",        "variant": "esp32s3-grbgpio9-8mbyte-psramoctalheap" },
+      "10.10.3.12":  { "app": "test",        "variant": "esp32s3-grbgpio9-8mbyte-psramoctalheap" },
+      "10.10.3.13":  { "app": "test",        "variant": "esp32s3-grbgpio9-8mbyte-psramoctalheap" },
+      "10.10.3.14":  { "app": "test",        "variant": "esp32s3-grbgpio9-8mbyte-psramoctalheap" },
+      "10.10.3.15":  { "app": "test",        "variant": "esp32s3-grbgpio9-8mbyte-psramoctalheap" },
+      "10.10.3.16":  { "app": "test",        "variant": "esp32s3-grbgpio9-8mbyte-psramoctalheap" },
+      "10.10.3.17":  { "app": "test",        "variant": "esp32s3-grbgpio9-8mbyte-psramoctalheap" },
+      "10.10.3.18":  { "app": "test",        "variant": "esp32s3-grbgpio9-8mbyte-psramoctalheap" },
+      "10.10.3.19":  { "app": "test",        "variant": "esp32s3-grbgpio9-8mbyte-psramoctalheap" }
     }
 }
 

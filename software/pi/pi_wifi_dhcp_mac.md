@@ -6,30 +6,8 @@ Note: see `Doing It Automatically` below!!!
 This is done differently depending on whether you are using `nmcli` (the default for a Raspberry Pi) or `systemd-networkd` (the [nrmorrow](https://github.com/morrownr/USB-WiFi) approach).  The `nmcli` approach is kept below for historical interest, The Way is `systemd-networkd`.
 
 # `systemd-networkd` Scenario: This Is The Way
-## MAC Address Filtering
-This is done by configuring `hostapd`.
-
-- `sudo nano /etc/hostapd/hostapd.conf` and add to it:
-
-  ```
-  # Enable MAC address filtering
-  macaddr_acl=1
-
-  # Use an accept list (only these MACs can connect)
-  accept_mac_file=/etc/hostapd/accept_mac.txt
-  ```
-
-- `sudo nano /etc/hostapd/accept_mac.txt` and populate it with the MAC addresses you want to allow to connect, e.g.:
-
-  ```
-  a1:81:5c:10:2e:f3
-  84:d5:5c:63:51:4a
-  ```
-
-- `sudo systemctl restart hostapd` to apply the changes.
-
 ## Fixed IP Address Allocation
-This is done by modifying the configuration of `br0` in `systemd-networkd`.
+This is done by modifying the configuration in `systemd-networkd`.  Note that it must be done _before_ the device first connects (i.e. before you let the client onto the system by adding it to the MAC address filter), otherwise `systemd-networkd` gets confused; should this happen, stop `systemd-networkd` and delete the lease file with `sudo rm /var/lib/systemd/network/dhcp-server-lease/wlan0` before restarting it.
 
 - Edit your `wlan0` side network configuration file with `sudo nano /etc/systemd/network/20-wlan0.network` and add to it entries of the form:
 
@@ -56,6 +34,28 @@ This is done by modifying the configuration of `br0` in `systemd-networkd`.
   ```
   sudo arp
   ```
+
+## MAC Address Filtering
+This is done by configuring `hostapd`.
+
+- `sudo nano /etc/hostapd/hostapd.conf` and add to it:
+
+  ```
+  # Enable MAC address filtering
+  macaddr_acl=1
+
+  # Use an accept list (only these MACs can connect)
+  accept_mac_file=/etc/hostapd/accept_mac.txt
+  ```
+
+- `sudo nano /etc/hostapd/accept_mac.txt` and populate it with the MAC addresses you want to allow to connect, e.g.:
+
+  ```
+  a1:81:5c:10:2e:f3
+  84:d5:5c:63:51:4a
+  ```
+
+- `sudo systemctl restart hostapd` to apply the changes.
 
 # `nmcli` Scenario: Historical Interest Only
 ## MAC Address Filtering, `nmcli` Scenario: Historical Interest Only
