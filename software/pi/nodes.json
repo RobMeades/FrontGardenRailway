@@ -105,5 +105,89 @@
         "type": "test",
         "essential": false,
         "heartbeat_timeout": 60
+    },
+    "test_18": {
+        "ip": "10.10.3.20",
+        "type": "test",
+        "essential": false,
+        "heartbeat_timeout": 60
+    },
+    "test_19": {
+        "ip": "10.10.3.21",
+        "type": "test",
+        "essential": false,
+        "heartbeat_timeout": 60
+    },
+    "test_20": {
+        "ip": "10.10.3.22",
+        "type": "test",
+        "essential": false,
+        "heartbeat_timeout": 60
+    },
+    "test_21": {
+        "ip": "10.10.3.23",
+        "type": "test",
+        "essential": false,
+        "heartbeat_timeout": 60
+    },
+    "test_22": {
+        "ip": "10.10.3.24",
+        "type": "test",
+        "essential": false,
+        "heartbeat_timeout": 60
+    },
+    "test_23": {
+        "ip": "10.10.3.25",
+        "type": "test",
+        "essential": false,
+        "heartbeat_timeout": 60
+    },
+    "test_24": {
+        "ip": "10.10.3.26",
+        "type": "test",
+        "essential": false,
+        "heartbeat_timeout": 60
+    },
+    "test_25": {
+        "ip": "10.10.3.27",
+        "type": "test",
+        "essential": false,
+        "heartbeat_timeout": 60
+    },
+    "test_26": {
+        "ip": "10.10.3.28",
+        "type": "test",
+        "essential": false,
+        "heartbeat_timeout": 60
+    },
+    "test_27": {
+        "ip": "10.10.3.29",
+        "type": "test",
+        "essential": false,
+        "heartbeat_timeout": 60
+    },
+    "test_28": {
+        "ip": "10.10.3.30",
+        "type": "test",
+        "essential": false,
+        "heartbeat_timeout": 60
+    },
+    "test_29": {
+        "ip": "10.10.3.31",
+        "type": "test",
+        "essential": false,
+        "heartbeat_timeout": 60
+    },
+    "test_30": {
+        "ip": "10.10.3.32",
+        "type": "test",
+        "essential": false,
+        "heartbeat_timeout": 60
+    },
+    "test_31": {
+        "ip": "10.10.3.33",
+        "type": "test",
+        "essential": false,
+        "heartbeat_timeout": 60
     }
 }

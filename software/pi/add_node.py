@@ -24,6 +24,7 @@ The procedure for adding a new [ESP32S3] node becomes:
 
 1.  Locally build and download the test application to the board, making
     sure to reset `sdkconfig` and do a full clean.
+
 2.  Run the build and look for a line near the start, just before
     the output pauses for 5 seconds, of the form:
 
