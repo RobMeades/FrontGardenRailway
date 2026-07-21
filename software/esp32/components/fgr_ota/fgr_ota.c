@@ -421,6 +421,7 @@ static void task_ota(void *param)
  * -------------------------------------------------------------- */
 
 // Initialise OTA.
+// Initialise OTA.
 int32_t fgr_ota_init(fgr_ota_lib_is_good_cb_t msg_is_good_cb,
                      fgr_ota_lib_is_good_cb_t log_is_good_cb,
                      fgr_ota_app_is_good_cb_t app_is_good_cb,
@@ -449,7 +450,28 @@ int32_t fgr_ota_init(fgr_ota_lib_is_good_cb_t msg_is_good_cb,
     print_sha256(sha_256, "SHA-256 for current firmware: ");
 
     const esp_partition_t *running = esp_ota_get_running_partition();
-    ESP_LOGI(TAG, "Running from partition \"%s\"", running->label);
+    ESP_LOGI(TAG, "Running from partition \"%s\".", running->label);
+
+    // Check for invalid partition to retry on next reboot
+    // This runs on every boot when the device is on its working partition
+    const esp_partition_t* last_invalid = esp_ota_get_last_invalid_partition();
+    if (last_invalid != NULL) {
+        ESP_LOGI(TAG, "Found invalid partition: %s (offset 0x%08).",
+                 last_invalid->label, last_invalid->address);
+
+        // Only retry if we're NOT already running the invalid partition
+        // (this prevents retrying it again if it is currently running and failing)
+        if (last_invalid != running) {
+            ESP_LOGW(TAG, "Invalid partition detected. Device will attempt to boot it on next restart.");
+            // Set the boot partition to the invalid image
+            esp_err_t set_err = esp_ota_set_boot_partition(last_invalid);
+            if (set_err != ESP_OK) {
+                ESP_LOGE(TAG, "Failed to set boot partition to invalid partition: %s", esp_err_to_name(set_err));
+                // If we can't set it, just continue with normal boot
+            }
+        }
+    }
+
     esp_ota_img_states_t ota_state;
     if (esp_ota_get_state_partition(running, &ota_state) == ESP_OK) {
         ESP_LOGI(TAG, "Partition state at boot is %d.", ota_state);
