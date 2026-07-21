@@ -1101,13 +1101,13 @@ class WebController(Controller):
                     return first_value < 256
             return False
 
-        elif condition == 'has_large_allocation':  # NEW
-            # Alloc: highlight if any allocation > 10KB
+        elif condition == 'has_large_allocation':
+            # Alloc: highlight if any allocation > 25 kbytes
             if isinstance(data, list):
                 for item in data:
                     if isinstance(item, dict):
                         for bytes_allocated in item.values():
-                            if bytes_allocated > 10240:  # 10KB threshold
+                            if bytes_allocated > 25600:  # 25 kbytes threshold
                                 return True
             return False
 
@@ -1258,7 +1258,7 @@ class WebController(Controller):
         for item in data:
             if isinstance(item, dict):
                 for location, bytes_allocated in item.items():
-                    # Format bytes with K/M suffix for readability
+                    # Format bytes with k/M suffix for readability
                     if bytes_allocated >= 1024 * 1024:
                         formatted_bytes = f"{bytes_allocated // (1024 * 1024)}M"
                     elif bytes_allocated >= 1024:
@@ -9479,12 +9479,12 @@ class WebController(Controller):
                 isEvent: true
             },
             heap: {
-                title: 'Min Free Heap Memory (KB)',
+                title: 'Min Free Heap Memory (kbytes)',
                 yAxisLabel: '',
                 yAxisMin: 0,
                 valueFormatter: (v) => {
-                    if (v >= 1024 * 1024) return (v / (1024 * 1024)).toFixed(1) + ' MB';
-                    if (v >= 1024) return (v / 1024).toFixed(0) + ' KB';
+                    if (v >= 1024 * 1024) return (v / (1024 * 1024)).toFixed(1) + ' Mbytes';
+                    if (v >= 1024) return (v / 1024).toFixed(0) + ' kbytes';
                     return v + ' B';
                 }
             }
@@ -10876,20 +10876,16 @@ class WebController(Controller):
             const config = GRAPH_CONFIG[graphKey];
             const data = rawGraphData[graphKey];
 
-            // Completely destroy the old chart
-            if (graphCharts[graphKey]) {
-                graphCharts[graphKey].dispose();
-                delete graphCharts[graphKey];
-            }
-
-            // Clear the container
-            container.innerHTML = '';
+            // Get or create overlay reference
+            let overlay = document.getElementById('graph-overlay');
 
             if (isExpanded) {
                 // Collapse
                 graphCard.classList.remove('expanded');
-                const overlay = document.getElementById('graph-overlay');
-                if (overlay) overlay.remove();
+                if (overlay) {
+                    overlay.remove();
+                    overlay = null;
+                }
                 if (window._escapeHandler) {
                     document.removeEventListener('keydown', window._escapeHandler);
                     window._escapeHandler = null;
@@ -10901,8 +10897,17 @@ class WebController(Controller):
                 graphCard.style.zIndex = '';
                 graphCard.style.width = '';
                 graphCard.style.height = '';
+                // Ensure overlay is removed from the body
+                const existingOverlay = document.getElementById('graph-overlay');
+                if (existingOverlay) existingOverlay.remove();
 
-                // Create NEW chart with small fonts
+                // Destroy old chart and recreate with small fonts
+                if (graphCharts[graphKey]) {
+                    graphCharts[graphKey].dispose();
+                    delete graphCharts[graphKey];
+                }
+                container.innerHTML = '';
+
                 const option = buildChartOption(graphKey, data, config);
                 if (option.xAxis) option.xAxis.axisLabel = { fontSize: 8, margin: 4 };
                 if (option.yAxis) option.yAxis.axisLabel = { fontSize: 10 };
@@ -10919,20 +10924,23 @@ class WebController(Controller):
                 graphCharts[graphKey] = chart;
                 chart.graphStartTime = requestedStart / 1000;
 
-                // Re-attach click handler based on chart type
                 if (config.isEvent) {
-                    // Category chart (Wifi failure, disconnects, panics) drill-down click handler
                     setupGraphCategoryClickHandler(graphKey, chart);
                 } else {
-                    // Line chart - use the shared click handler
                     setupGraphTimeClickHandler(graphKey, chart, container);
                 }
 
             } else {
+                // Check if there's already an overlay from a previous expansion that wasn't cleaned up
+                if (overlay) {
+                    overlay.remove();
+                    overlay = null;
+                }
+
                 // Expand
                 graphCard.classList.add('expanded');
 
-                const overlay = document.createElement('div');
+                overlay = document.createElement('div');
                 overlay.id = 'graph-overlay';
                 overlay.style.cssText = `
                     position: fixed;
@@ -10962,7 +10970,13 @@ class WebController(Controller):
                 document.addEventListener('keydown', escapeHandler);
                 window._escapeHandler = escapeHandler;
 
-                // Create NEW chart with large fonts
+                // Destroy old chart and recreate with large fonts
+                if (graphCharts[graphKey]) {
+                    graphCharts[graphKey].dispose();
+                    delete graphCharts[graphKey];
+                }
+                container.innerHTML = '';
+
                 const option = buildChartOption(graphKey, data, config);
                 if (option.xAxis) option.xAxis.axisLabel = { fontSize: 14, margin: 8 };
                 if (option.yAxis) option.yAxis.axisLabel = { fontSize: 12 };
@@ -10979,12 +10993,9 @@ class WebController(Controller):
                 graphCharts[graphKey] = chart;
                 chart.graphStartTime = requestedStart / 1000;
 
-                // Re-attach click handler based on chart type
                 if (config.isEvent) {
-                    // Category chart (Wifi failure, disconnects, panics) drill-down click handler
                     setupGraphCategoryClickHandler(graphKey, chart);
                 } else {
-                    // Line chart - use the shared click handler
                     setupGraphTimeClickHandler(graphKey, chart, container);
                 }
             }
@@ -10994,7 +11005,63 @@ class WebController(Controller):
                 if (graphCharts[graphKey]) {
                     graphCharts[graphKey].resize();
                 }
+                // Double-check overlay cleanup after resize
+                if (!graphCard.classList.contains('expanded')) {
+                    const overlayCheck = document.getElementById('graph-overlay');
+                    if (overlayCheck) overlayCheck.remove();
+                }
             }, 50);
+        }
+
+        function updateExpandedGraphData(graphKey) {
+            // Only update the expanded graph's data without rebuilding the entire grid
+            const graphCard = document.querySelector(`.graph-card.expanded[data-graph="${graphKey}"]`);
+            if (!graphCard) return;
+
+            const container = document.getElementById(`graph-${graphKey}`);
+            if (!container) return;
+
+            const data = rawGraphData[graphKey];
+            if (!data || Object.keys(data).length === 0) return;
+
+            const config = GRAPH_CONFIG[graphKey];
+
+            // Fetch fresh data for just this graph
+            const now = Math.floor(Date.now() / 1000);
+            const startTime = now - (currentTimeRange.hours * 3600);
+
+            fetch('/api/graph/data', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    start_time: startTime,
+                    end_time: now,
+                    nodes: []
+                })
+            })
+            .then(response => response.json())
+            .then(newData => {
+                // Update the raw data
+                const newSeriesData = newData[graphKey] || {};
+
+                // Update rawGraphData
+                rawGraphData[graphKey] = newSeriesData;
+                currentChartData[graphKey] = newSeriesData;
+
+                // Update the chart
+                if (graphCharts[graphKey]) {
+                    const option = buildChartOption(graphKey, newSeriesData, config);
+                    graphCharts[graphKey].setOption(option, true);
+
+                    // Re-attach event handlers
+                    if (config.isEvent) {
+                        setupGraphCategoryClickHandler(graphKey, graphCharts[graphKey]);
+                    } else {
+                        setupGraphTimeClickHandler(graphKey, graphCharts[graphKey], container);
+                    }
+                }
+            })
+            .catch(e => console.error('Error updating expanded graph:', e));
         }
 
         // Modify the auto-refresh button creation in setupGraphEventListeners()
@@ -11072,12 +11139,31 @@ class WebController(Controller):
                     // Only refresh if graph view is visible and auto-refresh is enabled
                     const graphContainer = document.getElementById('graphViewContainer');
                     if (graphContainer && graphContainer.style.display !== 'none' && graphAutoRefreshEnabled) {
+                        // Check if any graph is expanded
+                        const expandedGraph = document.querySelector('.graph-card.expanded');
+                        if (expandedGraph) {
+                            // If a graph is expanded, DON'T auto-refresh - wait until it's collapsed
+                            // Just update the data silently without rebuilding the UI
+                            const graphKey = expandedGraph.dataset.graph;
+                            if (graphKey && rawGraphData[graphKey]) {
+                                // Refresh just the expanded chart's data
+                                updateExpandedGraphData(graphKey);
+                            }
+                            return;
+                        }
+
                         // Clear cache and reload
                         const now = Math.floor(Date.now() / 1000);
                         const startTime = now - (currentTimeRange.hours * 3600);
                         const cacheKey = `${currentTimeRange.hours}_${Math.floor(startTime / 60)}`;
                         delete simpleCache[cacheKey];
+
+                        // Save expanded state before loading
+                        const wasExpanded = document.querySelector('.graph-card.expanded');
+                        const expandedKey = wasExpanded ? wasExpanded.dataset.graph : null;
+
                         loadGraphs();
+
                         // Visual feedback on refresh
                         const refreshBtn = document.getElementById('refreshGraphsBtn');
                         if (refreshBtn) {
