@@ -46,3 +46,112 @@ To monitor how the system is performing, `sudo crontab -e` and add:
 ```
 
 ...replacing `<your home directory name>` with your user name.  This will write performance information to `/mnt/fgr_data/monitoring` every minute: see inside [`performance_check.sh`](performance_check.sh) for more details.
+
+# UPS
+Since the journal and database are written to disk, even though the main SD card is read-only, it may be desirable to run the Raspberry Pi from a UPS. A UPS such as the [Eaton 3P700UI](https://www.eaton.com/gb/en-gb/skuPage.3P700UI.html) has sufficient oomph and has a USB monitoring output that is accepted by `nut` (Network UPS Tools), the default Linux UPS management client.  Installation/configuration is as follows.
+
+- Install `nut` with:
+
+  ```
+  sudo apt install nut nut-client
+  ```
+
+- Edit the `nut` configuration file to set standalone mode with `sudo nano /etc/nut/nut.conf` and set:
+
+  ```
+  MODE=standalone
+  ```
+
+- With the UPS's monitoring output plugged into a USB port of the Raspberry Pi, enter `lusb`.  You should see something like:
+
+  ```
+  Bus 001 Device 002: ID 0463:ffff MGE UPS Systems UPS
+  ```
+
+- Create a `udev` rules file to give appropriate permissions to access the device with `sudo nano /etc/udev/rules.d/52-nut-usb.rules` and giving the file contents:
+
+  ```
+  SUBSYSTEM=="usb", ATTRS{idVendor}=="0463", ATTRS{idProduct}=="ffff", MODE="0660", GROUP="nut"
+  ```
+
+  ...replacing the values of `idVendor` and `idProduct` as appropriate.
+
+- Reload `udev` rules with:
+
+  ```
+  sudo udevadm control --reload-rules
+  sudo udevadm trigger
+  ```
+
+- Add the `nut` user to the appropriate groups with:
+
+  ```
+  sudo usermod -a -G dialout nut
+  sudo usermod -a -G plugdev nut
+  ```
+
+- Un-plug and re-plug the USB cable.
+
+- Define the UPS in `nut` by `sudo nano /etc/nut/ups.conf` and creating an entry, for instance:
+
+  ```
+  [eaton]
+    driver = usbhid-ups
+    port = auto
+    desc = "Eaton 3P700UI"
+  ```
+
+- Test that the UPS has been detected with `sudo upsdrvctl start`: you should see something like:
+
+  ```
+  Network UPS Tools - UPS driver controller 2.8.1
+  Network UPS Tools - Generic HID driver 0.52 (2.8.1)
+  USB communication driver (libusb 1.0) 0.46
+  Duplicate driver instance detected (PID file /run/nut/usbhid-ups-eaton.pid exists)! Terminating other driver!
+  Using subdriver: MGE HID 1.46
+  ```
+
+- The duplicate driver error may occur if `nut-server` was already running: tidy it up with:
+
+  ```
+  sudo systemctl restart nut-server
+  ```
+
+- `upsc eaton@localhost` should then read data from the UPS.
+
+- Because `nut` is designed to work across a network, it requires authentication.  Create a user with `sudo nano /etc/nut/upsd.users` and appending:
+
+  ```
+  [upsmon]
+    password = nut123
+    upsmon master
+  ```
+
+  ...then `sudo nano /etc/nut/upsmon.conf` and adding near the top, in the `MONITOR` section:
+
+  ```
+  MONITOR eaton@localhost 1 upsmon nut123 master
+  ```
+
+- To stop `nut` belly-aching about SSL, create a drop-in directory with `sudo mkdir -p /etc/systemd/system/nut-monitor.service.d`, then `sudo nano /etc/systemd/system/nut-monitor.service.d/environ.conf` and give the file contents:
+
+  ```
+  [Service]
+  Environment="NUT_QUIET_INIT_SSL=true"
+  ```
+
+  ...and also add this to your `bash` shell with `sudo nano ~/.bashrc` and appending:
+
+  ```
+  # Stop nut belly-aching about SSL
+  export NUT_QUIET_INIT_SSL=true
+  ```
+
+  ...then `source ~/.bashrc` to reload the configuration.
+
+- Start and enable services with:
+
+  ```
+  sudo systemctl start nut-server nut-monitor
+  sudo systemctl enable nut-server nut-monitor
+  ```
