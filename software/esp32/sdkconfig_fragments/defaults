@@ -1,0 +1,29 @@
+# Default sdkconfig parameters, designed to be used with OTA and for maximum robustness
+
+# Enable stack checking in all functions to catch memory corruption early
+CONFIG_COMPILER_STACK_CHECK_MODE_ALL=y
+
+# Verify all flash writes to ensure data integrity
+CONFIG_SPI_FLASH_VERIFY_WRITE=y
+# Explicitly disable NVS encryption to keep the storage simple and robust
+CONFIG_NVS_ENCRYPTION=n
+
+# Enable the Interrupt WDT to catch blocked interrupts (default anyway, but just in case)
+CONFIG_ESP_INT_WDT=y
+# Enable the Task WDT to catch stuck tasks (default anyway, but just in case)
+CONFIG_ESP_TASK_WDT_INIT=y
+# 15 second watchog time, though fgr_monitor will come 5 seconds before this:
+# long enough to connect to WiFi and do an OTA update
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=15
+# Make the Task WDT cause a panic (and thus a reset) on timeout
+CONFIG_ESP_TASK_WDT_PANIC=y
+
+# Enable core dumps (needs coredump region of size at least 64 kbytes in partitions.csv)
+CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
+CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y
+
+# Enable comprehensive heap corruption detection
+CONFIG_HEAP_POISONING_COMPREHENSIVE=y
+
+# Enable roll-back of OTA'ed images on a panic/crash
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y

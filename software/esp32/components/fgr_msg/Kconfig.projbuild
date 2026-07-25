@@ -1,0 +1,13 @@
+menu "FGR Message Configuration"
+
+    config FGR_MSG_PORT
+        int "The messaging port number of the controller"
+        default 5000
+        range 1024 65535
+
+    config FGR_MSG_HEARTBEAT_SECONDS
+        int "how often to check the underlying channel"
+        default 60
+        range 30 65535
+
+endmenu

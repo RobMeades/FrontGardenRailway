@@ -1,0 +1,3 @@
+# sdkconfig parameters for a multi-colour LED that expects colours in order GRB
+
+CONFIG_FGR_DEBUG_LED_WS2812_GRB=y

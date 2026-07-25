@@ -1,0 +1,16 @@
+menu "FGR Metrics Configuration"
+
+    config FGR_METRICS_PERIOD_SECONDS
+        int "how often to collect timed metrics and report them"
+        default 30
+        range 10 65535
+        help
+            Set to less than the log heartbeat for maximum efficiency and not the
+            same as the message heartbeat to avoid peaky send activity.
+
+    config FGR_METRICS_RSSI_AVERAGE_TIME_SECONDS
+        int "how long to average the RSSI over"
+        default 10
+        range 1 10
+
+endmenu

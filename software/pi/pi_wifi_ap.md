@@ -1,168 +1,382 @@
 # Introduction
-These instructions describe how to set up a Wi-Fi access point on a headless Pi Zero W.  Note that, on the version of Raspbian I was using (Trixie), any attempt to set an access point with security failed, so these instructions set up an open Wi-Fi access point (security is provided later through [MAC address filtering](pi_wifi_dhcp_mac.md)).
+These instructions describe how to set up a Wi-Fi access point on a headless Pi.  Note that, on the version of Raspbian I was using (Trixie), any attempt to set an access point with security failed, so these instructions set up an open Wi-Fi access point (security is provided later through [MAC address filtering](pi_wifi_dhcp_mac.md)).
+
+NOTE: in all cases below, when pasting contents into a file, ensure there are no leading spaces.
 
 # Preparation
-Since the Pi will lose connectivity to your Wi-Fi network (you do _not_ want an open access point on your Wi-Fi network) you must have a serial connection to the headless Pi.
 
-- If you have hardened the Pi, enter `rw` to make the Pi writeable.
+## Installations
+Since the Pi will lose connectivity to your Wi-Fi network (you do _not_ want an open access point on your Wi-Fi network) you must have a serial connection to a headless Pi Zero (e.g. using a 3V3 FTDI cable, black to GND, yellow (RXD) to GPIO14 (TXD), orange (TXD) to GPIO15 (RXD)), or an Ethernet connection to a bigger Pi.
 
 - The Pi will also lose connectivity to the internet, so install a few useful things first:
 
   - `sudo apt install git`: 'cos you'll need that for the next line,
 
-  - `git clone https://github.com/RobMeades/MusicalBox.git`: 'cos you will need the `https_server.py` script,
+  - `git clone https://github.com/RobMeades/FrontGardenRailway.git`: 'cos you will need the various Python scripts,
 
   - `sudo apt install python3-aiohttp`: which will be needed by `https_server.py`,
 
   - `sudo apt install python3-systemd`: which will be needed by `log_server.py`,
 
-  - `sudo apt install python3-aiohttp-jinja2`: which will be needed by `web_server.py`,
+  - `sudo apt install minicom`: serial communications program,
 
   - `sudo apt install lrzsz`: this allows the `minicom` and `picocom` serial communications programs to perform file transfer,
-  
-  - `sudo apt install iptables iptables-persistent`: will be needed for MAC address filtering,
 
-  - `sudo apt install tcpdump`: can be handy for debugging,
+  - `sudo apt install hostapd systemd-resolved`: needed for networking with the [nrmorrow](https://github.com/morrownr/USB-WiFi) approach, which is The Way,
 
-- Connect a PC to the Pi's serial port and log in to it, e.g. `minicom -D /dev/ttyUSB0` on Linux.
+  - `sudo apt install tcpdump lsof jq`: can be handy for debugging,
 
-- Check that binary file uploads and downloads work, e.g. in `minicom` `CTRL-A`, `S`, `zmodem`, then find a binary file (e.g. the `stepper.bin` file that you will have built when testing the musical box) and send it, rename the uploaded file to something like `stepper_new.bin`, then in the `minicom` terminal type `sz stepper_new.bin` to send the file back, leave `minicom` and finally, on Linux, `diff stepper.bin stepper_new.bin` should produce no output (i.e. the files are the same).
+  - `sudo apt install sqlite3`: may be needed later when you are debugging the database,
 
-# AP Setup
-Connect to the Pi using a serial terminal and set the AP up as follows:
+  - History: `sudo apt install iptables iptables-persistent` was needed for MAC address filtering, but only in ye old `nmcli` scenario, no longer required.
 
-- On the Pi, `sudo nano /etc/NetworkManager/NetworkManager.conf` and:
+- If you are using a Pi Zero, with no Ethernet port, make sure you have serial access to it as follows:
 
-  - In the section `[ifupdown]` change `managed` to `true` (otherwise you won't be able to create a new connection).
+  - Connect a PC to the Pi's serial port and log in to it, e.g. `minicom -D /dev/ttyUSB0` on Linux.
 
-  - Add a section:
-    ```
-    [802-11-wireless]
-    # Switch power saving off to avoid poll time-outs
-    powersave=2
-    ```
+  - Check that binary file uploads and downloads work, e.g. in `minicom` `CTRL-A`, `S`, `zmodem`, then find a binary file (let's call it `blah.bin`) and send it, rename the uploaded file to something like `blah_new.bin`, then in the `minicom` terminal type `sz blah_new.bin` to send the file back, leave `minicom` and finally, on Linux, `diff blah.bin blah_new.bin` should produce no output (i.e. the files are the same).
+
+## Easier SSH Access
+To avoid having to enter a password all the time, and so that [`nodes_esp32_deploy.py`](../esp32/nodes_esp32_deploy.py) can restart `https_server` should it need to, on the /[Linux, 'cos building is way faster on Linux /] development machine where you are building the ESP-IDF FW, generate an SSH key with:
+
+  ```
+  ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519_fgr -N ""
+  ```
+
+- This will create two files inside your `.ssh` directory: leave the private key `id_ed25519_fgr` where it is and never share it.
+
+- On the machine where you generated the key pair, copy the public key `id_ed25519_fgr.pub` to the Pi with:
+
+  ```
+  ssh-copy-id -i ~/.ssh/id_ed25519_fgr.pub username@ip
+  ```
+
+  ...where `username` is replaced with your username on the Pi and `ip` with the IP address of the Pi.
+
+- Check that this has worked by logging in manually from that machine with:
+
+  ```
+  ssh username@ip
+  ```
+
+  ...where `username` is replaced with your username on the Pi and `ip` with the IP address of the Pi; you should end up logged in without being prompted for a password.
+
+# AP Setup: History
+I spent quite a while stabilizing the AP behaviour of the Pi, please refer to the section `AP Setup: The Way` below for how it should be done; these notes kept for historical interest only.
+
+## Wi-Fi Hardware History
+I found the Pi Zero W on-board Wi-Fi to be far too unstable in AP mode, see these posts for details:
+
+[https://forums.raspberrypi.com/viewtopic.php?p=2374992](https://forums.raspberrypi.com/viewtopic.php?p=2374992)
+[https://github.com/raspberrypi/firmware/issues/1768#issuecomment-4084988745](https://forums.raspberrypi.com/viewtopic.php?p=2374992)
+
+Hence I switched to a Pi Zero I happened to have spare, later a Pi 5 and plugged in a USB Wi-Fi dongle: be careful which you choose!  The  TP-link Archer T2U AC600 Nano Wi-Fi adapter (`rtl8811au` chipset) looked good initially, but on a Pi Zero which at the time had only `6.12.75+rpt-rpi-v6`, the drivers were not good: only one of the three Linux drivers (which you must build yourself for Linux kernel versions > 6.14) I tried worked and the working one did not support transmission of TIM information elements which are required for a standards-compliant Wi-Fi AP (ESP32 refused to connect).
+
+So I switched to an Atheros AR9271 USB Wi-Fi adapter, which is huge but is known to work with Linux and there are built-in drivers for it that have been around for a decade.  And, whaddaya know, the `AR9271` driver has known instabilities also, instabilities which can crash the Linux kernel (`ar9002_hw_calibrate()` dereferencing a NULL pointer), bless its little cotton socks.  The only way out of _this_ was to rely on the watchdog which is already enabled on a Pi by default, though my experience is that the USB is left in a state where only a hard reboot will recover. Ugh.
+
+And then I discovered that the Atheros AR9271 has a limit of just seven clients in AP mode.  Double ugh.
+
+Finally, I was pointed at [nrmorrow on Github](https://github.com/morrownr/USB-WiFi) as the authority on Wi-Fi on Linux and followed their lead.
+
+## Networking Software History
+I originally ran networking using `nmcli`, since that is the default on a Pi, however since being introduced to [nrmorrow on Github](https://github.com/morrownr/USB-WiFi) I moved to using `systemd-resolved` and `systed-networkd`.  The `nmcli` method is kept here in case if it is of interest.
+
+Connect to a Pi Zero using a serial terminal, or a bigger Pi using Ethernet, and set the AP up as follows:
+
+- On the Pi, `sudo nano /etc/NetworkManager/NetworkManager.conf` and, if the `plugins` line has `ifupdown` in it, remove it (so it might become `plugins=keyfile`), otherwise you won't be able to create a new connection.
+
+- On the Pi, create a Wi-Fi-specific NetworkManager configuration file with `sudo nano /etc/NetworkManager/conf.d/99-wifi-powersave.conf` and give it the contents:
+
+  ```
+  [connection]
+  # Switch power saving off to avoid poll time-outs
+  wifi.powersave = 2
+  ```
 
 - Restart NetworkManager with:
 
-  `sudo systemctl restart NetworkManager`
+  ```
+  sudo systemctl restart NetworkManager
+  ```
+
+- NOTE: originally, when using the Pi Zero W's own Wi-Fi, I suffered occasional crashes of the Broadcomm Wi-Fi driver, apparently due to SDIO communication hanging, for which the suggested workaround was to create and populate a driver modification file with:
+
+  ```
+  echo "options brcmfmac roamoff=1 feature_disable=0x82000" | sudo tee /etc/modprobe.d/brcmfmac.conf
+  ```
 
 - Now you can create the access point with:
 
-  `sudo nmcli connection add type wifi ifname wlan0 con-name MusicalBox autoconnect yes ssid MusicalBox`
+  ```
+  sudo nmcli connection add type wifi ifname wlan0 con-name FGR autoconnect yes connection.autoconnect-priority 1 ssid FGR
+  ```
 
 - Set some properties for the access point with:
 
-  `sudo nmcli connection modify MusicalBox 802-11-wireless.mode ap 802-11-wireless.band bg ipv4.method shared ipv4.addresses 10.10.3.1/24`
+  ```
+  sudo nmcli connection modify FGR 802-11-wireless.mode ap 802-11-wireless.band bg ipv4.method shared ipv4.addresses 10.10.3.1/24
+  ```
+
+- Also set retries to zero to stop the Network Manager black-listing a device that repeatedly tries to connect:
+
+  ```
+  sudo nmcli connection modify FGR connection.autoconnect-retries 0
+  ```
+
+- If there is a pre-existing Wi-Fi station configuration, make sure it does not auto-connect ever with:
+
+  ```
+  sudo nmcli connection modify <connection name> connection.autoconnect no
+  sudo nmcli connection down <connection name>
+  ```
 
 - Finally, bring up the AP with:
 
-  `sudo nmcli connection up MusicalBox`
-
-- If you want to bring the AP down, `sudo nmcli connection down MusicalBox` and the Pi will return to having a connection to your Wi-Fi network.
-
-# HTTPS Server Setup
-All of the ESP32 boards will want to make an HTTPS connection to the access point to download updates to their programs; this is what the Python script `https_server.py` does.  To get it running with the ESP32s, connect a serial terminal to the Pi and do the following:
-
-- Create a directory off your home directory named `fw`.
-
-- Copy the `https_server.py` script to this directory with:
-
-  `cp ~/MusicalBox/software/pi/https_server.py ~/fw`
-
-- `cd` to that directory and run SSL to create a key pair with:
-
-  `openssl req -newkey rsa:2048 -x509 -days 36500 -nodes -out ca_cert.pem -keyout ca_key.pem`
-
-  ...leaving all entries blank by entering `.` _except_ the Common Name entry, which *must* be set `10.10.3.1` (the IP address of the Pi as an access point).
-
-- On a PC which has the ESP32 software environment installed on it, and has a clone of this repository, replace the file `MusicalBox/software/esp32/stepper/server_certs/ca_cert.pem` with the `ca_cert.pem` you just generated.
-
-- Build the ESP-IDF `stepper` application with the flag `CONFIG_STEPPER_TEST_ROTATION` set to 1 (leave the flag `CONFIG_STEPPER_NO_WIFI` set to 0 so that the ESP32 _should_ contact the new server).
-
-- Copy the newly created `stepper.bin` file to the `~/fw` directory on the Pi.
-
-- On the Pi, run the script:
-
-  `python https_server.py`
-
-- Plug the same build PC into an ESP32 (likely the one that is inside the stand of the musical box), flash the newly created `stepper.bin` to the ESP32 and monitor the output of the ESP32.  You should see that the ESP connects to the Wi-Fi access point of the Pi, downloads at least the start of the file `stepper.bin` via HTTPS, realises it does not need to do an update, drops the HTTPS connection and continues to the motor rotation part of the test.
-
-- If this all works, create `sudo nano /lib/systemd/system/https_server.service` with the following contents:
-
   ```
-  [Unit]
-  Description=HTTPS Server
-  After=multi-user.target
-
-  [Service]
-  Type=simple
-  WorkingDirectory=/home/<your home directory name>/fw/
-  ExecStart=python /home/<your home directory name>/fw/https_server.py
-  KillSignal=SIGINT
-  Restart=on-failure
-
-  [Install]
-  WantedBy=multi-user.target
+  sudo nmcli connection up FGR
   ```
 
-- Test that the service starts with:
+- You should now be able to connect to this open Wi-Fi `FGR` access point from any device.
 
-  `sudo systemctl start https_server`
+- If you want to bring the AP down, `sudo nmcli connection down FGR` and the Pi will return to having a connection to your Wi-Fi network.
 
-  ... and:
+# AP Setup: The Way
+After being introduced to [nrmorrow on Github](https://github.com/morrownr/USB-WiFi) I followed their lead on choice of HW and software.  This is The Way.
 
-  `sudo systemctl status https_server`
+## Wi-Fi Hardware
+In HW terms, it turns out that the TP-link Archer T2U AC600 Nano Wi-Fi adapter (`rtl8811au` chipset) is able to handle more clients and, once I had switched to a 64-bit Pi 5, the Linux version became `6.18.34+rpt-rpi-2712` and that _does_ have capable drivers, with the TIM IE, in fact drivers written by [dubhater on Github](https://github.com/dubhater) who supports [nrmorrow on Github](https://github.com/morrownr/USB-WiFi).  So I switched back to the nice neat TP-link Archer T2U AC600 Nano.
 
-  ...should show nice green things.  Maybe reboot the ESP32 and watch its output again as it connects to the Wi-Fi AP and the HTTPS server to ensure all is good.  You might also run:
+## Pi Configuration
+Connect to a Pi Zero using a serial terminal, or a bigger Pi using Ethernet, and set the Pi up as follows.
 
-  `journalctl -u https_server.service -f`
-
-  ...on the Pi to live-monitor the output of the `https_server` service as the ESP32 is connecting.
-
-- To make the service run at boot:
-
-  `sudo systemctl enable https_server`
-
-  ...then take the power down and up again; the motor attached to the ESP32 should rotate once everything has come up.
-
-- If you had hardened the Pi, put it back into read-only mode with the command `ro`.
-
-# Log Server Setup
-If your \[ESP32\] connected devices are able to send their log messages to this server over TCP, `log_server.py` can be run to listen for them and stuff the messages into the journal.  To get this script to run at boot, making sure port 5001 (the default port it will listen on) and then:
-
-- `sudo nano /lib/systemd/system/log_server.service` with the following contents:
+- Assuming you do _not_ need the on-board Wi-Fi on the Pi Zero W (or a bigger Pi) operating in client mode, `sudo nano /boot/firmware/config.txt` and add, near the top:
 
   ```
-  [Unit]
-  Description=Log Server
-  After=multi-user.target
-
-  [Service]
-  Type=simple
-  WorkingDirectory=/home/<your home directory name>/MusicalBox/software/pi
-  ExecStart=python /home/<your home directory name>/MusicalBox/software/pi/log_server.py
-  KillSignal=SIGINT
-  Restart=on-failure
-
-  [Install]
-  WantedBy=multi-user.target
+  # Disable on-board Wi-Fi
+  dtoverlay=disable-wifi
   ```
 
-- Test that the service starts with:
+  ...then reboot.
 
-  `sudo systemctl start log_server`
+- If using a Pi 5 and supplying sufficient power for all things plugged into it (25 Watts), you may need to tell the Pi that this so.  If:
 
-  ... and:
+  ```
+  od --endian=big -i /sys/firmware/devicetree/base/chosen/power/max_current
+  ```
 
-  `sudo systemctl status log_server`
+  ...does not produce a response with `5000` on the first line (i.e. 5 Amps has been negotiated), you can tell the Pi that it really has got enough power with
 
-  ...should show nice green things.  To view the log messages:
-  
-  `journalctl -t esp32-device`
-  
-- To make the service run at boot:
+  ```
+  sudo rpi-eeprom-config -e
+  ```
 
-  `sudo systemctl enable log_server`
+  ...and adding on the end:
 
-# X Server Setup
-Follow the pattern above to set up anything (e.g. `web_server.py` for the control interface to the musical box) as a run-from-boot service on the Pi.
+  ```
+  PSU_MAX_CURRENT=5000
+  ```
+
+- To make sure the Pi supplies the full 1.6 Amps to the USB peripherals, `sudo nano /boot/firmware/config.txt` and add to the end:
+
+  ```
+  usb_max_current_enable=1
+  ```
+
+- Reboot and hopefully all will be good.
+
+## Networking Software
+In SW terms, [nrmorrow](https://github.com/morrownr/USB-WiFi) uses `hostapd` directly and `systemd-networkd`, which seems more sensible for a server anyway, so the software AP setup here follows [that pattern](https://github.com/morrownr/USB-WiFi/blob/main/home/AP_Mode/Bridged_Wireless_Access_Point.md) with one difference: rather than setting up a bridge, we set up a router.  The reason for this is that we need to run a DHCP server for the devices on the Wi-Fi access point and, with a bridge, that DHCP server would see the Ethernet port as well as the Wireless LAN: the local DHCP server will end up serving 10.10.3.x addresses to things that happen to broadcast DHCP requests on the wired network looking for the DHCP server on the main router.
+
+- To stop `nmcli` trying to fight for control of the W-Fi hardware, `sudo nano /etc/NetworkManager/NetworkManager.conf` and add:
+
+  ```
+  [keyfile]
+  unmanaged-devices=interface-name:wlan0
+  ```
+
+  ...then `sudo systemctl restart NetworkManager` for the change to take effect.
+
+- Start and enable `systemd-resolved` with:
+
+  ```
+  sudo systemctl start systemd-resolved
+  sudo systemctl enable systemd-resolved
+  ```
+
+- For backwards compatibility, `symlink` the configuration file that `systemd-resolved` will have created to `/etc/resolv.conf` with:
+
+  ```
+  sudo rm /etc/resolv.conf
+  sudo ln -s /run/systemd/resolve/resolv.conf /etc/resolv.conf
+  ```
+
+- `systemd-networkd` expects to be able to write lease durations to disk; since our microSDHC card will be read only, put the location it uses for that on a RAM disk with `sudo nano /etc/fstab` and adding at the end:
+
+  ```
+  tmpfs   /var/lib/systemd/network   tmpfs   defaults,size=1M,mode=0755,uid=systemd-network,gid=systemd-network   0   0
+  ```
+
+  ...making sure there is no white space at the start of the line, then `sudo reboot`.
+
+- Enable `systemd-networkd` with:
+
+  ```
+  sudo systemctl enable systemd-networkd
+  ```
+
+- Create the `eth0` side with `sudo nano /etc/systemd/network/10-eth0.network`, pasting in the contents:
+
+  ```
+  [Match]
+  Name=eth0
+
+  [Network]
+  # DHCP client will obtain IP and gateway from router
+  DHCP=yes
+  # Enable IPv4 forwarding
+  IPv4Forwarding=yes
+  IPv6Forwarding=no
+
+  [DHCPv4]
+  UseDNS=true
+  UseNTP=true
+  # Send hostname to DHCP server
+  SendHostname=true
+  Hostname=FGR
+  # Use DHCP client identifier (MAC address)
+  ClientIdentifier=mac
+  # Anonymize=false means we send full hostname
+  Anonymize=false
+  ```
+
+- Create the `wlan0` side with `sudo nano /etc/systemd/network/20-wlan0.network`, pasting in the contents:
+
+  ```
+  [Match]
+  Name=wlan0
+
+  [Network]
+  # Static IP for the wireless network
+  Address=10.10.3.1/24
+  # Enable DHCP server for wireless clients
+  DHCPServer=yes
+
+  [DHCPServer]
+  # Pool starts at 10.10.3.2 (offset 1 means start at .2)
+  PoolOffset=1
+  PoolSize=253
+  # DNS servers for clients - use the router's DNS
+  DNS=10.10.2.1
+  ```
+
+- Switch IP forwarding on globally by doing `sudo nano /etc/systemd/networkd.conf` and adding to the `[Network]` section:
+
+  ```
+  # Enable IPv4 forwarding globally
+  IPv4Forwarding=yes
+  IPv6Forwarding=no
+  ```
+
+- Configure `nftables` firewall/NAT with `sudo nano /etc/nftables.conf`,  pasting in the contents:
+
+  ```
+  #!/usr/sbin/nft -f
+
+  flush ruleset
+
+  table ip nat {
+      chain prerouting {
+          type nat hook prerouting priority dstnat; policy accept;
+      }
+
+      chain postrouting {
+          type nat hook postrouting priority srcnat; policy accept;
+          oifname "eth0" masquerade
+      }
+  }
+
+  table ip filter {
+      chain input {
+          type filter hook input priority filter; policy drop;
+          ct state { established, related } accept
+          iifname "lo" accept
+          tcp dport 22 accept
+          ip protocol icmp accept
+          iifname "wlan0" udp dport 67 accept
+          iifname "wlan0" udp dport 53 accept
+      }
+
+      chain forward {
+          type filter hook forward priority filter; policy drop;
+          ct state { established, related } accept
+          iifname "wlan0" oifname "eth0" accept
+          iifname "eth0" oifname "wlan0" ct state { established, related } accept
+      }
+
+      chain output {
+          type filter hook output priority filter; policy accept;
+      }
+  }
+  ```
+
+- Enable `nftables` with:
+
+  ```
+  sudo systemctl enable nftables
+  ```
+
+- Enable the Wi-Fi access point to start at boot with:
+
+  ```
+  sudo systemctl unmask hostapd
+  sudo systemctl enable hostapd
+  ```
+
+- Copy the contents of `hostapd.conf` to `/etc/hostapd/hostapd.conf`.
+
+- Make a copy of the `hostapd` service file then edit it with:
+
+  ```
+  sudo cp /usr/lib/systemd/system/hostapd.service /etc/systemd/system/hostapd.service
+  sudo nano /etc/systemd/system/hostapd.service
+  ```
+
+  ...and in it:
+
+    - change `RestartSec` to 3,
+    - if there is an `EnvironmentFile=` line, comment it out,
+    - add the line `Environment="DAEMON_OPTS=-d -K -f /mnt/fgr_data/hostapd.log"`,
+    - change the `Environment=DAEMON_CONF=` line to be `Environment="DAEMON_CONF=/etc/hostapd/hostapd.conf"`,
+    - add `ExecStartPre=/bin/sleep 6` before the `ExecStart=` line,
+    - change the `ExecStart=` line to be `ExecStart=/usr/sbin/hostapd -B -P /run/hostapd.pid $DAEMON_OPTS $DAEMON_CONF`.
+
+- `sudo reboot` and Bob might be your mother's brother.
+
+# Ghosts And Broadcomm Driver Instability
+There appears to be [a\[nother\] bug](https://github.com/raspberrypi/linux/issues/6975) in the `brcmfmac` driver, in that the driver holds onto a station that has disconnected without notice for anywhere from 27 to 90+ seconds. No matter how many times the device boots up within this time, if it sends an association frame while that stale kernel window is active, the Pi completely ignores it.  Because the Pi ignores the frames indefinitely while the old session decays, the device connection times out, resulting in a persistent Wi-Fi 201 error.
+
+To fix this, and it might be a good idea to do this whether you are using the on-board Pi Wi-Fi or not, Google Gemini wrote me a bash script `clear_node_ghosts.sh` which scans the output of `iw dev wlan0 station dump` every second and deletes any inactive MAC addresses.  Make this run with `sudo nano /etc/systemd/system/clear_node_ghosts.service`, pasting in the following:
+
+```
+[Unit]
+Description=Force-Clear Ghost Node Connections from Station Table
+After=NetworkManager.service
+
+[Service]
+Type=simple
+ExecStart=/home/<your home directory name>/FrontGardenRailway/software/pi/clear_node_ghosts.sh
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+```
+
+...replacing `<your home directory name>` with your user name, then:
+
+```
+sudo systemctl start clear_node_ghosts
+sudo systemctl enable clear_node_ghosts
+```
+
+...to run it and have it start at boot.
+

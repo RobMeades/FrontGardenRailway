@@ -1,0 +1,6 @@
+**/build/*
+*.old
+**/.vscode/*
+**/.clangd
+**/__pycache__/*
+sdkconfig

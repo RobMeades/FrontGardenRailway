@@ -1,0 +1,16 @@
+menu "FGR Log Configuration"
+
+    config FGR_LOG_PORT
+        int "The port number of the logging collector on the controller"
+        default 5001
+        range 1024 65535
+
+    config FGR_LOG_HEARTBEAT_SECONDS
+        int "how often to check the underlying channel"
+        default 60
+        range 30 65535
+        help
+            If metrics are being sent to logging, set this to more than the
+            metrics period for maximum efficiency.
+
+endmenu

@@ -1,0 +1,3 @@
+# sdkconfig parameters specific to a single colour LED on pin 21
+
+CONFIG_FGR_DEBUG_LED_PIN=21

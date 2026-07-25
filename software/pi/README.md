@@ -1,8 +1,25 @@
 # Introduction
-This folder contains the Python scripts that run on the Raspberry Pi server of the front garden railway, plus explanatory `README.md`s describing how to set it up.
+This folder contains the Python and bash scripts that run on the Raspberry Pi server of the front garden railway (plus one that runs on the build PC), plus explanatory `README.md`'s describing how to set it up.
 
-- `pi_read_only_file_system.md`: how to set up the Raspberry Pi to have a read only SD card, for robustness to power just going away,
-- `pi_wifi_ap.md`: how to set up the Pi as a Wi-Fi access point,
-- `pi_wifi_dhcp_mac.md`: how to set up the Pi to do DHCP with static IP addresses for known things, and only allow known MAC addresses to connect,
-- `https_server.py`: the HTTPS server that provides OTA updates to the connected ESP32s,
-- `binary_file_version.py`: a utility that extracts the version information from an ESP32 compiled binary file.
+- [`pi_read_only_file_system.md`](pi_read_only_file_system.md): how to set up the Raspberry Pi to have a read only SD card, for robustness to power just going away; DO THIS FIRST,
+- [`pi_wifi_ap.md`](pi_wifi_ap.md): how to set up the Pi as a Wi-Fi access point; DO THIS SECOND,
+- [`pi_wifi_dhcp_mac.md`](pi_wifi_dhcp_mac.md): how to set up the Pi to do DHCP with static IP addresses for known things, and only allow known MAC addresses to connect; DO THIS, UMMH, THIRDLY,
+- [`pi_services.md`](pi_services.md): how to install all of the services for the Front Garden Railway; DO THIS FOURTHRIGHTLY.
+- [`pi_installation.md`](pi_installation.md): how to install all of this properly on your network; DO THIS LAST.
+
+- `https_server.py`: the HTTPS server that provides OTA updates to the connected ESP32s and a small web dashboard to monitor what version they are running and switch nodes to development mode,
+- `binary_file_version.py`: a utility that extracts the version information from an ESP32 compiled binary file,
+- `LibLogger.py`: Python moudle used by `log_server.py` and `controller.py` to effect writing of logs to journal/database,
+- `log_server.py`: captures logs from all nodes and writes to journal/database using `LibLogger`, also offers access to crash-dump information, used by `crash_decoder.py`,
+- `log_viewer.py`: view logs extracted from the database, rather than from the journal,
+- `controller.py`: main script controlling all nodes, sub-classed by `web_controller.py`, writes logs of what it is doing through `LibLogger`,
+- `web_controller.py`: main web interface viewing and controlling all nodes,
+- `nodes.json`: configuration file for `controller.py`,
+- `add_node.py`: script to automate adding a new node to the system,
+- `clear_node_ghosts.sh`: script to try to make Wifi on the Pi clean-up better.
+- `performance_check.sh`: script to monitor how hard writing logs to the journal and database is pushing the system,
+- `reset_logging.sh`: script to delete and restart logging, to be used if the database or journal is corrupted by a power failure,
+- `hostapd.conf`: configuration file for `hostapd`, originally [hostapd-WiFi4.conf](https://github.com/morrownr/USB-WiFi/blob/main/home/AP_Mode/hostapd-WiFi4.conf) from [nrmorrow's USB-Wifi](https://github.com/morrownr/USB-WiFi),
+- `crash_decoder.py`: script to be run locally on the build PC that bridges to `log_server.py` and can decode crash dumps with one click.
+
+The `nodes` sub-directory contains the node-specific code that forms part of `controller.py`.

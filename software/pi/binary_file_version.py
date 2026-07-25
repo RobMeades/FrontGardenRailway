@@ -34,17 +34,17 @@ def extract_version_aggressive(file_path, offset, length):
     with open(file_path, 'rb') as f:
         f.seek(offset)
         data = f.read(length)
-        
+
         text = data.decode('ascii', errors='replace')
-        
+
         visible_chars = []
         for c in text:
             if 32 <= ord(c) <= 126:
                 visible_chars.append(c)
-        
+
         result = ''.join(visible_chars)
         result = re.sub(r'\x1b\[[0-9;]*[A-Za-z]', '', result)
-        
+
         return result.strip()
 
 
@@ -72,9 +72,9 @@ def main():
                        help='Output format (default: filename-version)')
     parser.add_argument('--delimiter', default=': ',
                        help='Delimiter for filename-version format (default: ": ")')
-    
+
     args = parser.parse_args()
-    
+
     # Collect all files from all patterns
     all_files = []
     for pattern in args.file_pattern:
@@ -88,7 +88,7 @@ def main():
                 all_files.append(pattern)
             else:
                 print(f"Warning: No files match pattern: {pattern}", file=sys.stderr)
-    
+
     # Remove duplicates while preserving order
     seen = set()
     files = []
@@ -96,12 +96,12 @@ def main():
         if f not in seen:
             seen.add(f)
             files.append(f)
-    
+
     if not files:
         if not args.quiet:
             print("No files to process", file=sys.stderr)
         sys.exit(1)
-    
+
     # Process each file
     results = []
     for file_path in sorted(files):
@@ -119,7 +119,7 @@ def main():
             if not args.quiet:
                 print(f"{file_path}: Error - {e}", file=sys.stderr)
             results.append((file_path, None))
-    
+
     # Output based on format
     if args.format == 'filename-version':
         for file_path, version in results:
@@ -127,12 +127,12 @@ def main():
                 print(f"{file_path}{args.delimiter}{version}")
             elif not args.quiet and version is None:
                 print(f"{file_path}{args.delimiter}[NO VERSION]", file=sys.stderr)
-    
+
     elif args.format == 'version-only':
         for _, version in results:
             if version:
                 print(version)
-    
+
     elif args.format == 'csv':
         print("filename,version")
         for file_path, version in results:

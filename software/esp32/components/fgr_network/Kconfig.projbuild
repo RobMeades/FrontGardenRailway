@@ -1,0 +1,29 @@
+menu "FGR Network Configuration"
+
+    config FGR_NETWORK_WIFI_SSID
+        string "WiFi SSID"
+        default "FGR"
+        help
+            SSID (network name) to connect to.
+
+    config FGR_NETWORK_WIFI_PASSWORD
+        string "Wi-Fi Password"
+        default ""
+        help
+            WiFi password (WPA or WPA2) to use.
+            Can be left blank if the network has no security set.
+
+    config FGR_NETWORK_WIFI_REDUCED_TX_POWER
+        int "WiFi reduced TX power"
+        default 0
+        help
+            Set this to 1 to limit max TX power to 8 dBm.
+            can improve reliability when within 1 metre of AP.
+
+    config FGR_NETWORK_CONTROLLER_IP_ADDRESS
+        string "IP address of the controller"
+        default "10.10.3.1"
+        help
+            IP address of the controller
+
+endmenu

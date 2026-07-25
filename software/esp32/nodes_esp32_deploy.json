@@ -1,0 +1,101 @@
+{
+  "system_version_file": "sdkconfig_fragments/system_version.txt",
+
+  "global_variants": [
+    "esp32s3-rgb-4mbyte-psramheap",
+    "esp32s3-grb-4mbyte-psramheap",
+    "esp32s3-grbgpio9-8mbyte-psramoctalheap"
+  ],
+
+"variants_matrix": {
+    "esp32s3-rgb-4mbyte-psramheap": {
+      "partition_table": "flash_4mbyte_partitions.csv",
+      "traits": [
+        "sdkconfig_fragments/chip_esp32s3",
+        "sdkconfig_fragments/flash_4mbyte",
+        "sdkconfig_fragments/psram",
+        "sdkconfig_fragments/psram_auto",
+        "sdkconfig_fragments/psram_heap",
+        "sdkconfig_fragments/led_multicolour",
+        "sdkconfig_fragments/led_multicolour_onboard"
+      ]
+    },
+    "esp32s3-grb-4mbyte-psramheap": {
+      "partition_table": "flash_4mbyte_partitions.csv",
+      "traits": [
+        "sdkconfig_fragments/chip_esp32s3",
+        "sdkconfig_fragments/flash_4mbyte",
+        "sdkconfig_fragments/psram",
+        "sdkconfig_fragments/psram_auto",
+        "sdkconfig_fragments/psram_heap",
+        "sdkconfig_fragments/led_multicolour",
+        "sdkconfig_fragments/led_multicolour_onboard",
+        "sdkconfig_fragments/led_multicolour_grb"
+      ]
+    },
+    "esp32s3-grbgpio9-8mbyte-psramoctalheap": {
+      "partition_table": "flash_8mbyte_partitions.csv",
+      "traits": [
+        "sdkconfig_fragments/chip_esp32s3",
+        "sdkconfig_fragments/flash_8mbyte",
+        "sdkconfig_fragments/psram",
+        "sdkconfig_fragments/psram_octal",
+        "sdkconfig_fragments/psram_heap",
+        "sdkconfig_fragments/led_multicolour",
+        "sdkconfig_fragments/led_multicolour_gpio9",
+        "sdkconfig_fragments/led_multicolour_grb"
+      ]
+    }
+  },
+
+  "applications": {
+    "test": {
+      "description": "Development/test node"
+    },
+    "level_gauge": {
+      "description": "Water tank level gauge transmitter",
+      "supported_variants": [
+        "esp32s3-rgb-4mbyte-psramheap"
+      ]
+    }
+  },
+
+  "inventory": {
+      "10.10.3.2":   { "app": "test",        "variant": "esp32s3-rgb-4mbyte-psramheap" },
+      "10.10.3.3":   { "app": "level_gauge", "variant": "esp32s3-rgb-4mbyte-psramheap" },
+      "10.10.3.4":   { "app": "test",        "variant": "esp32s3-grb-4mbyte-psramheap" },
+      "10.10.3.5":   { "app": "test",        "variant": "esp32s3-grb-4mbyte-psramheap" },
+      "10.10.3.6":   { "app": "test",        "variant": "esp32s3-grb-4mbyte-psramheap" },
+      "10.10.3.7":   { "app": "test",        "variant": "esp32s3-grb-4mbyte-psramheap" },
+      "10.10.3.8":   { "app": "test",        "variant": "esp32s3-grb-4mbyte-psramheap" },
+      "10.10.3.9":   { "app": "test",        "variant": "esp32s3-grbgpio9-8mbyte-psramoctalheap" },
+      "10.10.3.10":  { "app": "test",        "variant": "esp32s3-grbgpio9-8mbyte-psramoctalheap" },
+      "10.10.3.11":  { "app": "test",        "variant": "esp32s3-grbgpio9-8mbyte-psramoctalheap" },
+      "10.10.3.12":  { "app": "test",        "variant": "esp32s3-grbgpio9-8mbyte-psramoctalheap" },
+      "10.10.3.13":  { "app": "test",        "variant": "esp32s3-grbgpio9-8mbyte-psramoctalheap" },
+      "10.10.3.14":  { "app": "test",        "variant": "esp32s3-grbgpio9-8mbyte-psramoctalheap" },
+      "10.10.3.15":  { "app": "test",        "variant": "esp32s3-grbgpio9-8mbyte-psramoctalheap" },
+      "10.10.3.16":  { "app": "test",        "variant": "esp32s3-grbgpio9-8mbyte-psramoctalheap" },
+      "10.10.3.17":  { "app": "test",        "variant": "esp32s3-grbgpio9-8mbyte-psramoctalheap" },
+      "10.10.3.18":  { "app": "test",        "variant": "esp32s3-grbgpio9-8mbyte-psramoctalheap" },
+      "10.10.3.19":  { "app": "test",        "variant": "esp32s3-grbgpio9-8mbyte-psramoctalheap" },
+      "10.10.3.20":  { "app": "test",        "variant": "esp32s3-grbgpio9-8mbyte-psramoctalheap" },
+      "10.10.3.21":  { "app": "test",        "variant": "esp32s3-grbgpio9-8mbyte-psramoctalheap" },
+      "10.10.3.22":  { "app": "test",        "variant": "esp32s3-grbgpio9-8mbyte-psramoctalheap" },
+      "10.10.3.23":  { "app": "test",        "variant": "esp32s3-grbgpio9-8mbyte-psramoctalheap" },
+      "10.10.3.24":  { "app": "test",        "variant": "esp32s3-grbgpio9-8mbyte-psramoctalheap" },
+      "10.10.3.25":  { "app": "test",        "variant": "esp32s3-grbgpio9-8mbyte-psramoctalheap" },
+      "10.10.3.26":  { "app": "test",        "variant": "esp32s3-grbgpio9-8mbyte-psramoctalheap" },
+      "10.10.3.27":  { "app": "test",        "variant": "esp32s3-grbgpio9-8mbyte-psramoctalheap" },
+      "10.10.3.28":  { "app": "test",        "variant": "esp32s3-grbgpio9-8mbyte-psramoctalheap" },
+      "10.10.3.29":  { "app": "test",        "variant": "esp32s3-grbgpio9-8mbyte-psramoctalheap" },
+      "10.10.3.30":  { "app": "test",        "variant": "esp32s3-grbgpio9-8mbyte-psramoctalheap" },
+      "10.10.3.31":  { "app": "test",        "variant": "esp32s3-grbgpio9-8mbyte-psramoctalheap" },
+      "10.10.3.32":  { "app": "test",        "variant": "esp32s3-grbgpio9-8mbyte-psramoctalheap" },
+      "10.10.3.33":  { "app": "test",        "variant": "esp32s3-grbgpio9-8mbyte-psramoctalheap" }
+    }
+}
+
+
+
+

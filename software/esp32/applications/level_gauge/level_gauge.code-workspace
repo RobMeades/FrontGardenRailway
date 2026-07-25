@@ -1,0 +1,13 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../../components"
+		}
+	],
+    "settings": {
+        "C_Cpp.default.compileCommands": "${workspaceFolder:level_gauge}/build/compile_commands.json"
+    }
+}
