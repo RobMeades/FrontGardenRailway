@@ -10729,7 +10729,7 @@ class WebController(Controller):
                     yMax = Math.ceil(yMax + padding);
                     if (graphKey === 'rssi') {
                         yMin = Math.max(-100, yMin);
-                        yMax = Math.min(-30, yMax);
+                        yMax = Math.min(-20, yMax);
                     } else if (graphKey === 'heap') {
                         yMin = Math.max(0, yMin);
                     }
