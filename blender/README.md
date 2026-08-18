@@ -25,6 +25,13 @@ The cable clamp is screwed to the body with something like a number&nbsp;4 1/4" 
 
 See [here](https://www.meades.org/railways/garden/garden.html#piping_and_wiring) for pictures of the finished/fitted items.
 
+## `junction_box_cover.blend`
+A cover for an M20-threaded metal conduit junction box (available from RS as [228-889](https://uk.rs-online.com/web/p/conduit-fittings/0228889)) that allows the cable of a [waterproof 2.1 mm x 5.5 mm barrel connector flying lead](https://www.amazon.co.uk/dp/B0DVCHYNMV) to pass through and also includes a printable gasket. `.stl` exports for the cover and the gasket at a Blender scale factor of 1000 (i.e. actual size in millimetres) are also provided.
+
+The cover should be printed in ASA, fastest speed, 15% in-fill, no supports required, while the gasket should be printed in a flex filament of some form (e.g. [Siraya Tech Flex TPU 85A](https://siraya.tech/products/flex-tpu-85a-filament)).
+
+See [here](https://www.meades.org/railways/garden/garden.html#junction_box_cover) for the cover and gasket in use.
+
 ## `viaduct_final`
 The contents of the [viaduct_final](/viaduct_final) directory are the final design of the viaduct; the moulds and related parts that were eventually printed.  Again, `.stl` exports are also included, with a Blender scale factor of 30.48.
 
@@ -92,7 +99,9 @@ Everything else apart from `spiral_staircase_top_platform*.stl` should also be p
 Finally, `spiral_staircase_top_platform.stl` and `spiral_staircase_top_platform_side_wall_top.stl` should be printed in natural ASA (and painted, like the components of `filter_wall.blend`), high resolution (e.g. 0.1&nbsp;mm layer height), 10% in-fill, supports required, brim advisable; `spiral_staircase_top_platform_side_wall.stl` and `spiral_staircase_top_platform_side_wall_edging.stl` should be printed in the same way but with only 5% in-fill (for flexibility) and no supports required.
 
 ## `better_wall.blend`
-A better version of the low wall used in all of the items above: includes edging and joining strips.  It is intended to be glued on top of the existing low walls to provide a better appearance.  Print in natural ASA (and paint; I chose high detail (0.1&nbsp;mm layer height), though it is questionable whether that is really needed, 5% in-fill, no supports or brim required except for the edging strip, which can tend to warp away from the print bed without a brim.
+A better version of the low wall used in all of the items above: includes edging and joining strips.  It is intended to be glued on top of the existing low walls to provide a better appearance.  Print in natural ASA (and paint; I chose high detail (0.1&nbsp;mm layer height), though it is questionable whether that is really needed), 5% in-fill, no supports or brim required except for the edging strip, which can tend to warp away from the print bed without a brim.
+
+See [here](https://www.meades.org/railways/garden/garden.html#Them_Walls_Is_Fixed) for the process of attaching the bulk of these fixed walls.
 
 ## `steps.blend`
 This Blender file is intended to create a flight of steps.  It is different to the other Blender files here in that the steps are created dynamically from a single step with three modifiers: Array (to make 17 steps), Solidify (to give the steps thickness) and then a Curve modifier to make the steps run in any desired shape.  These modifiers are not "applied" in Blender, they remain dynamic, so the geometry of the steps can be changed at will.
@@ -111,21 +120,25 @@ The signs used around the railway (with `signs*.stl` exports at 30.48 scale), be
 Note that resin will be affected by UV, becoming brittle, but that shouldn't be a huge problem for signage, since it bears no load, and clear UV blocking varnishes are available, e.g. [Polyvine Heavy Duty Extreme Varnish](https://www.amazon.co.uk/dp/B07RT1V6BG).
 
 ## `road.blend`
-The road down to the dock (plus `road*.stl` exports at 30.48 scale), including a bridge over the railway line, in two parts:
+The road down to the dock (plus `road*.stl` exports at 30.48 scale), including a bridge over the railway line, in three parts:
 
 - an upper part (A) that has the bridge and rests on the track bed and the lower part,
-- a lower part (B) that rests on the dock base.
+- a lower part (B) that rests on the dock base,
+- a foot to hold the West down,
+- an additional wedge to fix a problem that was found after moulding.
 
-The "Part A Bridge Spacer" is used during test fitting when only the bottom 2&nbsp;mm of Part A has been printed.
+The "Part A Bridge Spacer (Old)" was used during test fitting when only the bottom 2&nbsp;mm of Part A had been printed; the spacer was not updated when the shape of the bridge was changed (to align its core with the track after test fitting of the completed moulds), so is probably not much use now.
 
 Part A is further split into three:
 
-- The bridge, which should be printed in natural ASA, fastest speed, 15% in-fill, either in a heated chamber or otherwise with the room that the printer is in heated up to 40&nbsp;C.  It may be beneficial to cut the object further in your printer's slicer program to print the upright portions separate from the arch portion (cyanoacrylatinbg them together again afterwards) in order to improve adhesion and reducing the chances of warping; see [here](https://www.meades.org/railways/garden/garden.html#Road_Construction_Begins) for further information.
+- The bridge, which should be printed in natural ASA, fastest speed, 15% in-fill, either in a heated chamber or otherwise with the room that the printer is in heated up to 40&nbsp;C.  It may be beneficial to cut the object further in your printer's slicer program to print the upright portions separate from the arch portion (cyanoacrylating them together again afterwards) in order to improve adhesion and reducing the chances of warping; see [here](https://www.meades.org/railways/garden/garden.html#Road_Construction_Begins) for further information.
 - Moulds for the remaining western and eastern halves, intended to take fibreglass, formed in Blender using the Solidify modifier.  Note that it was not possible to make the Solidify modifier behave well around the holes for the M6 hex bolts intended to join the moulded parts to the bridge, hence the Blender file contains copies of these parts in the "Tidied" objects, on which the Solidify modifier has been applied and then the relevant parts of the object tidied up manually to form a good and manifold shape (see the `road_*_tidied.stl` files).
 
 Similarly, Part B is split into moulds for the western and eastern halves.
 
 The moulds should be printed in the cheapest PLA you can find, at fastest speed, 5% in-fill, supports everywhere.  They moulds will need to be split in your printer's slicer program, preferably with dovetail joints, and glued together with cyanoacrylate adhesive after printing.  The print orientation of all of the split parts should be the same: with the stones in the structure being horizontal, the road surface on the bottom.  There is no need to remove support material from the outsides of the printed parts unless the material happens to get in the way of assembly, since it won't matter for moulding.
+
+The foot and also the wedge, if required, should be printed in natural ASA like the bridge.
 
 ## `node_box.blend`
 A box to house a node on the front garden railway network.  The box is intended to hold a [Seeed Studio ESP32S3 board](https://thepihut.com/products/seeed-studio-xiao-esp32s3) with its plug-in antenna given plenty of room and a [Sparkfun Baby Buck regulator board](https://www.sparkfun.com/sparkfun-babybuck-regulator-breakout-5v-ap63357.html) to provide regulated 5&nbsp;V from 12&nbsp;V.  Export at a Blender scale factor of 1000 to get an object in millimetres.  Assembly will require four short (e.g. 5&nbsp;mm or 10&nbsp;mm) hex-head M3 bolts and an M3 tap.
@@ -133,3 +146,5 @@ A box to house a node on the front garden railway network.  The box is intended 
 The file includes two objects named `_box_template_DO_NOT_APPLY_MODIFIER` and `_box_lid_template_DO_NOT_APPLY_MODIFIER`: these are just one quarter of the box/lid, designed to be mirrored up to a complete box.  To create an actual box of your desired dimentions, copy these objects and adjust their size as necessary (keeping the object origin at the same point as you do so), then apply the Mirror modifier.
 
 An example `box_test` and `box_lid_test` pair of objects are included: these have platforms for the two boards in the lid, a hole for a 5&nbsp;mm diameter [WS2812] LED and hole for ingress of a 4.5&nbsp;mm diameter power cable (e.g. one of [these](https://www.amazon.co.uk/dp/B0DVCHYNMV)).  `node_box_test.stl` is an exported version of these two objects that can be printed at coarsest/fastest resolution in ASA with 15% in-fill and support on the build plate only.
+
+See [here](https://www.meades.org/railways/garden/garden.html#Test_Network) for how the box is used.
