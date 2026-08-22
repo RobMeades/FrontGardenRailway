@@ -99,9 +99,9 @@ Everything else apart from `spiral_staircase_top_platform*.stl` should also be p
 Finally, `spiral_staircase_top_platform.stl` and `spiral_staircase_top_platform_side_wall_top.stl` should be printed in natural ASA (and painted, like the components of `filter_wall.blend`), high resolution (e.g. 0.1&nbsp;mm layer height), 10% in-fill, supports required, brim advisable; `spiral_staircase_top_platform_side_wall.stl` and `spiral_staircase_top_platform_side_wall_edging.stl` should be printed in the same way but with only 5% in-fill (for flexibility) and no supports required.
 
 ## `better_wall.blend`
-A better version of the low wall used in all of the items above: includes edging and joining strips.  It is intended to be glued on top of the existing low walls to provide a better appearance.  Print in natural ASA (and paint; I chose high detail (0.1&nbsp;mm layer height), though it is questionable whether that is really needed), 5% in-fill, no supports or brim required except for the edging strip, which can tend to warp away from the print bed without a brim.
+A better version of the low wall used in all of the items above: includes edging and joining strips.  They are intended to be glued on top of the existing low walls to provide a better appearance.  Print in natural ASA (and paint; I chose high detail (0.1&nbsp;mm layer height), though it is questionable whether that is really needed), 5% in-fill, no supports or brim required except for the edging strip, which can tend to warp away from the print bed without a brim.
 
-See [here](https://www.meades.org/railways/garden/garden.html#Them_Walls_Is_Fixed) for the process of attaching the bulk of these fixed walls.
+See [here](https://www.meades.org/railways/garden/garden.html#Them_Walls_Is_Fixed) for the process of attaching the bulk of these improved walls.
 
 ## `steps.blend`
 This Blender file is intended to create a flight of steps.  It is different to the other Blender files here in that the steps are created dynamically from a single step with three modifiers: Array (to make 17 steps), Solidify (to give the steps thickness) and then a Curve modifier to make the steps run in any desired shape.  These modifiers are not "applied" in Blender, they remain dynamic, so the geometry of the steps can be changed at will.
@@ -120,12 +120,13 @@ The signs used around the railway (with `signs*.stl` exports at 30.48 scale), be
 Note that resin will be affected by UV, becoming brittle, but that shouldn't be a huge problem for signage, since it bears no load, and clear UV blocking varnishes are available, e.g. [Polyvine Heavy Duty Extreme Varnish](https://www.amazon.co.uk/dp/B07RT1V6BG).
 
 ## `road.blend`
-The road down to the dock (plus `road*.stl` exports at 30.48 scale), including a bridge over the railway line, in three parts:
+The road down to the dock (plus `road*.stl` exports at 30.48 scale), including a bridge over the railway line, in two main parts with a couple of extras:
 
 - an upper part (A) that has the bridge and rests on the track bed and the lower part,
 - a lower part (B) that rests on the dock base,
 - a foot to hold the West down,
-- an additional wedge to fix a problem that was found after moulding.
+- an additional wedge to fix a problem that was found after moulding,
+- a joining strip to disguise the gap between the upper and lower parts.
 
 The "Part A Bridge Spacer (Old)" was used during test fitting when only the bottom 2&nbsp;mm of Part A had been printed; the spacer was not updated when the shape of the bridge was changed (to align its core with the track after test fitting of the completed moulds), so is probably not much use now.
 
@@ -138,7 +139,7 @@ Similarly, Part B is split into moulds for the western and eastern halves.
 
 The moulds should be printed in the cheapest PLA you can find, at fastest speed, 5% in-fill, supports everywhere.  They moulds will need to be split in your printer's slicer program, preferably with dovetail joints, and glued together with cyanoacrylate adhesive after printing.  The print orientation of all of the split parts should be the same: with the stones in the structure being horizontal, the road surface on the bottom.  There is no need to remove support material from the outsides of the printed parts unless the material happens to get in the way of assembly, since it won't matter for moulding.
 
-The foot and also the wedge, if required, should be printed in natural ASA like the bridge.
+The foot and wedge (if required) should be printed in natural ASA like the bridge.  The joining strips should also be printed in natural ASA but in this case high detail (0.1&nbsp;mm layer height); despite this part being basically the same as the `better_wall.blend` strips, which all printed fine, it kept coming away from the print bed for me so a brim may be required.
 
 ## `node_box.blend`
 A box to house a node on the front garden railway network.  The box is intended to hold a [Seeed Studio ESP32S3 board](https://thepihut.com/products/seeed-studio-xiao-esp32s3) with its plug-in antenna given plenty of room and a [Sparkfun Baby Buck regulator board](https://www.sparkfun.com/sparkfun-babybuck-regulator-breakout-5v-ap63357.html) to provide regulated 5&nbsp;V from 12&nbsp;V.  Export at a Blender scale factor of 1000 to get an object in millimetres.  Assembly will require four short (e.g. 5&nbsp;mm or 10&nbsp;mm) hex-head M3 bolts and an M3 tap.
