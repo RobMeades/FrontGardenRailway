@@ -141,6 +141,15 @@ The moulds should be printed in the cheapest PLA you can find, at fastest speed,
 
 The foot and wedge (if required) should be printed in natural ASA like the bridge.  The joining strips should also be printed in natural ASA but in this case high detail (0.1&nbsp;mm layer height); despite this part being basically the same as the `better_wall.blend` strips, which all printed fine, it kept coming away from the print bed for me so a brim may be required.
 
+## `road_decorations.blend`
+Things that attach to the road wall on the dock side to make it more interesting (plus `road_decorations*.stl` exports at 30.48 scale), and a portion of the sailing ship "Tally Ho".  All apart from the "glass cutting templates" should be printed in ASA, 5% in-full (no strength is needed and the pieces are mostly flat anyway), no supports required except on Tally Ho, a brim probably advisable on every part except the door inner (where it can be difficult to remove).  Use high detail (0.1&nbsp;mm layer height) for all parts except the winch, the door inner and Tally Ho, all of which can be printed at highest speed.
+
+Print in natural ASA except for the doors and winches which should ideally be printed in brown ASA.  The large arch will probably need to be split into two in your slicer program for printing.
+
+The "glass cutting template" parts can be printed in anything, highest speed, 15% in-fill, no supports or brim required: they are just used to help with cutting thin plastic to size for the windows and the doors.
+
+For assembly instructions see [here](https://www.meades.org/railways/garden/garden.html#Building_In_The_Road).
+
 ## `node_box.blend`
 A box to house a node on the front garden railway network.  The box is intended to hold a [Seeed Studio ESP32S3 board](https://thepihut.com/products/seeed-studio-xiao-esp32s3) with its plug-in antenna given plenty of room and a [Sparkfun Baby Buck regulator board](https://www.sparkfun.com/sparkfun-babybuck-regulator-breakout-5v-ap63357.html) to provide regulated 5&nbsp;V from 12&nbsp;V.  Export at a Blender scale factor of 1000 to get an object in millimetres.  Assembly will require four short (e.g. 5&nbsp;mm or 10&nbsp;mm) hex-head M3 bolts and an M3 tap.
 
