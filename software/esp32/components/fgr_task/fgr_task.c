@@ -261,7 +261,7 @@ int32_t fgr_task_create(fgr_task_cb_t cb, void *cb_param, const char *name,
             CONTEXT_LOCK(g_context.lock, "fgr_task_create()");
 
             err = -ESP_ERR_NO_MEM;
-            task_t *task = (task_t *) MALLOC(sizeof(*task ));
+            task_t *task = (task_t *) MALLOC(sizeof(*task));
             if (task) {
                 memset(task, 0, sizeof(*task));
                 task_state_t *state = &task->state;

@@ -25,7 +25,10 @@
 extern "C" {
 #endif
 
-// Required for fgr_msg_t.
+// Required for fgr_ws2812_colour_t.
+#include "fgr_ws2812.h"
+
+// Required for fgr_state_t.
 #include "../../../../../protocol/fgr_protocol.h"
 
 /* ----------------------------------------------------------------
@@ -42,128 +45,49 @@ extern "C" {
 #  define FGR_DEBUG_LED_LONG_MS 1000
 #endif
 
-#ifndef FGR_DEBUG_LED_INTENSITY_LOW
-// How bright to shine the LED for low intensity; ignored
-// for a single colour LED: these LEDS are very bright!
-#  define FGR_DEBUG_LED_INTENSITY_LOW 16
-#endif
-
-#ifndef FGR_DEBUG_LED_INTENSITY_HIGH
-// How bright to shine the LED for high intensity; ignored
-// for a single colour LED.
-#  define FGR_DEBUG_LED_INTENSITY_HIGH 32
-#endif
-
-#define FGR_DEBUG_LED_COLOUR_NONE ((fgr_debug_colour_t) {0, 0, 0})
-
-#ifndef FGR_DEBUG_LED_COLOUR_RED
-// Red; generally better to use one of the "meaning" colours below instead of this.
-#  define FGR_DEBUG_LED_COLOUR_RED ((fgr_debug_colour_t) {FGR_DEBUG_LED_INTENSITY_LOW, 0, 0})
-#endif
-
-#ifndef FGR_DEBUG_LED_COLOUR_BRIGHT_RED
-// Bright red; generally better to use one of the "meaning" colours below instead of this.
-#  define FGR_DEBUG_LED_COLOUR_BRIGHT_RED ((fgr_debug_colour_t) {FGR_DEBUG_LED_INTENSITY_HIGH, 0, 0})
-#endif
-
-#ifndef FGR_DEBUG_LED_COLOUR_BLUE
-// Blue; generally better to use one of the "meaning" colours below instead of this.
-#  define FGR_DEBUG_LED_COLOUR_BLUE ((fgr_debug_colour_t) {0, 0, FGR_DEBUG_LED_INTENSITY_LOW})
-#endif
-
-#ifndef FGR_DEBUG_LED_COLOUR_BRIGHT_BLUE
-// Bright blue; generally better to use one of the "meaning" colours below instead of this.
-#  define FGR_DEBUG_LED_COLOUR_BRIGHT_BLUE ((fgr_debug_colour_t) {0, 0, FGR_DEBUG_LED_INTENSITY_HIGH})
-#endif
-
-#ifndef FGR_DEBUG_LED_COLOUR_GREEN
-// Green; generally better to use one of the "meaning" colours below instead of this.
-#  define FGR_DEBUG_LED_COLOUR_GREEN ((fgr_debug_colour_t) {0, FGR_DEBUG_LED_INTENSITY_LOW, 0})
-#endif
-
-#ifndef FGR_DEBUG_LED_COLOUR_BRIGHT_GREEN
-// Bright green; generally better to use one of the "meaning" colours below instead of this.
-#  define FGR_DEBUG_LED_COLOUR_BRIGHT_GREEN ((fgr_debug_colour_t) {0, FGR_DEBUG_LED_INTENSITY_HIGH, 0})
-#endif
-
-#ifndef FGR_DEBUG_LED_COLOUR_YELLOW
-// Yellow; generally better to use one of the "meaning" colours below instead of this.
-#  define FGR_DEBUG_LED_COLOUR_YELLOW ((fgr_debug_colour_t) {FGR_DEBUG_LED_INTENSITY_LOW, FGR_DEBUG_LED_INTENSITY_LOW, 0})
-#endif
-
-#ifndef FGR_DEBUG_LED_COLOUR_BRIGHT_YELLOW
-// Bright yellow; generally better to use one of the "meaning" colours below instead of this.
-#  define FGR_DEBUG_LED_COLOUR_BRIGHT_YELLOW ((fgr_debug_colour_t) {FGR_DEBUG_LED_INTENSITY_HIGH, FGR_DEBUG_LED_INTENSITY_HIGH, 0})
-#endif
-
-#ifndef FGR_DEBUG_LED_COLOUR_CYAN
-// Cyan; generally better to use one of the "meaning" colours below instead of this.
-#  define FGR_DEBUG_LED_COLOUR_CYAN ((fgr_debug_colour_t) {0, FGR_DEBUG_LED_INTENSITY_LOW, FGR_DEBUG_LED_INTENSITY_LOW})
-#endif
-
-#ifndef FGR_DEBUG_LED_COLOUR_BRIGHT_CYAN
-// Bright cyan; generally better to use one of the "meaning" colours below instead of this.
-#  define FGR_DEBUG_LED_COLOUR_BRIGHT_CYAN ((fgr_debug_colour_t) {0, FGR_DEBUG_LED_INTENSITY_HIGH, FGR_DEBUG_LED_INTENSITY_HIGH})
-#endif
-
-#ifndef FGR_DEBUG_LED_COLOUR_MAGENTA
-// Magenta; generally better to use one of the "meaning" colours below instead of this.
-#  define FGR_DEBUG_LED_COLOUR_MAGENTA ((fgr_debug_colour_t) {FGR_DEBUG_LED_INTENSITY_LOW, 0, FGR_DEBUG_LED_INTENSITY_LOW})
-#endif
-
-#ifndef FGR_DEBUG_LED_COLOUR_BRIGHT_MAGENTA
-// Bright magenta; generally better to use one of the "meaning" colours below instead of this.
-#  define FGR_DEBUG_LED_COLOUR_BRIGHT_MAGENTA ((fgr_debug_colour_t) {FGR_DEBUG_LED_INTENSITY_HIGH, 0, FGR_DEBUG_LED_INTENSITY_HIGH})
-#endif
-
-#ifndef FGR_DEBUG_LED_COLOUR_WHITE
-// White; generally better to use one of the "meaning" colours below instead of this.
-#  define FGR_DEBUG_LED_COLOUR_WHITE ((fgr_debug_colour_t) {FGR_DEBUG_LED_INTENSITY_LOW, FGR_DEBUG_LED_INTENSITY_LOW, FGR_DEBUG_LED_INTENSITY_LOW})
-#endif
-
-#ifndef FGR_DEBUG_LED_COLOUR_BRIGHT_WHITE
-// Bright white; generally better to use one of the "meaning" colours below instead of this.
-#  define FGR_DEBUG_LED_COLOUR_BRIGHT_WHITE ((fgr_debug_colour_t) {FGR_DEBUG_LED_INTENSITY_HIGH, FGR_DEBUG_LED_INTENSITY_HIGH, FGR_DEBUG_LED_INTENSITY_HIGH})
+#ifndef FGR_DEBUG_LED_COLOUR_NONE
+// Debug LED off
+#  define FGR_DEBUG_LED_COLOUR_NONE FGR_WS2812_LED_COLOUR_NONE
 #endif
 
 #ifndef FGR_DEBUG_LED_COLOUR_BOOT
 // Standardised boot colour.
-#  define FGR_DEBUG_LED_COLOUR_BOOT FGR_DEBUG_LED_COLOUR_WHITE
+#  define FGR_DEBUG_LED_COLOUR_BOOT FGR_WS2812_LED_COLOUR_WHITE
 #endif
 
 #ifndef FGR_DEBUG_LED_COLOUR_NEEDS_CFG
 // Standardised colour, primarily for breathe, when waiting for configuration.
-#  define FGR_DEBUG_LED_COLOUR_NEEDS_CFG FGR_DEBUG_LED_COLOUR_CYAN
+#  define FGR_DEBUG_LED_COLOUR_NEEDS_CFG FGR_WS2812_LED_COLOUR_CYAN
 #endif
 
 #ifndef FGR_DEBUG_LED_COLOUR_STOPPED
 // Standardised colour, primarily for breathe, when stopped.
-#  define FGR_DEBUG_LED_COLOUR_STOPPED FGR_DEBUG_LED_COLOUR_MAGENTA
+#  define FGR_DEBUG_LED_COLOUR_STOPPED FGR_WS2812_LED_COLOUR_MAGENTA
 #endif
 
 #ifndef FGR_DEBUG_LED_COLOUR_ALARM
 // Standardised alarm colour: the only one that is bright.
-#  define FGR_DEBUG_LED_COLOUR_ALARM FGR_DEBUG_LED_COLOUR_BRIGHT_RED
+#  define FGR_DEBUG_LED_COLOUR_ALARM FGR_WS2812_LED_COLOUR_BRIGHT_RED
 #endif
 
 #ifndef FGR_DEBUG_LED_COLOUR_BAD
 // Standardised negative colour.
-#  define FGR_DEBUG_LED_COLOUR_BAD FGR_DEBUG_LED_COLOUR_RED
+#  define FGR_DEBUG_LED_COLOUR_BAD FGR_WS2812_LED_COLOUR_RED
 #endif
 
 #ifndef FGR_DEBUG_LED_COLOUR_GOOD
 // Standardised positive colour.
-#  define FGR_DEBUG_LED_COLOUR_GOOD FGR_DEBUG_LED_COLOUR_GREEN
+#  define FGR_DEBUG_LED_COLOUR_GOOD FGR_WS2812_LED_COLOUR_GREEN
 #endif
 
 #ifndef FGR_DEBUG_LED_COLOUR_NOTIFY
 // Standardised neutral notification colour.
-#  define FGR_DEBUG_LED_COLOUR_NOTIFY FGR_DEBUG_LED_COLOUR_YELLOW
+#  define FGR_DEBUG_LED_COLOUR_NOTIFY FGR_WS2812_LED_COLOUR_YELLOW
 #endif
 
 #ifndef FGR_DEBUG_LED_COLOUR_MSG_SENT
 // Standardised message sent colour.
-#  define FGR_DEBUG_LED_COLOUR_MSG_SENT FGR_DEBUG_LED_COLOUR_BLUE
+#  define FGR_DEBUG_LED_COLOUR_MSG_SENT FGR_WS2812_LED_COLOUR_BLUE
 #endif
 
 #ifndef FGR_DEBUG_BACKTRACE_DEPTH_MAX
@@ -200,14 +124,6 @@ extern "C" {
  * TYPES
  * -------------------------------------------------------------- */
 
-/** Debug LED colour.
- */
-typedef struct {
-    uint8_t red;
-    uint8_t green;
-    uint8_t blue;
-} fgr_debug_colour_t;
-
 /** Function to call to obtain the state of a node.
  *
  * @param param  cb_param as passed to fgr_debug_init().
@@ -219,9 +135,10 @@ typedef fgr_state_t (*fgr_debug_state_cb_t) (void *param);
  * FUNCTIONS: INITIALISE/DEINITIALISE
  * -------------------------------------------------------------- */
 
-/** Initialise debug.  Needs a task so fgr_task_init() must
- * have been called first.  It is always safe to call this at any
- * time: if already initialised it will do nothing and return success.
+/** Initialise debug.  If CONFIG_FGR_DEBUG_LED_SPI_NUM and the cb
+ * parameter below is populated then fgr_ws2812_init() must have
+ * been called first.  It is always safe to call this at any time:
+ * if already initialised it will do nothing and return success.
  *
  * Note: this will create a semaphore that is never destroyed.
  *
@@ -264,9 +181,9 @@ void fgr_debug_deinit();
  * @param duration_ms how long to flash the LED for (e.g.
  *                    FGR_DEBUG_LED_SHORT_MS or FGR_DEBUG_LED_LONG_MS).
  * @param colour      the LED colour, ignored if
- *                    CONFIG_FGR_DEBUG_LED_IS_WS2812 is not defined.
+ *                    CONFIG_FGR_DEBUG_LED_SPI_NUM is not defined.
  */
-void fgr_debug_led_flash(int32_t duration_ms, fgr_debug_colour_t colour);
+void fgr_debug_led_flash(int32_t duration_ms, fgr_ws2812_colour_t colour);
 
 /** Turn the LED "breathe" effect off.  If fgr_nvs_init() or
  * fgs_ota_init() have been called then the setting will persist
@@ -310,7 +227,7 @@ void fgr_debug_led_on(void);
  *
  * @param colour the LED colour.
  */
-void fgr_debug_led_breathe_set(fgr_debug_colour_t colour);
+void fgr_debug_led_breathe_set(fgr_ws2812_colour_t colour);
 
 /* ----------------------------------------------------------------
  * FUNCTIONS: PANIC

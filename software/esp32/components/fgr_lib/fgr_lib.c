@@ -35,6 +35,7 @@
 #include "fgr_nvs.h"
 #include "fgr_ota.h"
 #include "fgr_network.h"
+#include "fgr_ws2812.h"
 #include "fgr_debug.h"
 #include "fgr_metrics.h"
 #include "fgr_msg.h"
@@ -121,6 +122,11 @@ int32_t fgr_lib_init(const char *ota_server_cert_pem,
         if (err == ESP_OK) {
             err = fgr_ota_init(fgr_msg_is_connected, fgr_log_is_connected,
                                app_is_good_cb, restart_cb, cb_param);
+        }
+
+        // Configure WS2812 LED operations (may be needed by debug)
+        if (err == ESP_OK) {
+            err = fgr_ws2812_init();
         }
 
         // Configure our debug LED: do this after non-volatile
@@ -230,6 +236,7 @@ void fgr_lib_deinit(void)
         fgr_time_deinit();
         fgr_network_deinit();
         fgr_debug_deinit();
+        fgr_ws2812_deinit();
         fgr_metrics_deinit();
         fgr_task_deinit();
         fgr_heap_deinit();
