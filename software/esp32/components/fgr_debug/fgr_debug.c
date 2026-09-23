@@ -62,6 +62,12 @@ void __wrap_esp_panic_handler(void *info) __attribute__((used));
 // Logging prefix
 #define TAG "debug"
 
+#ifdef CONFIG_FGR_DEBUG_LED_WS2812_GRB
+#  define FGR_DEBUG_LED_WS2812_GRB 1
+#else
+#  define FGR_DEBUG_LED_WS2812_GRB 0
+#endif
+
 #ifndef NVS_NAME_LED_MASKED
 // A name for the field that masks the LED off in NV storage.
 #  define NVS_NAME_LED_MASKED "led_masked"
@@ -378,7 +384,7 @@ int32_t fgr_debug_init(fgr_debug_state_cb_t cb, void *cb_param)
             // Create a WS2812 LED chain for the debug LED
             err = fgr_ws2812_chain_init(CONFIG_FGR_DEBUG_LED_SPI_NUM, -1,
                                         CONFIG_FGR_DEBUG_LED_PIN, 1,
-                                        CONFIG_FGR_DEBUG_LED_WS2812_GRB,
+                                        FGR_DEBUG_LED_WS2812_GRB,
                                         &g_context.ws2812_handle);
             if ((err == ESP_OK) && cb) {
                 g_context.cb = cb;

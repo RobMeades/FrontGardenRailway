@@ -1,0 +1,48 @@
+menu "FGR Application Configuration"
+
+    config FGR_APP_NO_WIFI
+        bool "Omit connecting to Wi-Fi (and therefore omit doing an OTA update)"
+        default n
+        help
+            Set to omit making a WiFi connection
+
+    config FGR_APP_SWITCH_PIN
+        int "The pin for the microswitch"
+        default 7
+        help
+            The pin where the microswitch of the big red button is connected
+            on the ESP32 board
+
+    config FGR_APP_LED_COUNT
+        int "The number of WS2812 LEDs"
+        default 58
+        help
+            The number of WS2812 LEDs that make up the chain inside the big round
+            button.
+
+    config FGR_APP_LED_PIN
+        int "Big round button LED pin"
+        default 8
+        help
+            The pin where the start of the chain of WS2812 LEDs that make up the
+            big round button are connected on the ESP32 board.
+
+    config FGR_APP_LED_SPI_NUM
+        int "The SPI port to use for the big round button LED chain"
+        default 1
+        range -1 2
+        help
+            The SPI to drive the WS2812 LEDs.  DO NOT USE 0 (which maps to SPI 1)
+            as that is hard-wired internally to flash memory.  Also note that the
+            debug LED, assuming it is also a WS2812 LED, by default uses 2
+            (which maps to SPI 3).
+
+    config FGR_APP_LED_WS2812_GRB
+        bool "Set this if the WS2812 LEDs use order GRB instead of RGB"
+        depends on FGR_APP_LED_SPI_NUM > 0
+        default y
+        help
+            The leaded WS2812 tri-colour LEDs tend to be GRB instead of RGB,
+            hence the default here is "y".
+
+endmenu

@@ -103,12 +103,12 @@
 // is 3 (3 * 125 ns = 375 ns).  The remaining bits, are zero
 // so that is 11100000 (given SPI transmits MSB first) plus
 // two bits of 00 to give a total of 10 making 1250 ns.
-#define WS2812_ZERO 0xe0
+#define WS2812_ZERO 0x380
 
 // Similarly a good number of SPI bits high to represent a one
 // (800 ns) is 6 (6 * 125 ns = 750 ns), so 11111100 plus two
 // bits of 00.
-#define WS2812_ONE 0xfc
+#define WS2812_ONE 0x3f0
 
 // The number of SPI bits per WS2812 bit
 #define SPI_BITS_PER_WS2812_BIT 10
@@ -116,15 +116,14 @@
 // The number of SPI bits per WS2812 byte
 #define SPI_BITS_PER_WS2812_BYTE (SPI_BITS_PER_WS2812_BIT * 8)
 
+// Bytes needed for one LED (no reset): 30 SPI bytes.
+#define SPI_BYTES_PER_WS2812_LED (SPI_BITS_PER_WS2812_BYTE * 3 / 8)
+
 // The low time to add on the end to signal end of group
 #define WS2812_END_OF_GROUP_SPI_BITS_LOW (51000 / (1000000000 / SPI_SPEED_HZ))
 
-// The number of SPI bits per WS2812 RGB/GRB transaction: 3
-// WS2812 bytes plus the end of group low time
-#define SPI_BITS_PER_WS2812_TRANSACTION ((SPI_BITS_PER_WS2812_BYTE * 3) + WS2812_END_OF_GROUP_SPI_BITS_LOW)
-
-// The buffer size (in bytes) to hold a WS2812 RGB/GRB transaction
-#define SPI_TRANSACTION_BUFFER_LENGTH_BYTES ((SPI_BITS_PER_WS2812_TRANSACTION / 8) + 1)
+// Bytes needed for the whole chain plus the final reset.
+#define SPI_TRANSACTION_BUFFER_LENGTH_BYTES(count)  ((SPI_BYTES_PER_WS2812_LED * (count)) + (WS2812_END_OF_GROUP_SPI_BITS_LOW / 8) + 1)
 
 /* ----------------------------------------------------------------
  * TYPES
@@ -252,97 +251,68 @@ static const uint8_t g_flash_ease_table[] = {
 };
 
 /* ----------------------------------------------------------------
- * STATIC FUNCTIONS
+ * STATIC FUNCTIONS: SPI RELATED
  * -------------------------------------------------------------- */
 
-// Encode a WS2812 bit, spanning 10 SPI bits, into an SPI buffer.
-// Returns the number of bytes written (1-3) and advances the buffer pointer.
-static inline size_t ws2812_encode_bit(bool oneNotZero, int32_t bit_offset,
-                                       uint8_t **buffer_ptr, size_t length)
+// Encode one WS2812 bit (10 SPI bits) into the buffer, MSB first.
+// Advances *buffer_ptr and *bit_offset as needed.
+static inline void ws2812_encode_bit(bool oneNotZero,
+                                     uint8_t **buffer_ptr, size_t *bit_offset)
 {
-    uint32_t bit_pattern = oneNotZero ? WS2812_ONE : WS2812_ZERO;
-    size_t bytes_encoded = 0;
+    uint32_t pattern = oneNotZero ? WS2812_ONE : WS2812_ZERO;
 
-    if (buffer_ptr && *buffer_ptr && (length > 0)) {
-        // Shift to align with MSB-first SPI order
-        bit_pattern <<= 24;
-        bit_pattern >>= bit_offset;
-
-        // Encode first byte (may have partial bits from previous)
-        if (bit_offset > 0) {
-            uint8_t mask = 0xff >> bit_offset;  // Keep bits from MSB down to offset
-            **buffer_ptr = (**buffer_ptr & ~mask) | ((bit_pattern >> 24) & mask);
-        } else {
-            **buffer_ptr = bit_pattern >> 24;
+    for (int32_t i = SPI_BITS_PER_WS2812_BIT - 1; i >= 0; i--) {
+        if (*bit_offset == 0) {
+            **buffer_ptr = 0;
         }
-        (*buffer_ptr)++;
-        bytes_encoded++;
-
-        // Write remaining full bytes (if space permits)
-        if (bytes_encoded < length) {
-            **buffer_ptr = bit_pattern >> 16;
+        if ((pattern >> i) & 1) {
+            **buffer_ptr |= 0x80 >> *bit_offset;
+        }
+        (*bit_offset)++;
+        if (*bit_offset == 8) {
+            *bit_offset = 0;
             (*buffer_ptr)++;
-            bytes_encoded++;
-        }
-        if (bytes_encoded < length) {
-            **buffer_ptr = bit_pattern >> 8;
-            bytes_encoded++;
         }
     }
-
-    return bytes_encoded;
 }
 
-// Encode a WS2812 byte into an SPI buffer.
+// Encode one WS2812 byte (8 bits, MSB first).
 static inline void ws2812_encode_byte(uint8_t byte_ws2812,
-                                      uint8_t **buffer_ptr,
-                                      size_t *length_ptr)
+                                      uint8_t **buffer_ptr, size_t *bit_offset)
 {
-    uint8_t bit_offset = 0;
-
-    if (buffer_ptr && *buffer_ptr && length_ptr) {
-        for (int32_t x = 7; (x >= 0) && (*length_ptr > 0); x--) {
-            size_t encoded = ws2812_encode_bit(byte_ws2812 & (1 << x),
-                                               bit_offset, buffer_ptr,
-                                               *length_ptr);
-            *length_ptr -= encoded;
-            bit_offset += SPI_BITS_PER_WS2812_BIT;
-
-            while (bit_offset >= 8) {
-                bit_offset -= 8;
-                // buffer already advanced by ws2812_encode_bit()
-            }
-        }
+    for (int32_t x = 7; x >= 0; x--) {
+        ws2812_encode_bit(byte_ws2812 & (1 << x), buffer_ptr, bit_offset);
     }
 }
 
-// Assemble a buffer of SPI data to represent a WS2812 transaction.
-static size_t ws2812_spi_transaction(fgr_ws2812_colour_t *colour,
-                                     bool grb_not_rgb,
-                                     uint8_t *buffer, size_t length)
+// Encode one LED's 24 bits (30 SPI bytes) with no reset pulse.
+static size_t ws2812_encode_led(fgr_ws2812_colour_t *colour,
+                                bool grb_not_rgb,
+                                uint8_t *buffer, size_t length)
 {
     size_t encoded_length_bits = 0;
 
-    if (colour && buffer && (length >= SPI_TRANSACTION_BUFFER_LENGTH_BYTES)) {
-        // Zero the buffer first
-        memset(buffer, 0, SPI_TRANSACTION_BUFFER_LENGTH_BYTES);
-
+    if (colour && buffer && (length >= SPI_BYTES_PER_WS2812_LED)) {
         uint8_t *buffer_ptr = buffer;
-        // Encode the three bytes
+        size_t bit_offset = 0;
+
         if (grb_not_rgb) {
-            ws2812_encode_byte(colour->green, &buffer_ptr, &length);
-            ws2812_encode_byte(colour->red, &buffer_ptr, &length);
+            ws2812_encode_byte(colour->green, &buffer_ptr, &bit_offset);
+            ws2812_encode_byte(colour->red,   &buffer_ptr, &bit_offset);
         } else {
-            ws2812_encode_byte(colour->red, &buffer_ptr, &length);
-            ws2812_encode_byte(colour->green, &buffer_ptr, &length);
+            ws2812_encode_byte(colour->red,   &buffer_ptr, &bit_offset);
+            ws2812_encode_byte(colour->green, &buffer_ptr, &bit_offset);
         }
-        ws2812_encode_byte(colour->blue, &buffer_ptr, &length);
-        encoded_length_bits = SPI_BITS_PER_WS2812_TRANSACTION;
+        ws2812_encode_byte(colour->blue, &buffer_ptr, &bit_offset);
+        encoded_length_bits = SPI_BITS_PER_WS2812_BYTE * 3;
     }
 
-    // Return the total bit length (including reset bits)
     return encoded_length_bits;
 }
+
+/* ----------------------------------------------------------------
+ * STATIC FUNCTIONS: COLOUR RELATED
+ * -------------------------------------------------------------- */
 
 // Apply intensity to colour.
 static fgr_ws2812_colour_t apply_intensity(fgr_ws2812_colour_t colour,
@@ -471,6 +441,10 @@ static void update_flash_intensity(flash_state_t *flash_state,
     }
 }
 
+/* ----------------------------------------------------------------
+ * STATIC FUNCTIONS: TASK RELATED
+ * -------------------------------------------------------------- */
+
 // Update physical WS2812 LED chain.
 // IMPORTANT: the context should be locked before this is called.
 static void update_chain(chain_t *chain)
@@ -511,14 +485,17 @@ static void update_chain(chain_t *chain)
             }
 
             // Add this transaction to the buffer
-            ws2812_spi_transaction(&final_colour, chain->grb_not_rgb, write, SPI_TRANSACTION_BUFFER_LENGTH_BYTES);
-            write += SPI_TRANSACTION_BUFFER_LENGTH_BYTES;
-            transaction.length += SPI_TRANSACTION_BUFFER_LENGTH_BYTES * 8;
+            ws2812_encode_led(&final_colour, chain->grb_not_rgb, write, SPI_BYTES_PER_WS2812_LED);
+            write += SPI_BYTES_PER_WS2812_LED;
+            transaction.length += SPI_BITS_PER_WS2812_BYTE * 3;
 
             // Next...
             led_state++;
         }
 
+        // The reset/end-of-group low pulse goes once, after the last LED in the chain.
+        memset(write, 0, WS2812_END_OF_GROUP_SPI_BITS_LOW / 8);
+        transaction.length += WS2812_END_OF_GROUP_SPI_BITS_LOW;
         // Perform the SPI transaction
         transaction.tx_buffer = chain->spi_buffer;
         spi_device_transmit(chain->spi, &transaction);
@@ -641,6 +618,10 @@ static void task_ws2812_cb(void *handle, void *param)
 
     CONTEXT_UNLOCK(context->lock, "task_ws2812_cb()");
 }
+
+/* ----------------------------------------------------------------
+ * STATIC FUNCTIONS: MISC
+ * -------------------------------------------------------------- */
 
 // Mallloc()/free() memory for LED breathe state.
 static int32_t led_breathe_state_malloc_free(led_state_t *led_state, bool breathe)
@@ -927,7 +908,7 @@ int32_t fgr_ws2812_chain_init(int32_t spi_num, int32_t cs, int32_t pin,
 
         err = -ESP_ERR_INVALID_ARG;
         bool spi_already_initialised = false;
-        if (handle && (spi_num > 1) && (count > 0)) { // SPIs 0 and 1 are used internally
+        if (handle && (spi_num > 0) && (count > 0)) { // SPIs 0 is used internally
             // Check if the SPI/cs combination is already in use
             chain_t *iter;
             err = ESP_OK;
@@ -958,7 +939,7 @@ int32_t fgr_ws2812_chain_init(int32_t spi_num, int32_t cs, int32_t pin,
                 chain->led_state = (led_state_t *) ((char *) chain + sizeof(*chain));
                 memset(chain->led_state, 0, sizeof(*chain->led_state) * count);
                 // Now allocate the buffer we will need for the SPI transaction
-                chain->spi_buffer = (uint8_t *) heap_caps_malloc(SPI_TRANSACTION_BUFFER_LENGTH_BYTES * count,
+                chain->spi_buffer = (uint8_t *) heap_caps_malloc(SPI_TRANSACTION_BUFFER_LENGTH_BYTES(count),
                                                                  MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
                 if (chain->spi_buffer) {
                     err = ESP_OK;
@@ -971,7 +952,11 @@ int32_t fgr_ws2812_chain_init(int32_t spi_num, int32_t cs, int32_t pin,
                     spi_bus_config_t bus_cfg = {
                         .mosi_io_num = pin,
                         .miso_io_num = -1,
-                        .sclk_io_num = -1,
+                        // We don't need an SCLK pin, however for SPI 1 (which shares HW with the
+                        // SPI 0 stuff), ESP-IDF performs extra validaton and _requires_ there to
+                        // be an SCLK pin in all cases.  Here this is assigned to GPIO 42, which
+                        // should be well out of the way of anything.
+                        .sclk_io_num = (spi_num == 1) ? 42 : -1,
                         .quadwp_io_num = -1,
                         .quadhd_io_num = -1
                     };
