@@ -24,9 +24,8 @@ menu "FGR Debug Configuration"
     config FGR_DEBUG_LED_WS2812_GRB
         bool "Set this if your WS2812 LED uses order GRB instead of RGB"
         depends on FGR_DEBUG_LED_SPI_NUM > 0
-        default y
+        default n
         help
             Some WS2812 tri-colour LEDs expect to be told GRB instead of RGB.
-            Since all of the leaded WS2812 LEDs are GRB, the default is "y".
 
 endmenu
