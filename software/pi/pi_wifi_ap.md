@@ -380,3 +380,13 @@ sudo systemctl enable clear_node_ghosts
 
 ...to run it and have it start at boot.
 
+# Devices That Frequently Disconnect Never Reconnecting
+There is a known issue with `hostapd` where a device which disconnects frequently can fall into a state where `hostapd` thinks it is already connected and so persistently ignores any authentication requests from it, meaning the device never connects ever again.  The workarounds for this involve discovering from `hostapd`'s logging that it has seen many authentication requests from a single device in a relatively short interval (it doesn't say it has ignored them, just that they have occurred) however getting `hostapd`s's logging to appear anywhere useful is a feat in itself.
+
+So, if you find that a device is persistently being ignored, issue this command:
+
+```
+sudo iw dev wlan0 station del <MAC_ADDRESS>
+```
+
+...where `<MAC_ADDRESS>` is replaced by the MAC address of the device.  That should delete the device from `hostapd`'s records, allowing it to be accepted on the next attempt.
