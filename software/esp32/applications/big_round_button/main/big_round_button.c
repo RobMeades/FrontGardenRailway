@@ -96,17 +96,12 @@
 
 // Short flash duration in milliseconds.
 #ifndef FLASH_DURATION_SHORT_MS
-#  define FLASH_DURATION_SHORT_MS 250
+#  define FLASH_DURATION_SHORT_MS 400
 #endif
 
 // Long flash duration in milliseconds.
 #ifndef FLASH_DURATION_LONG_MS
-#  define FLASH_DURATION_LONG_MS 1000
-#endif
-
-// Very long flash duration in milliseconds.
-#ifndef FLASH_DURATION_VERY_LONG_MS
-#  define FLASH_DURATION_VERY_LONG_MS 4000
+#  define FLASH_DURATION_LONG_MS 1200
 #endif
 
 /* ----------------------------------------------------------------
@@ -434,13 +429,6 @@ static void do_node(context_t *context)
 
             // Change the LED colour to the "active" colour
             fgr_ws2812_led_set(context->led_handle, -1, COLOUR_ACTIVE);
-
-            // Since the colour of a breathing LED won't change mid-breath
-            // flash all of the LEDs in the active colour to confirm
-            // the button press
-            fgr_ws2812_led_flash(context->led_handle, -1,
-                                       FLASH_DURATION_VERY_LONG_MS,
-                                       COLOUR_ACTIVE);
         }
 
         // Switch active state off after some time

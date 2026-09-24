@@ -31,12 +31,30 @@ extern "C" {
 
 #ifndef FGR_WS2812_LED_INTENSITY_LOW
 // How bright to shine the LED for low intensity: these LEDS are very bright!
-#  define FGR_WS2812_LED_INTENSITY_LOW 16
+#  define FGR_WS2812_LED_INTENSITY_LOW 64
 #endif
 
 #ifndef FGR_WS2812_LED_INTENSITY_HIGH
 // How bright to shine the LED for high intensity.
-#  define FGR_WS2812_LED_INTENSITY_HIGH 32
+#  define FGR_WS2812_LED_INTENSITY_HIGH 128
+#endif
+
+#ifndef FGR_WS2812_BREATHE_MIN_INTENSITY
+// Lowest intensity during a breath, 0-255.  Set high enough that
+// (colour * this / 255) is still visibly lit for your LED intensity.
+// For INTENSITY_LOW = 16, 96 gives a trough PWM of ~6; for
+// INTENSITY_LOW = 64, 96 gives a trough PWM of ~24.
+#  define FGR_WS2812_BREATHE_MIN_INTENSITY 32
+#endif
+
+#ifndef FGR_WS2812_BREATHE_MAX_INTENSITY
+// Highest intensity during a breath, 0-255.
+#  define FGR_WS2812_BREATHE_MAX_INTENSITY 255
+#endif
+
+#ifndef FGR_WS2812_BREATHE_FADE_MS
+// How long to crossfade when the breathe colour changes.
+#  define FGR_WS2812_BREATHE_FADE_MS 300
 #endif
 
 #define FGR_WS2812_LED_COLOUR_NONE ((fgr_ws2812_colour_t) {0, 0, 0})

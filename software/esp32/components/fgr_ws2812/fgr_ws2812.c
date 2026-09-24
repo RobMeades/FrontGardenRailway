@@ -76,6 +76,13 @@
 #  define FLASH_MIN_INTENSITY 128
 #endif
 
+#ifndef FGR_WS2812_FLASH_MIN_STEPS
+// Minimum number of task ticks a flash should last, so that the
+// ease curve is traversed with enough resolution to look like a
+// smooth fade in/out rather than a spike.
+#  define FGR_WS2812_FLASH_MIN_STEPS 20
+#endif
+
 // The WS2812 tri-colour LED, see datasheet here:
 //
 // https://www.normandled.com/upload/201607/WS2812B%20Mini%203535%20LED%20Datasheet.pdf
@@ -154,10 +161,13 @@ typedef struct {
 
 // Breathe state.
 typedef struct {
-    fgr_ws2812_colour_t colour;
-    size_t period_steps;     // Period in steps (each step = LED_STEP_DURATION_MS)
-    size_t step_counter;     // Current step in breathing cycle (0 to period_steps-1)
-    uint8_t intensity;       // Current breathing intensity (0-255)
+    fgr_ws2812_colour_t colour_from;    // Colour we are fading from
+    fgr_ws2812_colour_t colour_to;      // Colour we are fading to
+    size_t transition_steps;            // 0 = no crossfade in progress
+    size_t transition_counter;
+    size_t period_steps;                // Period in steps (each step = LED_STEP_DURATION_MS)
+    size_t step_counter;                // Current step in breathing cycle (0 to period_steps-1)
+    uint8_t intensity;                  // Current breathing intensity (0-255)
 } breathe_state_t;
 
 // Flash state.
@@ -236,18 +246,19 @@ static const uint8_t g_sine_table[] = {
     37,  46,  56,  67,  78,  90, 102, 115
 };
 
-// Flash ease table: 0 to 255 and back to 0 over
-// 32 steps, using a sine-like ease curve for soft edges
+// Flash ease table: a smooth hump from 0 to 255 and back to 0,
+// generated with a smoothstep curve so the attack and decay are
+// both gentle.  Peak at indices 31/32 (the midpoint), symmetric
+// about that point.  64 entries.
 static const uint8_t g_flash_ease_table[] = {
-    0,   1,   4,   8,  13,  19,  26,  34,
-    42,  51,  61,  71,  82,  93, 104, 115,
-    126, 137, 148, 159, 170, 180, 190, 199,
-    208, 216, 224, 231, 237, 242, 246, 249,
-    252, 254, 255, 255, 254, 252, 249, 246,
-    242, 237, 231, 224, 216, 208, 199, 190,
-    180, 170, 159, 148, 137, 126, 115, 104,
-    93,  82,  71,  61,  51,  42,  34,  26,
-    19,  13,   8,   4,   1,   0
+      0,   1,   3,   7,  12,  18,  25,  33,
+     42,  52,  62,  73,  85,  97, 109, 121,
+    134, 146, 158, 170, 182, 193, 203, 213,
+    222, 230, 237, 243, 248, 252, 254, 255,
+    255, 254, 252, 248, 243, 237, 230, 222,
+    213, 203, 193, 182, 170, 158, 146, 134,
+    121, 109,  97,  85,  73,  62,  52,  42,
+     33,  25,  18,  12,   7,   3,   1,   0
 };
 
 /* ----------------------------------------------------------------
@@ -328,6 +339,32 @@ static fgr_ws2812_colour_t apply_intensity(fgr_ws2812_colour_t colour,
     return result;
 }
 
+// Linear interpolation between two 8-bit values; t is 0..255.
+static inline uint8_t lerp8(uint8_t a, uint8_t b, uint32_t t)
+{
+    return (uint8_t) (((uint32_t) a * (255 - t) + (uint32_t) b * t) / 255);
+}
+
+// Return the breathe colour currently being displayed, taking any
+// in-flight crossfade into account.
+static fgr_ws2812_colour_t current_breathe_colour(breathe_state_t *breathe_state)
+{
+    fgr_ws2812_colour_t result = breathe_state->colour_to;
+
+    if (breathe_state->transition_steps > 0) {
+        uint32_t t = (breathe_state->transition_counter * 255) /
+                     breathe_state->transition_steps;
+        result.red   = lerp8(breathe_state->colour_from.red,
+                             breathe_state->colour_to.red,   t);
+        result.green = lerp8(breathe_state->colour_from.green,
+                             breathe_state->colour_to.green, t);
+        result.blue  = lerp8(breathe_state->colour_from.blue,
+                             breathe_state->colour_to.blue,  t);
+    }
+
+    return result;
+}
+
 // Calculate boosted flash colour to ensure it is noticeably brighter than breath.
 static void boost_flash_intensity(fgr_ws2812_colour_t *flash_colour,
                                   fgr_ws2812_colour_t breathe_colour,
@@ -390,19 +427,9 @@ static void boost_flash_intensity(fgr_ws2812_colour_t *flash_colour,
     }
 }
 
-// Update breathe colour based on the state of the node.
-// IMPORTANT: the context should be locked before this is called.
-static void update_breathe_colour(led_state_t *led_state)
-{
-    // Update breathe colour at the start of every breath
-    breathe_state_t *breathe_state = led_state->breathe_state;
-    if (breathe_state && (breathe_state->period_steps > 0) &&
-        (breathe_state->intensity == 0)) {
-        breathe_state->colour = led_state->colour;
-    }
-}
-
-// Update breathing intensity using lookup table.
+// Update breathing intensity using lookup table, remapped into
+// [FGR_WS2812_BREATHE_MIN_INTENSITY .. FGR_WS2812_BREATHE_MAX_INTENSITY]
+// so the LED never sits in the perceptually-dark region of the PWM range.
 // IMPORTANT: the context should be locked before this is called.
 static void update_breathe_intensity(breathe_state_t *breathe_state)
 {
@@ -412,7 +439,12 @@ static void update_breathe_intensity(breathe_state_t *breathe_state)
         uint32_t index = (breathe_state->step_counter * FGR_UTIL_ARRAY_LENGTH(
                           g_sine_table)) / breathe_state->period_steps;
         index &= FGR_UTIL_ARRAY_LENGTH(g_sine_table) - 1;  // Ensure within bounds
-        breathe_state->intensity = g_sine_table[index];
+        uint8_t sine = g_sine_table[index];
+
+        // Remap [0..255] -> [MIN..MAX]
+        breathe_state->intensity = FGR_WS2812_BREATHE_MIN_INTENSITY +
+                                   ((uint16_t) (FGR_WS2812_BREATHE_MAX_INTENSITY -
+                                   FGR_WS2812_BREATHE_MIN_INTENSITY) * sine) / 255;
 
         // Advance step counter
         breathe_state->step_counter++;
@@ -429,8 +461,13 @@ static void update_flash_intensity(flash_state_t *flash_state,
 {
     if (flash_state && (flash_state->duration_steps > 0)) {
 
-        uint32_t index = (flash_state->step_counter * FGR_UTIL_ARRAY_LENGTH(g_flash_ease_table)) /
-                         flash_state->duration_steps;
+        // Traverse the ease table fully from index 0 to the last
+        // entry, regardless of duration, so the flash always fades
+        // in and out rather than being truncated.
+        uint32_t denom = (flash_state->duration_steps > 1) ?
+                         (flash_state->duration_steps - 1) : 1;
+        uint32_t index = (flash_state->step_counter *
+                          (FGR_UTIL_ARRAY_LENGTH(g_flash_ease_table) - 1)) / denom;
         uint8_t intensity = g_flash_ease_table[index];
         *colour = apply_intensity(flash_state->colour, intensity);
 
@@ -460,12 +497,32 @@ static void update_chain(chain_t *chain)
             flash_state_t *flash_state = led_state->flash_state;
 
             if (led_state->cb) {
-                // Update LED colour from callback
-                led_state->cb(&led_state->colour, led_state->cb_param);
-            }
+                // Update LED colour from callback.  The callback may
+                // change the colour; if it does, and the LED is
+                // breathing, kick off a crossfade so the change is
+                // smooth rather than a snap.
+                fgr_ws2812_colour_t new_colour = led_state->colour;
+                led_state->cb(&new_colour, led_state->cb_param);
 
-            // Update breathe colour
-            update_breathe_colour(led_state);
+                if ((new_colour.red   != led_state->colour.red) ||
+                    (new_colour.green != led_state->colour.green) ||
+                    (new_colour.blue  != led_state->colour.blue)) {
+
+                    if (breathe_state && (breathe_state->period_steps > 0)) {
+                        // Breathing: start a crossfade from whatever is
+                        // currently displayed to the new colour.
+                        breathe_state->colour_from =
+                            current_breathe_colour(breathe_state);
+                        breathe_state->colour_to = new_colour;
+                        breathe_state->transition_steps =
+                            (FGR_WS2812_BREATHE_FADE_MS + LED_STEP_DURATION_MS - 1) /
+                            LED_STEP_DURATION_MS;
+                        breathe_state->transition_counter = 0;
+                    }
+
+                    led_state->colour = new_colour;
+                }
+            }
 
             // Update the breathe intensity
             update_breathe_intensity(breathe_state);
@@ -481,7 +538,19 @@ static void update_chain(chain_t *chain)
                 update_flash_intensity(flash_state, &temp_colour);
                 final_colour = temp_colour;
             } else if (breathe_state && (breathe_state->period_steps > 0)) {
-                final_colour = apply_intensity(breathe_state->colour, breathe_state->intensity);
+                fgr_ws2812_colour_t breathe_colour =
+                    current_breathe_colour(breathe_state);
+                final_colour = apply_intensity(breathe_colour, breathe_state->intensity);
+
+                // Advance any in-flight crossfade
+                if (breathe_state->transition_steps > 0) {
+                    breathe_state->transition_counter++;
+                    if (breathe_state->transition_counter >=
+                        breathe_state->transition_steps) {
+                        breathe_state->transition_steps = 0;
+                        breathe_state->colour_from = breathe_state->colour_to;
+                    }
+                }
             }
 
             // Add this transaction to the buffer
@@ -505,6 +574,19 @@ static void update_chain(chain_t *chain)
 // Set the colour of an LED; called by process_cmd().
 static void cmd_set_colour(led_state_t *led_state, led_cmd_type_colour_t *cmd)
 {
+    breathe_state_t *breathe_state = led_state->breathe_state;
+
+    if (breathe_state && (breathe_state->period_steps > 0)) {
+        // Breathing: start a crossfade from whatever is currently
+        // displayed to the new colour, so the change is smooth.
+        breathe_state->colour_from = current_breathe_colour(breathe_state);
+        breathe_state->colour_to = cmd->colour;
+        breathe_state->transition_steps = (FGR_WS2812_BREATHE_FADE_MS + LED_STEP_DURATION_MS - 1) /
+                                          LED_STEP_DURATION_MS;
+        breathe_state->transition_counter = 0;
+    }
+
+    // Always update the base colour too
     led_state->colour = cmd->colour;
 }
 
@@ -512,17 +594,19 @@ static void cmd_set_colour(led_state_t *led_state, led_cmd_type_colour_t *cmd)
 static void cmd_set_flash(led_state_t *led_state, led_cmd_type_flash_t *cmd)
 {
     flash_state_t *flash_state = led_state->flash_state;
-    breathe_state_t *breathe_state = led_state->breathe_state;
 
     if (flash_state) {
         flash_state->duration_steps = cmd->duration_steps;
         flash_state->colour = cmd->colour;
         flash_state->step_counter = 0;
-        if (breathe_state && (breathe_state->period_steps > 0)) {
-            // Make flash more visible if breathing
+        if (led_state->breathe_state &&
+            (led_state->breathe_state->period_steps > 0)) {
+            // Boost against the breathe peak, not the current
+            // instant, so the flash is always sized to beat the
+            // brightest the breathe ever gets.
             boost_flash_intensity(&flash_state->colour,
-                                  breathe_state->colour,
-                                  breathe_state->intensity);
+                                  led_state->colour,
+                                  255);
         }
     }
 }
@@ -534,8 +618,13 @@ static void cmd_set_breathe(led_state_t *led_state, led_cmd_type_breathe_t *cmd)
 
     if (breathe_state) {
         breathe_state->period_steps = cmd->period_steps;
-        breathe_state->colour = led_state->colour;
         breathe_state->step_counter = 0;
+        if (breathe_state->transition_steps == 0) {
+            // No crossfade in flight: seed both ends with the
+            // current base colour so the first breath is correct.
+            breathe_state->colour_from = led_state->colour;
+            breathe_state->colour_to   = led_state->colour;
+        }
     }
 }
 
@@ -1120,8 +1209,12 @@ int32_t fgr_ws2812_led_flash(void *handle, int32_t led,
 
         err = -ESP_ERR_INVALID_ARG;
         if (handle) {
-           // Convert milliseconds to steps (rounded up)
+            // Convert milliseconds to steps (rounded up), enforcing
+            // a minimum so the ease curve is traversed smoothly.
             uint32_t steps = (duration_ms + LED_STEP_DURATION_MS - 1) / LED_STEP_DURATION_MS;
+            if (steps < FGR_WS2812_FLASH_MIN_STEPS) {
+                steps = FGR_WS2812_FLASH_MIN_STEPS;
+            }
             chain_t *chain = (chain_t *) handle;
             // Allocate memory if necessary
             if (led >= 0) {

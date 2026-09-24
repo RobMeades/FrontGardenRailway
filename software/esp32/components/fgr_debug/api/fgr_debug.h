@@ -37,7 +37,7 @@ extern "C" {
 
 #ifndef FGR_DEBUG_LED_SHORT_MS
 // Standard short duration for an LED lash.
-#  define FGR_DEBUG_LED_SHORT_MS 250
+#  define FGR_DEBUG_LED_SHORT_MS 400
 #endif
 
 #ifndef FGR_DEBUG_LED_LONG_MS
