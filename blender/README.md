@@ -32,6 +32,8 @@ The cover should be printed in ASA, fastest speed, 15% in-fill, no supports requ
 
 See [here](https://www.meades.org/railways/garden/garden.html#junction_box_cover) for the cover and gasket in use.
 
+Also included are two bungs which fit into the end of the connector flying lead when not in use (`junction_box_cable_bung_xxmm_diameter.stl`), two because it turns out that there are different sizes of waterproof connector.  These should be printed in the same way as the cover.
+
 ## `viaduct_final`
 The contents of the [viaduct_final](/viaduct_final) directory are the final design of the viaduct; the moulds and related parts that were eventually printed.  Again, `.stl` exports are also included, with a Blender scale factor of 30.48.
 
